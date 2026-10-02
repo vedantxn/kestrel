@@ -10,7 +10,8 @@
   "workspaces": [
     "packages/*",
     "apps/*",
-    "runtime/*"
+    "runtime/*",
+    "bench/*"
   ],
   "scripts": {
     "build": "tsc -b",

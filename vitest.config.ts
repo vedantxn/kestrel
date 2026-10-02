@@ -6,6 +6,8 @@ export default defineConfig({
       "packages/*/src/**/*.test.ts",
       "apps/*/src/**/*.test.ts",
       "runtime/*/src/**/*.test.ts",
+      "bench/*/src/**/*.test.ts",
+      "integration/**/*.test.ts",
     ],
     globalSetup: ["apps/api/src/test/global-setup.ts"],
     // The API tests share one Postgres database, so files run one at a time.
