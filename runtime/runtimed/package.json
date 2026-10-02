@@ -1,0 +1,20 @@
+{
+  "name": "@kestrel/runtimed",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "bundle": "esbuild src/main.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/runtimed.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\""
+  },
+  "dependencies": {
+    "ws": "^8.22.0",
+    "zod": "^4.6.5",
+    "@kestrel/contracts": "*"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2"
+  }
+}
