@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: kestrel
+          POSTGRES_PASSWORD: kestrel
+          POSTGRES_DB: kestrel_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kestrel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Used by the control plane's tests from WP5 on; real row locks need a real Postgres.
+      DATABASE_URL: postgresql://kestrel:kestrel@localhost:5432/kestrel_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - name: Generated OpenAPI is committed
+        run: |
+          npm run openapi
+          git diff --exit-code docs/api/openapi.json
