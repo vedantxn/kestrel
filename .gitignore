@@ -16,3 +16,7 @@ packages/db/src/generated/
 # declaration files are only ever build output
 apps/**/src/**/*.d.ts
 packages/**/src/**/*.d.ts
+apps/**/src/**/*.js
+apps/**/src/**/*.js.map
+packages/**/src/**/*.js
+packages/**/src/**/*.js.map
