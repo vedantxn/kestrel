@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import { copyCertificate, findCaddyPair } from "./cert-copy.js";
 import {
   Firewall,
+  chainRestoreScript,
   expectedChainRules,
   type Exec,
   type FirewallConfig,
@@ -40,7 +41,24 @@ function fakeIptables() {
   ]);
   const v6 = new Map<string, string[]>([["INPUT", []]]);
   const log: string[] = [];
-  const exec: Exec = async (cmd, args) => {
+  const history: string[][] = [];
+  const exec: Exec = async (cmd, args, input) => {
+    if (cmd === "iptables-restore") {
+      // One transaction: the chain is replaced in a single step, so it is never observed empty.
+      for (const line of (input ?? "").split("\n")) {
+        if (line.startsWith(":")) {
+          const c = line.slice(1).split(" ")[0] as string;
+          if (!chains.has(c)) chains.set(c, []);
+        } else if (line.startsWith("-F ")) {
+          chains.set(line.slice(3), []);
+        } else if (line.startsWith("-A ")) {
+          const c = line.split(" ")[1] as string;
+          chains.get(c)!.push(line);
+        }
+      }
+      history.push([...(chains.get("KESTREL-IN-a") ?? [])]);
+      return { code: 0, stdout: "", stderr: "" };
+    }
     const table = cmd === "ip6tables" ? v6 : chains;
     const a = args.slice(2); // drop "-w 5"
     log.push(`${cmd} ${a.join(" ")}`);
@@ -105,7 +123,7 @@ function fakeIptables() {
     }
     return no();
   };
-  return { exec, chains, v6, log };
+  return { exec, chains, v6, log, history };
 }
 
 describe("firewall (N2-N4, G17)", () => {
@@ -191,6 +209,38 @@ describe("firewall (N2-N4, G17)", () => {
       true,
     );
     expect((await new Firewall(cfg, f.exec).verify()).ok).toBe(true);
+  });
+
+  it("installs the chain in one transaction, never leaving it empty", async () => {
+    const f = fakeIptables();
+    const fw = new Firewall(cfg, f.exec);
+    await fw.ensure();
+    await fw.ensure();
+    // every observed state of the chain is the complete rule set; none is a partial or empty one
+    expect(f.history.every((h) => h.length === 3)).toBe(true);
+    expect(f.log.some((l) => /^iptables -F /.test(l))).toBe(false);
+    const script = chainRestoreScript(cfg);
+    expect(
+      script.startsWith("*filter\n:KESTREL-IN-a - [0:0]\n-F KESTREL-IN-a\n"),
+    ).toBe(true);
+    expect(script.trim().endsWith("COMMIT")).toBe(true);
+  });
+
+  it("checks order, not just presence: a preceding ACCEPT in DOCKER-USER or ip6tables is drift", async () => {
+    const f = fakeIptables();
+    const fw = new Firewall(cfg, f.exec);
+    await fw.ensure();
+    expect((await fw.verify()).ok).toBe(true);
+    f.chains.get("DOCKER-USER")!.unshift("-A DOCKER-USER -j ACCEPT");
+    expect((await fw.verify()).problems.join()).toMatch(
+      /DOCKER-USER accepts or returns before dropping/,
+    );
+    f.chains.get("DOCKER-USER")!.shift();
+    expect((await fw.verify()).ok).toBe(true);
+    f.v6.get("INPUT")!.unshift("-A INPUT -j ACCEPT");
+    expect((await fw.verify()).problems.join()).toMatch(
+      /ip6tables accepts before dropping/,
+    );
   });
 
   it("fails loudly if a command fails", async () => {

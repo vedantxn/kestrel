@@ -46,6 +46,8 @@ async function readLimited(res: Response): Promise<string> {
 }
 
 export class HttpRuntimeClient implements RuntimeClient {
+  constructor(private readonly port: number = RUNTIME_PORTS.control) {}
+
   private async call<T>(
     address: string,
     token: string,
@@ -55,18 +57,17 @@ export class HttpRuntimeClient implements RuntimeClient {
     body: unknown,
     timeoutMs: number,
   ): Promise<T> {
-    const res = await fetch(
-      `http://${address}:${RUNTIME_PORTS.control}${path}`,
-      {
-        method,
-        headers: {
-          authorization: `Bearer ${token}`,
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+    const res = await fetch(`http://${address}:${this.port}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
-    );
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+      // A container must not be able to send this root process to another address with a redirect.
+      redirect: "error",
+    });
     const text = await readLimited(res);
     if (!res.ok) throw new Error(`runtime ${path}: ${res.status}`);
     return schema.parse(JSON.parse(text));

@@ -28,8 +28,10 @@ if (failpoints.anyActive)
 
 const secret = readFileSync(env.NODE_SECRET_FILE, "utf8").trim();
 const store = new Store(env.STORE_PATH);
+// A hung Docker call must not wedge a teardown (and, with it, shutdown) forever.
 const docker = new DockerodeDriver(env.NODE_ID, env.NETWORK, {
   socketPath: env.DOCKER_SOCKET,
+  timeout: 60_000,
 });
 await docker.ensureNetwork({
   name: env.NETWORK,
@@ -132,15 +134,23 @@ void (async () => {
 // G16: keep a copy of Caddy's certificate where the gateway can read it.
 if (env.CADDY_DATA && env.PUBLIC_HOSTNAME && env.TLS_DIR) {
   const copy = (): void => {
-    const r = copyCertificate({
-      caddyData: env.CADDY_DATA!,
-      hostname: env.PUBLIC_HOSTNAME!,
-      outDir: env.TLS_DIR!,
-      ...(owner ? { owner } : {}),
-    });
-    if (r.copied) log.info("copied the certificate for the gateway");
-    else if (r.reason !== "unchanged")
-      log.debug({ reason: r.reason }, "certificate not copied");
+    // A failure here (a full disk, a bad directory) must never take down a root process that is running sessions.
+    try {
+      const r = copyCertificate({
+        caddyData: env.CADDY_DATA!,
+        hostname: env.PUBLIC_HOSTNAME!,
+        outDir: env.TLS_DIR!,
+        ...(owner ? { owner } : {}),
+      });
+      if (r.copied) log.info("copied the certificate for the gateway");
+      else if (r.reason !== "unchanged")
+        log.debug({ reason: r.reason }, "certificate not copied");
+    } catch (e) {
+      log.warn(
+        { err: e instanceof Error ? e.message : String(e) },
+        "could not copy the certificate; will retry",
+      );
+    }
   };
   copy();
   setInterval(copy, 30_000).unref();

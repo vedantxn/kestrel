@@ -1,6 +1,5 @@
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { createInterface } from "node:readline";
 import {
   GatewayMessage,
   type AgentMessage,
@@ -71,35 +70,56 @@ export class GatewayHub {
   private accept(s: Socket): void {
     this.clients.set(s, null);
     s.on("error", () => undefined);
-    const rl = createInterface({ input: s, crlfDelay: Infinity });
-    rl.on("error", () => undefined);
-    rl.on("line", (line) => {
-      if (line.length > MAX_FRAME_BYTES) return s.destroy();
-      const m = decodeLine(GatewayMessage, line);
-      if (!m) {
-        this.o.log.warn("ignoring a malformed message from a gateway");
-        return;
+    // Frames are newline-delimited JSON with a hard cap enforced on the bytes as they arrive, so a
+    // peer that never sends a newline cannot make this root process buffer without bound.
+    let buf = "";
+    s.setEncoding("utf8");
+    s.on("data", (chunk: string) => {
+      buf += chunk;
+      let i: number;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (line.length > MAX_FRAME_BYTES) return void s.destroy();
+        this.onLine(s, line);
       }
-      if (m.type === "hello") {
-        this.clients.set(s, m.gatewayId);
-        s.write(
-          encodeLine({
-            type: "routes",
-            routes: this.o.routes(),
-          } satisfies AgentMessage),
-        );
-        this.o.onAttachments(m.gatewayId, m.attachments);
-      } else {
-        const id = this.clients.get(s);
-        if (id) this.o.onAttachments(id, m.attachments);
-      }
+      if (buf.length > MAX_FRAME_BYTES) s.destroy();
     });
     s.on("close", () => {
       const id = this.clients.get(s);
       this.clients.delete(s);
-      rl.close();
-      if (id) this.o.onGone(id);
+      // A connection that was superseded by a newer one with the same id must not take its successor's attachments with it.
+      if (id && ![...this.clients.values()].includes(id)) this.o.onGone(id);
     });
+  }
+
+  private onLine(s: Socket, line: string): void {
+    const m = decodeLine(GatewayMessage, line);
+    if (!m) {
+      this.o.log.warn("ignoring a malformed message from a gateway");
+      return;
+    }
+    const known = this.clients.get(s);
+    if (m.type === "hello") {
+      // An id is fixed for the life of a connection: a second hello cannot rename it and orphan the first id's attachments.
+      if (known) return void s.destroy();
+      // A gateway that restarts reuses its id while its old connection may still be open: the new one wins.
+      for (const [other, id] of this.clients)
+        if (other !== s && id === m.gatewayId) {
+          this.clients.set(other, null);
+          other.destroy();
+        }
+      this.clients.set(s, m.gatewayId);
+      s.write(
+        encodeLine({
+          type: "routes",
+          routes: this.o.routes(),
+        } satisfies AgentMessage),
+      );
+      this.o.onAttachments(m.gatewayId, m.attachments);
+    } else if (known) {
+      this.o.onAttachments(known, m.attachments);
+    }
   }
 
   private broadcast(m: AgentMessage): void {

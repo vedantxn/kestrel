@@ -105,6 +105,9 @@ export class NodeAgent {
   private tasks = new Set<Promise<unknown>>();
   /** Pooled browsers being created, not yet in the store: counted so a second refill cannot over-fill the pool. */
   private spawning = 0;
+  /** When a stuck teardown may next be retried. */
+  private retryAt = new Map<string, number>();
+  private syncing: Promise<void> | null = null;
   private gatewayAttachments = new Map<string, Map<string, number>>();
   private denialCursor = { epoch: "", seq: 0 };
   private timers: NodeJS.Timeout[] = [];
@@ -188,13 +191,22 @@ export class NodeAgent {
         // Its true state is unknowable: tear it down, never resume it (G9).
         this.spawn(this.teardown(b.sessionId, "runtime_crash"));
       } else {
-        // A ready session survives an agent restart. Nobody is attached until the gateways say so,
-        // so the idle clock restarts from now; a gateway's hello will stop it again.
+        // A ready session survives an agent restart. What is attached comes from the gateways: any that
+        // said hello before boot finished are already counted (they will not say it again), and the idle
+        // clock restarts only for sessions nobody is attached to.
+        const n = this.attachmentTotals().get(b.sessionId) ?? 0;
         this.store.updateBinding(b.sessionId, {
-          attached: 0,
-          idleAt: now + b.idleTimeoutMs,
+          attached: n,
+          idleAt: n > 0 ? null : now + b.idleTimeoutMs,
         });
       }
+    }
+    // A pooled browser left `starting` by a crash was never waited on and never will be: remove it.
+    for (const p of this.store
+      .allPool()
+      .filter((p) => p.state === "starting")) {
+      this.store.deletePool(p.containerId);
+      await this.d.docker.remove(p.containerId).catch(() => undefined);
     }
     await this.idle();
     await this.reconcile();
@@ -315,7 +327,7 @@ export class NodeAgent {
     for (let attempt = 0; attempt <= this.c.startRetries; attempt++) {
       let held: { containerId: string; address: string } | null = null;
       try {
-        const got = await this.acquire();
+        const got = await this.acquire(id);
         held = { containerId: got.containerId, address: got.address };
         this.store.updateBinding(id, {
           containerId: got.containerId,
@@ -375,7 +387,15 @@ export class NodeAgent {
         // A process that dies at a failpoint leaves its state exactly as it is: no cleanup here.
         if (e instanceof FailpointError) throw e;
         if (e instanceof StartAborted) {
-          // Stopped while starting: the stop's own teardown removes the container.
+          // Stopped while starting. The stop's teardown may have run before this container was
+          // recorded, so this start removes what it holds: nothing else will.
+          if (held) {
+            await this.d.egress
+              .clearPolicy(held.address)
+              .catch(() => undefined);
+            await this.d.docker.remove(held.containerId).catch(() => undefined);
+            this.d.hub.removeRoute(id);
+          }
           return { result: "failed", reason: "stopped while starting" };
         }
         lastError = e instanceof Error ? e.message : String(e);
@@ -409,24 +429,44 @@ export class NodeAgent {
    * An admitted start is never refused for lack of a pooled browser (G6): take a hot one; else
    * wait for one that is still starting; else make one. The last two are the cold path.
    */
-  private async acquire(): Promise<{
+  private async acquire(sessionId: string): Promise<{
     containerId: string;
     address: string;
     token: string;
     path: "hot" | "cold";
   }> {
+    // The container is recorded against the session the moment it is ours, before anything slow:
+    // reconciliation must never be able to judge a container that a start is still waiting on.
+    const bind = (
+      containerId: string,
+      address: string,
+      token: string,
+      path: "hot" | "cold",
+    ) => {
+      this.store.updateBinding(sessionId, {
+        containerId,
+        address,
+        controlToken: token,
+        startPath: path,
+      });
+      return { containerId, address, token, path };
+    };
+
+    // A hot one. `takePool` succeeds for exactly one caller, so two starts can never share a container.
     for (const p of this.store.allPool().filter((p) => p.state === "hot")) {
-      this.store.deletePool(p.containerId);
+      if (!this.store.takePool(p.containerId)) continue;
+      const taken = bind(p.containerId, p.address, p.controlToken, "hot");
       const info = await this.d.docker.inspect(p.containerId).catch(() => null);
-      if (info?.running)
-        return {
-          containerId: p.containerId,
-          address: p.address,
-          token: p.controlToken,
-          path: "hot",
-        };
+      if (info?.running) return taken;
+      this.store.updateBinding(sessionId, {
+        containerId: null,
+        address: null,
+        controlToken: null,
+        startPath: null,
+      });
       await this.d.docker.remove(p.containerId).catch(() => undefined);
     }
+    // One still starting: wait for it, and take it only if nobody else did.
     for (const p of this.store
       .allPool()
       .filter((p) => p.state === "starting")) {
@@ -436,15 +476,13 @@ export class NodeAgent {
         const again = this.store
           .allPool()
           .find((x) => x.containerId === p.containerId && x.state === "hot");
-        if (again) {
-          this.store.deletePool(again.containerId);
-          return {
-            containerId: again.containerId,
-            address: again.address,
-            token: again.controlToken,
-            path: "cold",
-          };
-        }
+        if (again && this.store.takePool(again.containerId))
+          return bind(
+            again.containerId,
+            again.address,
+            again.controlToken,
+            "cold",
+          );
       }
     }
     // Cold. Free a slot's worth of pool first if the pool is using the room: sessions have priority.
@@ -452,24 +490,23 @@ export class NodeAgent {
     const pool = this.store.allPool();
     if (pool.length > Math.max(0, spare - 1)) {
       const victim = pool[pool.length - 1];
-      if (victim) {
-        this.store.deletePool(victim.containerId);
+      if (victim && this.store.takePool(victim.containerId))
         await this.d.docker.remove(victim.containerId).catch(() => undefined);
-      }
     }
     const created = await this.createContainer("session");
-    if (
-      !(await this.waitReady(created.info.address as string, created.token))
-    ) {
-      await this.d.docker.remove(created.info.id).catch(() => undefined);
+    const info = created.info;
+    const bound = bind(info.id, info.address as string, created.token, "cold");
+    if (!(await this.waitReady(info.address as string, created.token))) {
+      this.store.updateBinding(sessionId, {
+        containerId: null,
+        address: null,
+        controlToken: null,
+        startPath: null,
+      });
+      await this.d.docker.remove(info.id).catch(() => undefined);
       throw new Error("the browser did not become ready");
     }
-    return {
-      containerId: created.info.id,
-      address: created.info.address as string,
-      token: created.token,
-      path: "cold",
-    };
+    return bound;
   }
 
   private async createContainer(
@@ -603,15 +640,7 @@ export class NodeAgent {
       this.store.updateBinding(id, { state: "stopping", stopReason: reason });
     this.d.hub.removeRoute(id);
     await this.d.failpoints.hit("node.stop.after_route_removed");
-    if (b.address) {
-      await this.d.egress.clearPolicy(b.address).catch((e) => {
-        // If the egress gateway is down it holds no policies and refuses everything, so removing the container is still safe.
-        this.d.log.warn(
-          { session: id, err: e instanceof Error ? e.message : String(e) },
-          "could not clear the egress policy",
-        );
-      });
-    }
+    if (b.address) await this.clearPolicyBeforeRemoval(id, b.address);
     await this.d.failpoints.hit("node.stop.after_policy_cleared");
     if (b.containerId) await this.d.docker.remove(b.containerId);
     await this.d.failpoints.hit("node.stop.after_container_removed");
@@ -619,8 +648,8 @@ export class NodeAgent {
     const seconds = b.readyAt
       ? Math.max(0, (this.now() - b.readyAt) / 1000)
       : 0;
-    this.store.deleteBinding(id);
-    this.store.enqueueReport((rid) => ({
+    // The binding goes and the report is queued in one transaction: a crash cannot lose the report.
+    this.store.finishBinding(id, (rid) => ({
       id: rid,
       at: new Date(this.now()).toISOString(),
       kind: "removed",
@@ -631,12 +660,65 @@ export class NodeAgent {
     this.gatewayAttachmentsDrop(id);
   }
 
+  /**
+   * An address is never free while a policy for it remains (G10), so the policy is cleared before
+   * the container goes, and a failed clear is retried. The one case it may be skipped is an egress
+   * gateway that cannot be reached at all: it then holds no policies and refuses everything (N13),
+   * so removing the container is still safe. If it is up but will not clear, the teardown fails and
+   * is retried, with the container left in place.
+   */
+  private async clearPolicyBeforeRemoval(
+    id: string,
+    address: string,
+  ): Promise<void> {
+    let last: unknown;
+    for (let i = 0; i < 3; i++) {
+      try {
+        await this.d.egress.clearPolicy(address);
+        return;
+      } catch (e) {
+        last = e;
+        await new Promise((r) => setTimeout(r, 20 * (i + 1)));
+      }
+    }
+    const reachable = await this.d.egress.health().then(
+      () => true,
+      () => false,
+    );
+    this.d.log.warn(
+      {
+        session: id,
+        reachable,
+        err: last instanceof Error ? last.message : String(last),
+      },
+      "could not clear the egress policy",
+    );
+    if (reachable)
+      throw last instanceof Error
+        ? last
+        : new Error("could not clear the egress policy");
+  }
+
   // --- deadlines (G11) and attachments (G12) --------------------------------------------------
 
   /** Enforce absolute deadlines on this agent's clock. The authority is outside the container. */
   tick(): void {
     const now = this.now();
     for (const b of this.store.allBindings()) {
+      // A teardown that failed (Docker would not remove the container) is not forgotten: try again, at most every 5 s.
+      if (
+        b.state === "stopping" &&
+        !this.teardowns.has(b.sessionId) &&
+        !this.inflight.has(b.sessionId)
+      ) {
+        if ((this.retryAt.get(b.sessionId) ?? 0) <= now) {
+          this.retryAt.set(b.sessionId, now + 5_000);
+          this.spawn(
+            this.teardown(b.sessionId, b.stopReason ?? "runtime_crash"),
+          );
+        }
+        continue;
+      }
       if (b.state !== "ready") continue;
       if (now >= b.maxAt) this.expire(b, "max_lifetime");
       else if (b.idleAt !== null && now >= b.idleAt)
@@ -671,10 +753,15 @@ export class NodeAgent {
     for (const m of this.gatewayAttachments.values()) m.delete(id);
   }
 
-  private applyAttachments(): void {
+  private attachmentTotals(): Map<string, number> {
     const totals = new Map<string, number>();
     for (const m of this.gatewayAttachments.values())
       for (const [id, n] of m) totals.set(id, (totals.get(id) ?? 0) + n);
+    return totals;
+  }
+
+  private applyAttachments(): void {
+    const totals = this.attachmentTotals();
     const now = this.now();
     for (const b of this.store.allBindings()) {
       if (b.state !== "ready") continue;
@@ -685,7 +772,7 @@ export class NodeAgent {
         idleAt: n > 0 ? null : now + b.idleTimeoutMs,
       };
       this.store.updateBinding(b.sessionId, patch);
-      this.store.enqueueReport((id) => ({
+      this.store.enqueueEvent((id) => ({
         id,
         at: new Date(now).toISOString(),
         kind: "event",
@@ -722,8 +809,15 @@ export class NodeAgent {
         this.inflight.has(b.sessionId)
       )
         continue;
-      const c = byId.get(b.containerId);
+      let c = byId.get(b.containerId);
       if (c?.running) continue;
+      // The listing may be older than the container (or this binding): look again before judging it gone.
+      c =
+        (await this.d.docker.inspect(b.containerId).catch(() => null)) ??
+        undefined;
+      if (c?.running) continue;
+      if (!this.store.getBinding(b.sessionId) || this.inflight.has(b.sessionId))
+        continue;
       const reason: EndReason = c?.oomKilled ? "oom" : "browser_crash";
       this.d.log.warn(
         { session: b.sessionId, reason },
@@ -773,6 +867,16 @@ export class NodeAgent {
    * so. Also removes a policy no ready session owns, so an address is never left with a way out.
    */
   async syncEgress(): Promise<void> {
+    // One at a time: two overlapping syncs, or a sync racing a teardown, could re-create a policy for an address that was just freed.
+    while (this.syncing) await this.syncing.catch(() => undefined);
+    const run = this.doSyncEgress().finally(() => {
+      this.syncing = null;
+    });
+    this.syncing = run;
+    return run;
+  }
+
+  private async doSyncEgress(): Promise<void> {
     const health = await this.d.egress.health();
     const have = new Map(
       (await this.d.egress.list()).policies.map((p) => [p.ip, p]),
@@ -790,6 +894,10 @@ export class NodeAgent {
     for (const [ip, b] of want) {
       const p = have.get(ip);
       if (p && p.sessionId === b.sessionId) continue;
+      // The session may have started to end while this sync was running: do not give its address a policy back.
+      const cur = this.store.getBinding(b.sessionId);
+      if (!cur || cur.state === "stopping" || this.teardowns.has(b.sessionId))
+        continue;
       await this.d.egress.setPolicy(ip, {
         sessionId: b.sessionId as never,
         ...(b.policy.allow ? { allow: b.policy.allow } : {}),
@@ -846,7 +954,8 @@ export class NodeAgent {
       );
       return;
     }
-    if (reply.epoch !== this.store.epoch) {
+    // An epoch never goes back: a stale or odd reply must not make this node refuse the API's starts.
+    if (reply.epoch > this.store.epoch) {
       this.d.log.info(
         { from: this.store.epoch, to: reply.epoch },
         "adopting a new epoch",
@@ -860,23 +969,28 @@ export class NodeAgent {
   }
 
   async flushReports(): Promise<void> {
-    const reports = this.store.pendingReports(100);
-    if (reports.length === 0) return;
-    try {
-      const res = await this.d.api.reports({
-        nodeId: this.c.nodeId as ReportsRequest["nodeId"],
-        epoch: this.store.epoch,
-        reports,
-      });
-      this.store.ackReports(res.acked);
-    } catch (e) {
-      this.d.log.warn(
-        {
-          err: e instanceof Error ? e.message : String(e),
-          pending: reports.length,
-        },
-        "could not send reports; they are kept",
-      );
+    // Drain a few batches per call, so a backlog does not take a heartbeat per hundred reports to clear.
+    for (let batch = 0; batch < 5; batch++) {
+      const reports = this.store.pendingReports(100);
+      if (reports.length === 0) return;
+      try {
+        const res = await this.d.api.reports({
+          nodeId: this.c.nodeId as ReportsRequest["nodeId"],
+          epoch: this.store.epoch,
+          reports,
+        });
+        this.store.ackReports(res.acked);
+        if (res.acked.length === 0) return;
+      } catch (e) {
+        this.d.log.warn(
+          {
+            err: e instanceof Error ? e.message : String(e),
+            pending: reports.length,
+          },
+          "could not send reports; they are kept",
+        );
+        return;
+      }
     }
   }
 
@@ -918,7 +1032,11 @@ export class NodeAgent {
       fn: () => Promise<void> | void,
       name: string,
     ): void => {
+      let running = false;
       const t = setInterval(() => {
+        // Skip a tick if the last one has not finished: a slow Docker or API must not pile up work.
+        if (running) return;
+        running = true;
         Promise.resolve()
           .then(fn)
           .catch((e) =>
@@ -926,7 +1044,10 @@ export class NodeAgent {
               { loop: name, err: e instanceof Error ? e.message : String(e) },
               "loop iteration failed",
             ),
-          );
+          )
+          .finally(() => {
+            running = false;
+          });
       }, ms);
       t.unref();
       this.timers.push(t);

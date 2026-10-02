@@ -1,4 +1,4 @@
-import { X509Certificate, createPrivateKey } from "node:crypto";
+import { X509Certificate, createPrivateKey, randomBytes } from "node:crypto";
 import {
   chownSync,
   closeSync,
@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   writeFileSync,
 } from "node:fs";
@@ -39,9 +40,17 @@ export function findCaddyPair(
   caddyData: string,
   hostname: string,
 ): { cert: string; key: string } | null {
+  // The hostname becomes part of a path: only an ordinary hostname may.
+  if (
+    !/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/i.test(hostname) ||
+    hostname.includes("..")
+  )
+    return null;
   const root = join(caddyData, "caddy", "certificates");
   let issuers: string[];
+  let realRoot: string;
   try {
+    realRoot = realpathSync(root);
     issuers = readdirSync(root);
   } catch {
     return null;
@@ -50,6 +59,11 @@ export function findCaddyPair(
     const cert = join(root, issuer, hostname, `${hostname}.crt`);
     const key = join(root, issuer, hostname, `${hostname}.key`);
     try {
+      // O_NOFOLLOW covers only the last component, so also require that the directories on the way,
+      // once resolved, are still inside Caddy's certificate tree (a symlinked issuer directory is not).
+      for (const f of [cert, key])
+        if (!realpathSync(f).startsWith(realRoot + "/"))
+          throw new Error("outside the certificate tree");
       readRegular(cert);
       readRegular(key);
       return { cert, key };
@@ -90,6 +104,8 @@ export function copyCertificate(opts: {
     };
   }
   mkdirSync(opts.outDir, { recursive: true, mode: 0o750 });
+  // The gateway must be able to enter the directory to read what is in it.
+  if (opts.owner) chownSync(opts.outDir, opts.owner.uid, opts.owner.gid);
   const same = (name: string, data: string): boolean => {
     try {
       return readFileSync(join(opts.outDir, name), "utf8") === data;
@@ -105,8 +121,25 @@ export function copyCertificate(opts: {
     ["key.pem", key, 0o600],
     ["cert.pem", cert, 0o644],
   ] as const) {
-    const tmp = join(opts.outDir, `.${name}.${process.pid}.tmp`);
-    writeFileSync(tmp, data, { mode });
+    // An unpredictable name, created exclusively and without following a link: nothing planted at the
+    // temporary path can receive the private key.
+    const tmp = join(
+      opts.outDir,
+      `.${name}.${randomBytes(6).toString("hex")}.tmp`,
+    );
+    const fd = openSync(
+      tmp,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      mode,
+    );
+    try {
+      writeFileSync(fd, data);
+    } finally {
+      closeSync(fd);
+    }
     if (opts.owner) chownSync(tmp, opts.owner.uid, opts.owner.gid);
     renameSync(tmp, join(opts.outDir, name));
   }

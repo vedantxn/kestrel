@@ -1,3 +1,4 @@
+import { chmodSync, closeSync, existsSync, openSync } from "node:fs";
 import Database from "better-sqlite3";
 import type {
   EndReason,
@@ -89,6 +90,12 @@ export class Store {
   readonly db: Database.Database;
 
   constructor(path: string) {
+    // The file holds session proofs and control tokens (threat model G-14): create it owner-only before
+    // SQLite does, so it and its -wal and -shm files, which inherit its mode, are never world-readable.
+    if (path !== ":memory:") {
+      if (!existsSync(path)) closeSync(openSync(path, "a", 0o600));
+      chmodSync(path, 0o600);
+    }
     this.db = new Database(path);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = FULL");
@@ -249,6 +256,15 @@ export class Store {
     this.db.prepare("DELETE FROM pool WHERE container_id = ?").run(containerId);
   }
 
+  /** Take a pooled container for a session. True only for the one caller whose delete removed the row. */
+  takePool(containerId: string): boolean {
+    return (
+      this.db
+        .prepare("DELETE FROM pool WHERE container_id = ?")
+        .run(containerId).changes === 1
+    );
+  }
+
   // --- remembered stops (G14) -----------------------------------------------------------------
 
   rememberStop(sessionId: string, until: number): void {
@@ -302,6 +318,29 @@ export class Store {
       }
     ).n;
   }
+
+  /**
+   * Delete a binding and queue its `removed` report in one transaction, so a crash cannot lose the
+   * report (and leave the API to guess why the session ended).
+   */
+  finishBinding(sessionId: string, make: (id: string) => Report): Report {
+    return this.db.transaction(() => {
+      this.deleteBinding(sessionId);
+      return this.enqueueReport(make);
+    })();
+  }
+
+  /**
+   * Queue an event report unless the queue is already full. Events are the only reports that may
+   * be dropped: a `removed` report is never dropped, and never waits behind more than this many events.
+   */
+  enqueueEvent(make: (id: string) => Report): Report | null {
+    if (this.pendingReportCount() >= Store.MAX_PENDING_EVENTS) return null;
+    return this.enqueueReport(make);
+  }
+
+  /** Event reports are dropped beyond this many pending (a flapping client must not grow the queue without bound). */
+  static readonly MAX_PENDING_EVENTS = 2000;
 
   ackReports(ids: string[]): void {
     const del = this.db.prepare("DELETE FROM reports WHERE id = ?");
