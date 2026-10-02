@@ -12,3 +12,7 @@ coverage/
 .vscode/
 /reports/
 packages/db/src/generated/
+
+# declaration files are only ever build output
+apps/**/src/**/*.d.ts
+packages/**/src/**/*.d.ts
