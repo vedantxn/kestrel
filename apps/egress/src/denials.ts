@@ -17,17 +17,28 @@ interface Window {
   last: Omit<DenialEntry, "seq" | "count" | "at">;
 }
 
+/** A session may produce this many distinct entries per window; the rest are counted under one summary. */
+const DISTINCT_PER_SESSION = 20;
+const MAX_WINDOWS = 5000;
+
 /**
  * N14. A session's owner can see why a page did not load, without a page that hammers a blocked
  * address filling the timeline. The first denial for a (session, host, port, reason) is reported
  * at once; further ones in the next window are counted and reported together when it closes. The
  * node agent polls with the last `seq` it saw. `epoch` changes if this process restarts.
+ *
+ * The hostnames are chosen by a hostile page, so the log is bounded against it: one session gets a
+ * fixed number of distinct entries per window (more are folded into a single `*` entry), the table
+ * of windows has a ceiling, and cleaning up runs on a timer rather than on every denial. One
+ * session therefore cannot push another's events out of the ring or slow the proxy down.
  */
 export class DenialLog {
   readonly epoch = randomBytes(6).toString("hex");
   private seq = 0;
   private ring: DenialEntry[] = [];
   private windows = new Map<string, Window>();
+  private budget = new Map<string, { start: number; used: number }>();
+  private lastSweep = 0;
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -41,16 +52,33 @@ export class DenialLog {
     port: number;
     reason: EgressDenyReason;
   }): void {
-    const key = `${d.sessionId}|${d.host}|${d.port}|${d.reason}`;
     const t = this.now();
-    const w = this.windows.get(key);
+    let key = `${d.sessionId}|${d.host}|${d.port}|${d.reason}`;
+    let entry = d;
+    let w = this.windows.get(key);
+    if (!w) {
+      // A new distinct entry: only within this session's budget, and while there is room in the table.
+      const b = this.budget.get(d.sessionId);
+      const fresh = !b || t - b.start >= this.windowMs;
+      const used = fresh ? 0 : (b as { used: number }).used;
+      if (used >= DISTINCT_PER_SESSION || this.windows.size >= MAX_WINDOWS) {
+        entry = { ...d, host: "*", port: 0 };
+        key = `${d.sessionId}|*|0|${d.reason}`;
+        w = this.windows.get(key);
+      } else {
+        this.budget.set(d.sessionId, {
+          start: fresh ? t : (b as { start: number }).start,
+          used: used + 1,
+        });
+      }
+    }
     if (!w || t - w.start >= this.windowMs) {
-      this.emit(d, 1 + (w?.pending ?? 0), t);
-      this.windows.set(key, { start: t, pending: 0, last: d });
+      this.emit(entry, 1 + (w?.pending ?? 0), t);
+      this.windows.set(key, { start: t, pending: 0, last: entry });
     } else {
       w.pending++;
     }
-    if (this.windows.size > 5000) this.sweep(t);
+    this.sweep(t);
   }
 
   /** Entries after `seq`, closing any windows that have ended. */
@@ -63,14 +91,18 @@ export class DenialLog {
         w.start = t;
       }
     }
-    this.sweep(t);
+    this.sweep(t, true);
     return this.ring.filter((e) => e.seq > after);
   }
 
-  private sweep(t: number): void {
+  private sweep(t: number, force = false): void {
+    if (!force && t - this.lastSweep < 1000) return;
+    this.lastSweep = t;
     for (const [key, w] of this.windows)
       if (w.pending === 0 && t - w.start > 2 * this.windowMs)
         this.windows.delete(key);
+    for (const [id, b] of this.budget)
+      if (t - b.start > 2 * this.windowMs) this.budget.delete(id);
   }
 
   private emit(

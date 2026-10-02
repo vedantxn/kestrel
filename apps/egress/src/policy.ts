@@ -11,7 +11,14 @@ export interface Entry {
   allow: string[] | undefined;
   deny: string[];
   connectionCap: number;
-  open: Set<Socket>;
+  /**
+   * Connections counted against the cap (N11): reserved before any asynchronous work, so a burst
+   * cannot get past it while its requests are still resolving or dialling, and held until the
+   * tunnel or request is finished.
+   */
+  active: number;
+  /** Every socket belonging to this policy, so clearing it can cut them at once (G10). */
+  sockets: Set<Socket>;
 }
 
 /**
@@ -36,11 +43,13 @@ export class PolicyStore {
       allow: p.allow,
       deny: p.deny ?? [],
       connectionCap: p.connectionCap ?? LIMITS.egressConnectionCapPerSession,
-      // A policy update for the same session keeps its open tunnels; a different session at the
-      // same address is a different tenant, so the old one's tunnels are cut.
-      open:
+      // A policy update for the same session keeps its connections; a different session at the same
+      // address is a different tenant, so the old one's are cut.
+      active:
+        existing && existing.sessionId === p.sessionId ? existing.active : 0,
+      sockets:
         existing && existing.sessionId === p.sessionId
-          ? existing.open
+          ? existing.sockets
           : this.cut(existing),
     });
   }
@@ -54,7 +63,7 @@ export class PolicyStore {
   }
 
   private cut(e: Entry | undefined): Set<Socket> {
-    for (const s of e?.open ?? []) s.destroy();
+    for (const s of e?.sockets ?? []) s.destroy();
     return new Set();
   }
 
