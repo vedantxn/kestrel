@@ -18,6 +18,9 @@
     },
     {
       "path": "apps/node"
+    },
+    {
+      "path": "apps/egress"
     }
   ]
 }
