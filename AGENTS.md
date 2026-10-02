@@ -1,0 +1,19 @@
+# Kestrel: notes for agents
+
+Kestrel is an open-source cloud browser platform for AI agents. Read `docs/HLD.md` (architecture) and `docs/v1-plan.md` (what is being built now, and in what order) before changing anything. Decisions are in `docs/adr/`; the threat model is `docs/threat-model.md`.
+
+## Rules
+
+- **Contracts first.** Components talk only through `packages/contracts`. Change a contract in its own commit, say which consumers it affects, and bump `CONTRACTS_VERSION`. Run `npm run openapi` after changing a public schema; CI fails if `docs/api/openapi.json` is stale.
+- **Everything inside a session container is untrusted.** Anything read back from one is hostile input and is validated with a schema.
+- **Every connection to an address a caller chose goes through the egress gateway.**
+- **State changes are conditional updates** ("set to X only if currently Y") and write an event.
+- **Differences from the HLD are listed in `docs/v1-plan.md` section 8.** Nothing else may differ without adding a row there.
+
+## Working
+
+- Node 24, TypeScript strict, npm workspaces (`packages/*`, `apps/*`). Tests sit beside the code as `*.test.ts` (Vitest).
+- `npm run check` runs format, lint, type-check and tests. Run it before committing.
+- Small commits as each piece works; one branch and pull request per work package, merged with a merge commit.
+- Anything needing Docker or Linux networking runs on the AWS host (`bin/host`), not on macOS.
+- Secrets never go in the repo, in images or in Terraform state.
