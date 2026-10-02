@@ -31,3 +31,24 @@ export function matchesHostPattern(pattern: string, host: string): boolean {
     return h.endsWith(p.slice(1)) && h.length > p.length - 1;
   return h === p;
 }
+
+/**
+ * Text that came from a browser (a hostname it tried to reach, for instance) is hostile input. Before it
+ * is stored or logged, control characters, including NUL, which Postgres cannot hold, are replaced.
+ */
+export function sanitizeText(value: string): string {
+  // eslint-disable-next-line no-control-regex -- matching control characters is the point
+  return value.replace(/[\u0000-\u001f\u007f]/g, "\ufffd");
+}
+
+/** `sanitizeText` over every string in a JSON-like value. */
+export function sanitizeDeep<T>(value: T): T {
+  if (typeof value === "string") return sanitizeText(value) as T;
+  if (Array.isArray(value)) return value.map((v) => sanitizeDeep(v)) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [sanitizeText(k), sanitizeDeep(v)]),
+    ) as T;
+  }
+  return value;
+}
