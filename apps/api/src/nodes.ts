@@ -1,5 +1,6 @@
 import {
   TIMINGS,
+  sanitizeDeep,
   type HeartbeatRequest,
   type HeartbeatResponse,
   type RegisterRequest,
@@ -17,10 +18,16 @@ import {
   addEvent,
   beginStop,
   completeStop,
+  isConnectivityError,
+  runTx,
   transition,
+  type Tx,
 } from "./lifecycle.js";
 
 /** C4's repair path: the node tells the API what it holds, and the API tells it what to do about it. */
+
+/** A fence lifts only after this many consecutive clean heartbeats at the new epoch. */
+const CLEAN_HEARTBEATS_TO_UNFENCE = 2;
 
 export async function registerNode(
   ctx: Ctx,
@@ -50,7 +57,8 @@ export async function registerNode(
 
 /**
  * K7 and K10. One transaction per heartbeat, under a lock on the node row so the sweeper and
- * the heartbeat never interleave on one node.
+ * the heartbeat never interleave on one node. The lock is FOR NO KEY UPDATE: a plain FOR UPDATE
+ * conflicts with the foreign-key checks of every session write on this node and deadlocks.
  */
 export async function heartbeat(
   ctx: Ctx,
@@ -58,10 +66,10 @@ export async function heartbeat(
 ): Promise<HeartbeatResponse> {
   ctx.metrics.heartbeats.inc({ node: req.nodeId });
   const now = new Date(ctx.clock.now());
-  const response = await ctx.db.$transaction(async (tx) => {
+  return runTx(ctx, async (tx) => {
     const locked = await tx.$queryRaw<
       { id: string }[]
-    >`SELECT id FROM nodes WHERE id = ${req.nodeId} FOR UPDATE`;
+    >`SELECT id FROM nodes WHERE id = ${req.nodeId} FOR NO KEY UPDATE`;
     if (locked.length === 0)
       throw new AppError(
         "not_found",
@@ -98,17 +106,19 @@ export async function heartbeat(
       }
     }
 
-    // A node that was declared lost stays fenced until it has adopted its new epoch and holds
-    // nothing the API ended or does not know.
-    let { fenced, state } = node;
-    if (
-      node.state === "lost" &&
-      req.epoch === node.epoch &&
-      stop.length === 0 &&
-      unknown.length === 0
-    ) {
-      fenced = false;
-      state = "active";
+    // A node that was declared lost stays fenced until it has adopted its new epoch and has shown,
+    // twice running, that it holds nothing the API ended or does not know. One empty heartbeat is
+    // not enough: an agent that has just restarted may not have reconciled with Docker yet.
+    let { fenced, state, cleanHeartbeats } = node;
+    if (node.state === "lost") {
+      const clean =
+        req.epoch === node.epoch && stop.length === 0 && unknown.length === 0;
+      cleanHeartbeats = clean ? node.cleanHeartbeats + 1 : 0;
+      if (cleanHeartbeats >= CLEAN_HEARTBEATS_TO_UNFENCE) {
+        fenced = false;
+        state = "active";
+        cleanHeartbeats = 0;
+      }
     }
     await tx.node.update({
       where: { id: node.id },
@@ -118,11 +128,15 @@ export async function heartbeat(
         slotsTotal: req.slots.total,
         state,
         fenced,
+        cleanHeartbeats,
         ...(state === "active" && node.state === "lost"
           ? { lostAt: null }
           : {}),
       },
     });
+
+    const heldIds = [...heldUuids.keys()];
+    const settled = state === "active" && !fenced && req.epoch === node.epoch;
 
     // Sessions the API is stopping on this node that the node no longer holds: absence is
     // confirmation. This repairs a lost stop and a lost start. The age floor keeps a heartbeat
@@ -133,11 +147,43 @@ export async function heartbeat(
         nodeId: node.id,
         status: "stopping",
         stoppingAt: { lte: floor },
-        id: { notIn: [...heldUuids.keys()] },
+        id: { notIn: heldIds },
       },
       select: { id: true },
     });
     for (const s of stuck) await completeStop(ctx, tx, s.id, now);
+
+    // A session the API believes is running, that the node has stopped holding without saying so
+    // (a removal report lost for good, or an agent that restarted with an empty store), would
+    // otherwise stay `ready` and keep its slot forever.
+    if (settled) {
+      const absentFloor = new Date(
+        now.getTime() - 3 * TIMINGS.heartbeatIntervalMs,
+      );
+      const vanished = await tx.session.findMany({
+        where: {
+          nodeId: node.id,
+          status: { in: ["ready", "active"] },
+          readyAt: { lte: absentFloor },
+          id: { notIn: heldIds },
+        },
+        select: { id: true },
+      });
+      for (const s of vanished) {
+        await addEvent(
+          tx,
+          s.id,
+          {
+            type: "runtime.crashed",
+            data: { process: "container", exitCode: null, signal: null },
+          },
+          now,
+        );
+        await beginStop(tx, s.id, "runtime_crash", now);
+        await completeStop(ctx, tx, s.id, now);
+        ctx.metrics.sweeper.inc({ action: "vanished" });
+      }
+    }
 
     return {
       epoch: node.epoch,
@@ -146,17 +192,35 @@ export async function heartbeat(
       unknown,
     } satisfies HeartbeatResponse;
   });
-  return response;
 }
 
-/** G15. Reports are idempotent: each carries an id, and a repeated delivery changes nothing. */
+/**
+ * G15. Reports are idempotent: each carries an id, and a repeated delivery changes nothing.
+ * They are also independent: one that cannot be applied (hostile or malformed content from a
+ * container) is logged and acknowledged rather than blocking every report behind it. A failure
+ * of the database itself is different: the batch fails and the node resends it.
+ */
 export async function ingestReports(
   ctx: Ctx,
   req: ReportsRequest,
 ): Promise<ReportsResponse> {
   const acked: string[] = [];
   for (const report of req.reports) {
-    await ctx.db.$transaction((tx) => applyReport(ctx, tx, req.nodeId, report));
+    try {
+      await runTx(ctx, (tx) => applyReport(ctx, tx, req.nodeId, report));
+    } catch (e) {
+      if (isConnectivityError(e)) throw e;
+      ctx.log.error(
+        {
+          node: req.nodeId,
+          report: report.id,
+          kind: report.kind,
+          err: e instanceof Error ? e.message : String(e),
+        },
+        "dropping a report that cannot be applied",
+      );
+      ctx.metrics.sweeper.inc({ action: "report_dropped" });
+    }
     acked.push(report.id);
   }
   return { acked };
@@ -164,10 +228,10 @@ export async function ingestReports(
 
 async function applyReport(
   ctx: Ctx,
-  tx: Parameters<Parameters<Ctx["db"]["$transaction"]>[0]>[0],
+  tx: Tx,
   nodeId: string,
   r: Report,
-) {
+): Promise<void> {
   const uuid = sessionUuid(r.sessionId);
   if (!uuid) return;
   const session = await tx.session.findUnique({
@@ -179,7 +243,7 @@ async function applyReport(
   const dedupe = `${nodeId}:${r.id}`;
 
   if (r.kind === "event") {
-    const fresh = await addEvent(tx, uuid, r.event, at, dedupe);
+    const fresh = await addEvent(tx, uuid, sanitizeDeep(r.event), at, dedupe);
     if (!fresh) return;
     // Attachments drive ready <-> active.
     if (r.event.type === "session.attached") {
@@ -201,9 +265,8 @@ async function applyReport(
         events: [],
         at,
       });
-    } else if (r.event.type === "runtime.crashed") {
-      // Recorded; the matching `removed` report ends the session.
     }
+    // runtime.crashed is recorded; the matching `removed` report ends the session.
     return;
   }
 

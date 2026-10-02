@@ -13,4 +13,4 @@ export * from "./timings.js";
 export * from "./tokens.js";
 
 /** Bumped on any change to a frozen contract, with the affected consumers listed in the commit. */
-export const CONTRACTS_VERSION = "0.1.1";
+export const CONTRACTS_VERSION = "0.1.2";

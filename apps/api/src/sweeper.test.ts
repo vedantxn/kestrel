@@ -82,9 +82,19 @@ describe("a lost node (K8, K10)", () => {
     expect((await node("a")).fenced).toBe(true);
     expect((await env.create()).statusCode).toBe(503);
 
-    // Next heartbeat: it holds none of what the API ended, with the new epoch. The fence lifts.
+    // One clean heartbeat at the new epoch is not enough: the agent may not have reconciled with Docker yet.
     const second = await a.sync(env.internal);
     expect(second).toMatchObject({
+      epoch: 2,
+      fenced: true,
+      stop: [],
+      unknown: [],
+    });
+    expect((await env.create()).statusCode).toBe(503);
+
+    // The second consecutive clean heartbeat lifts the fence.
+    const third = await a.sync(env.internal);
+    expect(third).toMatchObject({
       epoch: 2,
       fenced: false,
       stop: [],
@@ -157,9 +167,7 @@ describe("the grace period (K8)", () => {
   });
 
   it("still fails a node that stays silent after the grace has passed", async () => {
-    await env.sweeper.tick();
-    env.clock.advance(16_000);
-    await env.sweeper.tick();
+    await run(25, { heartbeat: [] }); // the sweeper ticks every 5 s; nobody heartbeats
     expect((await node("a")).state).toBe("lost");
   });
 });

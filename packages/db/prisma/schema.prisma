@@ -107,6 +107,8 @@ model Node {
   state           NodeState @default(active)
   /// K10: capacity withheld until a heartbeat shows the node holds none of the sessions the API ended.
   fenced          Boolean   @default(false)
+  /// Consecutive heartbeats, at the new epoch, showing nothing the API ended. The fence lifts at two.
+  cleanHeartbeats Int       @default(0) @map("clean_heartbeats")
   runtimeVersion  String    @default("") @map("runtime_version")
   registeredAt    DateTime  @default(now()) @map("registered_at") @db.Timestamptz(3)
   lastHeartbeatAt DateTime? @map("last_heartbeat_at") @db.Timestamptz(3)

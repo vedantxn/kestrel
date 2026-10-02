@@ -128,8 +128,20 @@ export const NetworkPolicy = z
   .meta({ id: "NetworkPolicy" });
 export type NetworkPolicy = z.infer<typeof NetworkPolicy>;
 
+/** Postgres cannot store NUL in text or jsonb, and no caller string needs control characters. */
+const PlainText = (min: number, max: number) =>
+  z
+    .string()
+    .min(min)
+    .max(max)
+    .refine(
+      // eslint-disable-next-line no-control-regex -- matching control characters is the point
+      (v) => !/[\u0000-\u001f\u007f]/.test(v),
+      "must not contain control characters",
+    );
+
 export const Metadata = z
-  .record(z.string().min(1).max(64), z.string().max(512))
+  .record(PlainText(1, 64), PlainText(0, 512))
   .refine((m) => Object.keys(m).length <= 16, "at most 16 keys")
   .meta({ id: "Metadata" });
 
@@ -170,10 +182,7 @@ export type SessionOptions = z.infer<typeof SessionOptions>;
 
 export const CreateSessionRequest = SessionOptions.partial()
   .extend({
-    idempotencyKey: z
-      .string()
-      .min(1)
-      .max(255)
+    idempotencyKey: PlainText(1, 255)
       .optional()
       .describe(
         "Repeating a request with the same key returns the original session.",

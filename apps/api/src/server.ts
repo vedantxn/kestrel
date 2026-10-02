@@ -40,7 +40,8 @@ const ctx: Ctx = {
   metrics: createMetrics(),
   rateLimiter: new RateLimiter(systemClock),
   nodeCallTimeoutMs: 30_000,
-  state: { waiters: 0 },
+  state: { waiters: 0, waitersByProject: new Map() },
+  monotonic: () => performance.now(),
 };
 
 const sweeper = new Sweeper(ctx);

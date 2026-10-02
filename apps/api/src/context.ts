@@ -20,7 +20,9 @@ export interface Ctx {
   /** The API's call to a node (K5). Injectable so tests need not wait 30 seconds. */
   nodeCallTimeoutMs: number;
   /** Mutable counters local to this process. */
-  state: { waiters: number };
+  state: { waiters: number; waitersByProject: Map<string, number> };
+  /** Milliseconds from a clock that never steps or runs backwards (the sweeper's grace is measured on it). */
+  monotonic: () => number;
 }
 
 export interface Auth {
