@@ -9,6 +9,8 @@ export const TIMINGS = {
   nodeLostAfterMs: 15_000,
   /** ...but only after the sweeper has been running and connected to the database this long. */
   sweeperGraceMs: 15_000,
+  /** Scheduling skips a node whose last heartbeat is older than this, though it is not yet declared lost. */
+  schedulingFreshnessMs: 6_000,
   sweeperIntervalMs: 5_000,
   /** A session that has not reached ready by now is ended `start_timeout`. */
   startTimeoutMs: 45_000,

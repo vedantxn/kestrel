@@ -11,3 +11,4 @@ coverage/
 *.tfstate.*
 .vscode/
 /reports/
+packages/db/src/generated/

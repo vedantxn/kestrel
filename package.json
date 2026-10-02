@@ -19,7 +19,9 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "openapi": "npm run -w @kestrel/contracts openapi",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
+    "postinstall": "npm run generate -w @kestrel/db",
+    "db:migrate": "npm run migrate:deploy -w @kestrel/db"
   },
   "devDependencies": {
     "@apidevtools/swagger-parser": "^13.1.0",
