@@ -17,6 +17,9 @@
       "path": "apps/gateway"
     },
     {
+      "path": "apps/node"
+    },
+    {
       "path": "apps/egress"
     },
     {

@@ -19,6 +19,15 @@ export const FAILPOINT_NAMES = [
   "api.node_start", // use `drop` to lose the start message
   "api.node_stop", // use `drop` to lose the stop message
   "api.sweeper.tick",
+  // Node agent: a process that dies at one of these leaves exactly the state a crash there would.
+  "node.start.after_binding", // the binding is written, no container yet
+  "node.start.after_acquire", // a container is bound, no policy yet
+  "node.start.after_policy", // the egress policy is set, the container not yet configured
+  "node.start.after_configure", // configured, no route yet
+  "node.start.before_ready", // routed, not yet marked ready
+  "node.stop.after_route_removed",
+  "node.stop.after_policy_cleared",
+  "node.stop.after_container_removed", // before the binding is deleted and the report queued
 ] as const;
 
 export type FailpointName = (typeof FAILPOINT_NAMES)[number] | (string & {});

@@ -1,0 +1,22 @@
+{
+  "name": "@kestrel/node",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "dockerode": "^5.0.1",
+    "zod": "^4.6.5",
+    "@kestrel/contracts": "*",
+    "@kestrel/shared": "*"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/dockerode": "^4.0.1"
+  }
+}
