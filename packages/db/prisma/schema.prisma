@@ -1,0 +1,182 @@
+// C12. The control plane's schema. Other plans add tables only through these rules:
+//  - a migration is a checked-in SQL file made by `prisma migrate dev`; never edit an applied one
+//  - ids are application-generated TypeIDs stored as `uuid` (see @kestrel/contracts `ids`)
+//  - every state change is a conditional update ("set to X only if currently Y") that writes an event
+//  - timestamps are timestamptz, set by the application's clock
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SessionStatus {
+  requested
+  scheduling
+  starting
+  ready
+  active
+  stopping
+  stopped
+  failed
+  timed_out
+
+  @@map("session_status")
+}
+
+enum EndReason {
+  client_stop
+  client_disconnect
+  idle_timeout
+  max_lifetime
+  browser_crash
+  oom
+  runtime_crash
+  node_lost
+  start_timeout
+  disk_limit
+  node_refused
+
+  @@map("end_reason")
+}
+
+enum NodeState {
+  active
+  lost
+
+  @@map("node_state")
+}
+
+model Org {
+  id        String    @id @db.Uuid
+  name      String
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  projects  Project[]
+
+  @@map("orgs")
+}
+
+model Project {
+  id                    String           @id @db.Uuid
+  orgId                 String           @map("org_id") @db.Uuid
+  name                  String
+  /// A10: concurrent live sessions.
+  maxConcurrentSessions Int              @default(20) @map("max_concurrent_sessions")
+  /// A14: session creations per minute (enforced in memory in v1).
+  createsPerMinute      Int              @default(300) @map("creates_per_minute")
+  createdAt             DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  org                   Org              @relation(fields: [orgId], references: [id])
+  apiKeys               ApiKey[]
+  sessions              Session[]
+  idempotencyKeys       IdempotencyKey[]
+
+  @@unique([orgId, name])
+  @@map("projects")
+}
+
+model ApiKey {
+  id         String    @id @db.Uuid
+  projectId  String    @map("project_id") @db.Uuid
+  name       String
+  /// Display only: `ksl_` and the first 4 characters.
+  prefix     String
+  /// A8: lowercase hex SHA-256 of the key. The key itself is never stored.
+  keyHash    String    @unique @map("key_hash")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(3)
+  /// Threat model G-02: a revoked key stops authenticating at once.
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  project    Project   @relation(fields: [projectId], references: [id])
+  sessions   Session[]
+
+  @@index([projectId])
+  @@map("api_keys")
+}
+
+model Node {
+  /// Chosen by configuration ("a", "b"): it names host resources.
+  id              String    @id
+  address         String
+  slotsTotal      Int       @map("slots_total")
+  hotCount        Int       @default(0) @map("hot_count")
+  /// K10: bumped when the node is declared lost.
+  epoch           Int       @default(1)
+  state           NodeState @default(active)
+  /// K10: capacity withheld until a heartbeat shows the node holds none of the sessions the API ended.
+  fenced          Boolean   @default(false)
+  runtimeVersion  String    @default("") @map("runtime_version")
+  registeredAt    DateTime  @default(now()) @map("registered_at") @db.Timestamptz(3)
+  lastHeartbeatAt DateTime? @map("last_heartbeat_at") @db.Timestamptz(3)
+  lostAt          DateTime? @map("lost_at") @db.Timestamptz(3)
+  sessions        Session[]
+
+  @@map("nodes")
+}
+
+model Session {
+  id                String         @id @db.Uuid
+  projectId         String         @map("project_id") @db.Uuid
+  /// Threat model G-19: which key created it.
+  apiKeyId          String         @map("api_key_id") @db.Uuid
+  status            SessionStatus
+  endReason         EndReason?     @map("end_reason")
+  /// The options as resolved at creation (defaults applied).
+  options           Json
+  nodeId            String?        @map("node_id")
+  /// The node's epoch when the session was scheduled onto it.
+  nodeEpoch         Int?           @map("node_epoch")
+  startPath         String?        @map("start_path")
+  deviceScaleFactor Float          @default(1) @map("device_scale_factor")
+  browserSeconds    Float          @default(0) @map("browser_seconds")
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  readyAt           DateTime?      @map("ready_at") @db.Timestamptz(3)
+  stoppingAt        DateTime?      @map("stopping_at") @db.Timestamptz(3)
+  endedAt           DateTime?      @map("ended_at") @db.Timestamptz(3)
+  project           Project        @relation(fields: [projectId], references: [id])
+  apiKey            ApiKey         @relation(fields: [apiKeyId], references: [id])
+  node              Node?          @relation(fields: [nodeId], references: [id])
+  events            SessionEvent[]
+
+  @@index([projectId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([nodeId, status])
+  @@index([status, createdAt])
+  @@map("sessions")
+}
+
+model SessionEvent {
+  /// Orders a session's timeline; the id is the public identifier.
+  seq       BigInt   @unique @default(autoincrement())
+  id        String   @id @db.Uuid
+  sessionId String   @map("session_id") @db.Uuid
+  type      String
+  data      Json
+  at        DateTime @default(now()) @db.Timestamptz(3)
+  /// G15: node reports carry an id; `<nodeId>:<reportId>` makes a repeated delivery harmless.
+  dedupeKey String?  @unique @map("dedupe_key")
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, seq])
+  @@map("session_events")
+}
+
+model IdempotencyKey {
+  id          String   @id @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid
+  key         String
+  /// G-11: a repeat with a different request is a conflict.
+  requestHash String   @map("request_hash")
+  /// Null while the first request is still waiting for capacity.
+  sessionId   String?  @map("session_id") @db.Uuid
+  /// Until when a repeat is told "in progress"; after that it takes over (the first request died).
+  lockedUntil DateTime @map("locked_until") @db.Timestamptz(3)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(3)
+  project     Project  @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
