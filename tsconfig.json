@@ -12,6 +12,9 @@
     },
     {
       "path": "apps/api"
+    },
+    {
+      "path": "apps/gateway"
     }
   ]
 }
