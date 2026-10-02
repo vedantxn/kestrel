@@ -17,6 +17,8 @@ export const EGRESS_PATHS = {
   policies: "/v1/policies", // GET list
   policy: (ip: string) => `/v1/policies/${ip}`, // PUT set, DELETE clear (both idempotent)
   denials: "/v1/denials", // GET ?after=<seq>
+  /** POST: the agent has pushed every policy it holds; until then the gateway reports `policiesRestored: false`. */
+  restored: "/v1/restored",
 } as const;
 
 export const EgressPolicy = z.object({
