@@ -8,6 +8,7 @@ Open-source, self-hostable cloud browsers for AI agents. One API call returns a 
 - [v1 plan](docs/v1-plan.md): the first build, with its exit criteria
 - [Decision records](docs/adr/README.md)
 - [Threat model](docs/threat-model.md)
+- [How the control plane works](docs/control-plane.md)
 - [Public API (OpenAPI)](docs/api/openapi.json)
 
 ## Development
