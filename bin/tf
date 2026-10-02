@@ -80,6 +80,7 @@ case "$CMD" in
     ;;
   destroy)
     [ "$STACK" = main ] || { echo "refusing to destroy the bootstrap stack (it holds the state bucket and the address)" >&2; exit 2; }
+    # shellcheck disable=SC2046
     terraform init -input=false $(backend_args) >/dev/null
     terraform plan -destroy -input=false -out=tfplan ${ARGS[@]+"${ARGS[@]}"}
     confirm "DESTROY stack '$STACK' in account $ACCOUNT?" || { rm -f tfplan; echo "not destroyed"; exit 1; }
