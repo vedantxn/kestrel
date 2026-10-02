@@ -41,10 +41,17 @@ export class GatewayHub {
   ): Promise<void> {
     if (existsSync(path)) unlinkSync(path);
     this.server = createServer((s) => this.accept(s));
-    await new Promise<void>((resolve, reject) => {
-      this.server!.once("error", reject);
-      this.server!.listen(path, resolve);
-    });
+    // Create the socket already private: with the default umask there is a moment before the chmod
+    // when other users could open it.
+    const previous = process.umask(0o177);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.server!.once("error", reject);
+        this.server!.listen(path, resolve);
+      });
+    } finally {
+      process.umask(previous);
+    }
     // Routes carry the session proof, so only the gateway's user may open this socket (threat model G-10).
     chmodSync(path, 0o600);
     if (owner) (await import("node:fs")).chownSync(path, owner.uid, owner.gid);
