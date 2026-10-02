@@ -14,7 +14,8 @@ import {
   type SessionStatus,
   type StartRequest,
 } from "@kestrel/contracts";
-import { Prisma, type Session as SessionRow } from "@kestrel/db";
+import type { Prisma } from "@kestrel/db";
+import { type Session as SessionRow } from "@kestrel/db";
 import { FailpointError, sleep } from "@kestrel/shared";
 import type { Auth, Ctx } from "./context.js";
 import { AppError } from "./errors.js";

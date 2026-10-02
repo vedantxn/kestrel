@@ -16,7 +16,7 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from "fastify";
-import { z } from "zod";
+import type { z } from "zod";
 import { authenticate, safeEqual } from "./auth.js";
 import type { Auth, Ctx } from "./context.js";
 import { AppError } from "./errors.js";
