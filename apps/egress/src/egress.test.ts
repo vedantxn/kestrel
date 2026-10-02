@@ -423,7 +423,7 @@ describe("the connection cap (N11)", () => {
       sessionId: SESSION as never,
       connectionCap: 5,
     });
-    expect(rig.policies.get("127.0.0.1")?.open.size).toBe(1);
+    expect(rig.policies.get("127.0.0.1")?.active).toBe(1);
     const closed = new Promise<void>((r) => t.socket.once("close", () => r()));
     rig.policies.set("127.0.0.1", {
       sessionId: newId("ses") as never,

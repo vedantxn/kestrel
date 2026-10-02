@@ -35,10 +35,17 @@ export class ControlServer {
   async listen(socketPath: string): Promise<void> {
     if (existsSync(socketPath)) unlinkSync(socketPath); // a stale socket from a crashed process
     this.server = createServer((req, res) => void this.handle(req, res));
-    await new Promise<void>((resolve, reject) => {
-      this.server!.once("error", reject);
-      this.server!.listen(socketPath, resolve);
-    });
+    // Create the socket already private: with the default umask there is a moment before the chmod
+    // when other users could open it.
+    const previous = process.umask(0o177);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.server!.once("error", reject);
+        this.server!.listen(socketPath, resolve);
+      });
+    } finally {
+      process.umask(previous);
+    }
     chmodSync(socketPath, 0o600);
   }
 
@@ -100,7 +107,7 @@ export class ControlServer {
           ...(entry.allow ? { allow: entry.allow } : {}),
           deny: entry.deny,
           connectionCap: entry.connectionCap,
-          openConnections: entry.open.size,
+          openConnections: entry.active,
         }));
         return this.send(res, 200, ListPoliciesResponse.parse({ policies }));
       }

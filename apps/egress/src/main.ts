@@ -15,13 +15,40 @@ const Env = z.object({
   PROXY_PORT: z.coerce.number().int().default(3128),
   CONTROL_SOCKET: z.string().min(1),
   /** The host's own public address and any others a session must never reach, comma separated. */
-  BLOCKED_ADDRESSES: z.string().default(""),
+  BLOCKED_ADDRESSES: z
+    .string()
+    .min(
+      1,
+      "the host's public address (an Elastic IP is not on any interface) must be listed",
+    ),
   METRICS_HOST: z.string().default("127.0.0.1"),
   METRICS_PORT: z.coerce.number().int().default(7301),
   LOG_LEVEL: z.string().default("info"),
 });
 
 const env = parseEnv(Env);
+
+// One process serves every session (N12), so one bad socket must not take egress away from all of
+// them. Log and keep serving; a genuinely broken process is replaced by the supervisor's restart,
+// which fails closed (N13).
+process.on("uncaughtException", (e) =>
+  console.error(
+    JSON.stringify({
+      level: 60,
+      msg: "uncaught exception; continuing",
+      err: String(e),
+    }),
+  ),
+);
+process.on("unhandledRejection", (e) =>
+  console.error(
+    JSON.stringify({
+      level: 60,
+      msg: "unhandled rejection; continuing",
+      err: String(e),
+    }),
+  ),
+);
 const log = createLogger("egress", env.LOG_LEVEL);
 const metrics = createEgressMetrics();
 const policies = new PolicyStore(); // starts empty, so a restart fails closed (N13)
