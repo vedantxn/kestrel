@@ -1,0 +1,20 @@
+{
+  "name": "@kestrel/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/server.js",
+    "admin": "node dist/admin.js"
+  },
+  "dependencies": {
+    "fastify": "^5.12.5",
+    "prom-client": "^15.1.3",
+    "zod": "^4.6.5",
+    "@kestrel/contracts": "*",
+    "@kestrel/db": "*",
+    "@kestrel/shared": "*"
+  }
+}
