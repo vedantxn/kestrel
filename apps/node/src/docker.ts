@@ -85,6 +85,8 @@ export interface ContainerInfo {
   address: string | null;
   oomKilled: boolean;
   exitCode: number | null;
+  /** Epoch ms. Reconciliation leaves very new containers alone: the agent may not have recorded them yet. */
+  createdAt: number;
 }
 
 export type DockerEvent = {
@@ -123,6 +125,7 @@ export class DockerodeDriver implements DockerDriver {
       address: i.NetworkSettings?.Networks?.[this.network]?.IPAddress || null,
       oomKilled: Boolean(i.State?.OOMKilled),
       exitCode: typeof i.State?.ExitCode === "number" ? i.State.ExitCode : null,
+      createdAt: Date.parse(i.Created) || 0,
     };
   }
 
@@ -135,6 +138,35 @@ export class DockerodeDriver implements DockerDriver {
       await c.remove({ force: true }).catch(() => undefined);
       throw e;
     }
+  }
+
+  /**
+   * N1. One bridge per node: internal (no route out), no IPv6, containers unable to talk to each
+   * other, with the interface name set explicitly so the firewall rules can match it. Created if
+   * absent; an existing one is left alone.
+   */
+  async ensureNetwork(o: {
+    name: string;
+    iface: string;
+    subnet: string;
+    gateway: string;
+  }): Promise<void> {
+    const existing = await this.docker.listNetworks({
+      filters: { name: [o.name] },
+    });
+    if (existing.some((n) => n.Name === o.name)) return;
+    await this.docker.createNetwork({
+      Name: o.name,
+      Driver: "bridge",
+      Internal: true,
+      EnableIPv6: false,
+      IPAM: { Config: [{ Subnet: o.subnet, Gateway: o.gateway }] },
+      Options: {
+        "com.docker.network.bridge.name": o.iface,
+        "com.docker.network.bridge.enable_icc": "false",
+      },
+      Labels: { "kestrel.node": this.nodeId },
+    });
   }
 
   async inspect(id: string): Promise<ContainerInfo | null> {
