@@ -15,7 +15,8 @@ interface Candidate {
 }
 
 /**
- * Lock every node that may take a session, in id order (so two admissions can never wait on
+ * Lock every node that may take a session (FOR NO KEY UPDATE: a plain FOR UPDATE would conflict with the
+ * foreign-key checks of unrelated session writes and deadlock), in id order (so two admissions can never wait on
  * each other), and rank those with room: nodes that last reported a hot browser first, then
  * the most free capacity (K4). The reports only order the choice; they are never trusted for
  * correctness, because capacity is counted from the sessions table under the lock.
@@ -31,7 +32,7 @@ async function rankNodes(
   >`SELECT id, slots_total, hot_count, epoch FROM nodes
     WHERE state = 'active' AND NOT fenced AND last_heartbeat_at >= ${cutoff}
       AND NOT (id = ANY(${exclude}::text[]))
-    ORDER BY id FOR UPDATE`;
+    ORDER BY id FOR NO KEY UPDATE`;
   if (nodes.length === 0) return [];
   const used = await tx.session.groupBy({
     by: ["nodeId"],
@@ -76,7 +77,7 @@ export async function admit(
   linkIdempotencyKey?: string,
 ): Promise<Admission> {
   const [project] = await tx.$queryRaw<{ max_concurrent_sessions: number }[]>`
-    SELECT max_concurrent_sessions FROM projects WHERE id = ${auth.projectId}::uuid FOR UPDATE`;
+    SELECT max_concurrent_sessions FROM projects WHERE id = ${auth.projectId}::uuid FOR NO KEY UPDATE`;
   if (!project) throw new Error("project vanished");
   const live = await tx.session.count({
     where: { projectId: auth.projectId, status: { in: NON_TERMINAL } },

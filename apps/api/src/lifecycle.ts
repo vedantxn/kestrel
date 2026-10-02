@@ -5,11 +5,47 @@ import {
   type EventBody,
   type SessionStatus,
 } from "@kestrel/contracts";
-import type { Prisma } from "@kestrel/db";
+import { Prisma } from "@kestrel/db";
 import type { Ctx } from "./context.js";
 import { newUuid } from "./ids.js";
 
 export type Tx = Prisma.TransactionClient;
+
+/** A deadlock or write conflict: Postgres aborted this transaction so the other could proceed. Run it again. */
+export function isTransientDbError(e: unknown): boolean {
+  return (
+    e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2034"
+  );
+}
+
+/** The database itself is unreachable or overloaded, as opposed to this one statement being bad. */
+export function isConnectivityError(e: unknown): boolean {
+  if (e instanceof Prisma.PrismaClientInitializationError) return true;
+  if (
+    e instanceof Prisma.PrismaClientKnownRequestError &&
+    ["P1001", "P1002", "P1008", "P1017", "P2024", "P2034"].includes(e.code)
+  )
+    return true;
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|Connection terminated|Can't reach database|too many clients|timeout/i.test(
+    e instanceof Error ? e.message : String(e),
+  );
+}
+
+/** Every multi-statement change runs through here, so a deadlock is retried rather than surfaced as a 500. */
+export async function runTx<T>(
+  ctx: Ctx,
+  fn: (tx: Tx) => Promise<T>,
+  attempts = 4,
+): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await ctx.db.$transaction(fn);
+    } catch (e) {
+      if (i >= attempts || !isTransientDbError(e)) throw e;
+      await new Promise((r) => setTimeout(r, 5 * i + Math.random() * 10));
+    }
+  }
+}
 
 export const TERMINAL: SessionStatus[] = ["stopped", "failed", "timed_out"];
 export const NON_TERMINAL: SessionStatus[] = [

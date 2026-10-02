@@ -144,7 +144,8 @@ export async function makeEnv(opts: EnvOptions = {}): Promise<Env> {
     metrics: createMetrics(),
     rateLimiter: new RateLimiter(clock),
     nodeCallTimeoutMs: opts.nodeCallTimeoutMs ?? 200,
-    state: { waiters: 0 },
+    state: { waiters: 0, waitersByProject: new Map() },
+    monotonic: () => clock.now(),
   };
   const sweeper = new Sweeper(ctx);
   const api = buildPublicApp(ctx);
