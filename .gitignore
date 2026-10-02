@@ -12,3 +12,7 @@ coverage/
 .vscode/
 /reports/
 packages/db/src/generated/
+
+infra/terraform/**/backend.hcl
+infra/terraform/**/backend_s3.tf
+infra/terraform/**/tfplan
