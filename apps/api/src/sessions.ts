@@ -28,6 +28,7 @@ import {
 import {
   NON_TERMINAL,
   TERMINAL,
+  runTx,
   beginStop,
   completeStop,
   transition,
@@ -36,6 +37,8 @@ import { NodeCallError } from "./node-client.js";
 import { admit, reassign } from "./scheduler.js";
 
 const MAX_CONCURRENT_WAITERS = 200; // G-13: waiting creates hold a request open each
+/** One project must not be able to use up every waiting place. */
+const MAX_WAITERS_PER_PROJECT = 50;
 
 // --- Serialization ----------------------------------------------------------------------
 
@@ -154,7 +157,7 @@ export async function createSession(
   let waiting = false;
   try {
     for (;;) {
-      const r = await ctx.db.$transaction((tx) =>
+      const r = await runTx(ctx, (tx) =>
         admit(ctx, tx, auth, options, idemRow),
       );
       if (r.kind === "ok") {
@@ -181,7 +184,11 @@ export async function createSession(
         );
       }
       if (!waiting) {
-        if (ctx.state.waiters >= MAX_CONCURRENT_WAITERS) {
+        const mine = ctx.state.waitersByProject.get(auth.projectId) ?? 0;
+        if (
+          ctx.state.waiters >= MAX_CONCURRENT_WAITERS ||
+          mine >= MAX_WAITERS_PER_PROJECT
+        ) {
           throw new AppError(
             "capacity_exhausted",
             "No browser capacity is available and too many requests are waiting.",
@@ -191,6 +198,7 @@ export async function createSession(
           );
         }
         ctx.state.waiters++;
+        ctx.state.waitersByProject.set(auth.projectId, mine + 1);
         waiting = true;
       }
       // Retry every 250 ms, with a last attempt exactly at the deadline.
@@ -200,7 +208,12 @@ export async function createSession(
     await release();
     throw e;
   } finally {
-    if (waiting) ctx.state.waiters--;
+    if (waiting) {
+      ctx.state.waiters--;
+      const left = (ctx.state.waitersByProject.get(auth.projectId) ?? 1) - 1;
+      if (left <= 0) ctx.state.waitersByProject.delete(auth.projectId);
+      else ctx.state.waitersByProject.set(auth.projectId, left);
+    }
   }
 
   await ctx.failpoints.hit("api.create.after_reserve");
@@ -216,11 +229,21 @@ async function failStart(
   error: AppError,
   attemptedNodeId: string,
 ): Promise<never> {
-  const began = await ctx.db.$transaction((tx) =>
-    beginStop(tx, sessionId, reason, new Date(ctx.clock.now())),
-  );
+  const won = await runTx(ctx, async (tx) => {
+    if (!(await beginStop(tx, sessionId, reason, new Date(ctx.clock.now()))))
+      return null;
+    // The error below says "retryable", so a retry with the same idempotency key must make a new
+    // session, not be handed this failed one back.
+    await tx.idempotencyKey.deleteMany({ where: { sessionId } });
+    // Read the node after winning the stop: a refusal may have moved the session to another node.
+    const cur = await tx.session.findUnique({
+      where: { id: sessionId },
+      select: { nodeId: true },
+    });
+    return { nodeId: cur?.nodeId ?? attemptedNodeId };
+  });
   ctx.metrics.created.inc({ outcome: reason });
-  if (began) void dispatchStop(ctx, sessionId, attemptedNodeId, reason);
+  if (won) void dispatchStop(ctx, sessionId, won.nodeId, reason);
   throw error;
 }
 
@@ -235,7 +258,7 @@ async function startOnNode(
   let { nodeId, epoch } = reservation;
   let retried = false;
 
-  const moved = await ctx.db.$transaction((tx) =>
+  const moved = await runTx(ctx, (tx) =>
     transition(tx, {
       id: sessionId,
       from: ["scheduling"],
@@ -293,7 +316,7 @@ async function startOnNode(
     if (result.result === "ready") {
       await ctx.failpoints.hit("api.create.before_ready");
       const now = new Date(ctx.clock.now());
-      const ok = await ctx.db.$transaction((tx) =>
+      const ok = await runTx(ctx, (tx) =>
         transition(tx, {
           id: sessionId,
           from: ["starting"],
@@ -339,7 +362,7 @@ async function startOnNode(
     if (result.result === "refused" && !retried) {
       // K5: a refusal is retried once, on another node.
       retried = true;
-      const other = await ctx.db.$transaction((tx) =>
+      const other = await runTx(ctx, (tx) =>
         reassign(ctx, tx, sessionId, [nodeId]),
       );
       if (other) {
@@ -388,7 +411,7 @@ export async function dispatchStop(
       ctx.nodeCallTimeoutMs,
     );
     if (res.result === "gone") {
-      await ctx.db.$transaction((tx) =>
+      await runTx(ctx, (tx) =>
         completeStop(ctx, tx, sessionId, new Date(ctx.clock.now())),
       );
     }
@@ -413,13 +436,22 @@ export async function stopSession(
     : null;
   if (!row) throw new AppError("not_found", "No such session.");
 
-  const began = await ctx.db.$transaction((tx) =>
-    beginStop(tx, row.id, "client_stop", new Date(ctx.clock.now())),
-  );
-  if (began) {
-    if (row.nodeId) void dispatchStop(ctx, row.id, row.nodeId, "client_stop");
+  const won = await runTx(ctx, async (tx) => {
+    if (
+      !(await beginStop(tx, row.id, "client_stop", new Date(ctx.clock.now())))
+    )
+      return null;
+    // Tell the node the session is on now: a refused start may have moved it since `row` was read.
+    const cur = await tx.session.findUnique({
+      where: { id: row.id },
+      select: { nodeId: true },
+    });
+    return { nodeId: cur?.nodeId ?? null };
+  });
+  if (won) {
+    if (won.nodeId) void dispatchStop(ctx, row.id, won.nodeId, "client_stop");
     else
-      await ctx.db.$transaction((tx) =>
+      await runTx(ctx, (tx) =>
         completeStop(ctx, tx, row.id, new Date(ctx.clock.now())),
       );
   }
@@ -473,7 +505,13 @@ export async function listSessions(
   if (q.cursor) {
     const [ms, id] = decodeCursor(q.cursor);
     const t = Number(ms);
-    if (!Number.isFinite(t) || !id || !/^[0-9a-f-]{36}$/.test(id)) {
+    if (
+      !Number.isInteger(t) ||
+      t < 0 ||
+      t > 8.64e15 ||
+      !id ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)
+    ) {
       throw new AppError("invalid_request", "Malformed cursor.", {
         param: "cursor",
       });
@@ -516,7 +554,7 @@ export async function listEvents(
   let after = 0n;
   if (q.cursor) {
     const [seq] = decodeCursor(q.cursor);
-    if (!seq || !/^\d+$/.test(seq))
+    if (!seq || !/^\d{1,18}$/.test(seq))
       throw new AppError("invalid_request", "Malformed cursor.", {
         param: "cursor",
       });
