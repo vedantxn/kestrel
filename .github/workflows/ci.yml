@@ -47,3 +47,25 @@ jobs:
         run: |
           npm run openapi
           git diff --exit-code docs/api/openapi.json
+
+  infra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.6
+      - name: Terraform format
+        run: terraform fmt -check -recursive infra/terraform
+      - name: Terraform validate
+        run: |
+          for stack in bootstrap main; do
+            terraform -chdir=infra/terraform/$stack init -backend=false -input=false
+            terraform -chdir=infra/terraform/$stack validate
+          done
+      - name: Shell scripts
+        run: |
+          sudo apt-get install -y shellcheck >/dev/null
+          bash -n bin/host && bash -n bin/tf && bash -n infra/host/host-check.sh
+          shellcheck -S warning bin/host bin/tf infra/host/host-check.sh

@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# The working loop with the Kestrel AWS host (v1 plan I7).
+#
+#   bin/host up                      start the host and wait until it is reachable
+#   bin/host down                    stop the host
+#   bin/host status                  state, reachability, nightly stop
+#   bin/host shell                   an interactive shell on the host
+#   bin/host run [--detach] [--name NAME] -- COMMAND...
+#                                    run in /srv/kestrel; --detach survives this terminal
+#   bin/host logs [NAME] [-f]        output of a detached run (the latest, or NAME)
+#   bin/host jobs                    detached runs and their exit codes
+#   bin/host sync                    copy the working tree to /srv/kestrel (no commit needed)
+#   bin/host deploy [GIT_REF]        fetch GIT_REF (default: the current commit) on the host and deploy it
+#   bin/host forward LOCAL:REMOTE    forward a local port to a port on the host
+#   bin/host bench [ARGS...]         run the benchmark harness on the host, detached
+#   bin/host check                   check the host prerequisites (C15)
+#   bin/host autostop on|off|status  the nightly 02:00 India time stop
+#
+# There is no SSH port. Shell, file sync and port forwarding all travel over AWS Systems Manager,
+# with a throwaway SSH key pushed through EC2 Instance Connect for each connection (about 60 s of
+# validity). Credentials are the narrow `kestrel-dev` profile: it can start, stop and open a shell
+# on instances tagged Project=kestrel, and nothing else.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+export AWS_PROFILE=${KESTREL_PROFILE:-kestrel-dev}
+export AWS_REGION=${AWS_REGION:-us-east-1}
+export AWS_PAGER=""
+REMOTE_DIR=/srv/kestrel
+SCHEDULE=kestrel-nightly-stop
+
+die() { echo "bin/host: $*" >&2; exit 1; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+
+# --- finding the instance -------------------------------------------------------------------
+
+INSTANCE_ID=""
+AZ=""
+find_instance() {
+  [ -n "$INSTANCE_ID" ] && return 0
+  local row
+  row=$(aws ec2 describe-instances \
+    --filters Name=tag:Project,Values=kestrel Name=tag:Name,Values=kestrel-host \
+              Name=instance-state-name,Values=pending,running,stopping,stopped \
+    --query 'Reservations[].Instances[].[InstanceId,Placement.AvailabilityZone]' --output text)
+  [ -n "$row" ] || die "no Kestrel host exists (create it with: bin/tf main apply)"
+  [ "$(printf '%s\n' "$row" | wc -l)" -eq 1 ] || die "more than one Kestrel host found"
+  INSTANCE_ID=$(printf '%s' "$row" | awk '{print $1}')
+  AZ=$(printf '%s' "$row" | awk '{print $2}')
+}
+
+state() { aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text; }
+public_ip() { aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text; }
+ssm_online() {
+  [ "$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+      --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)" = Online ]
+}
+
+# --- the SSH transport ----------------------------------------------------------------------
+
+KEYDIR=""
+KEY_PUSHED=0
+cleanup() { [ -n "$KEYDIR" ] && rm -rf "$KEYDIR"; }
+trap cleanup EXIT
+
+# A fresh key for this process, pushed again if the last push is close to expiring (60 s).
+ensure_key() {
+  find_instance
+  local now
+  now=$(date +%s)
+  if [ -z "$KEYDIR" ]; then
+    KEYDIR=$(mktemp -d)
+    ssh-keygen -q -t ed25519 -N '' -f "$KEYDIR/key"
+  fi
+  if [ $((now - KEY_PUSHED)) -gt 40 ]; then
+    aws ec2-instance-connect send-ssh-public-key --instance-id "$INSTANCE_ID" --availability-zone "$AZ" \
+      --instance-os-user ec2-user --ssh-public-key "file://$KEYDIR/key.pub" >/dev/null \
+      || die "could not push an SSH key (is the host running and tagged Project=kestrel?)"
+    KEY_PUSHED=$now
+  fi
+}
+
+ssh_opts() {
+  printf '%s\n' -i "$KEYDIR/key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR -o ServerAliveInterval=15 \
+    -o "ProxyCommand=aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p --profile $AWS_PROFILE --region $AWS_REGION"
+}
+
+# remote [-t] COMMAND... : run a command on the host (a real terminal with -t).
+remote() {
+  ensure_key
+  local tty=()
+  if [ "${1:-}" = "-t" ]; then tty=(-t); shift; fi
+  local opts=()
+  while IFS= read -r line; do opts+=("$line"); done < <(ssh_opts)
+  ssh "${opts[@]}" ${tty[@]+"${tty[@]}"} "ec2-user@$INSTANCE_ID" "$@"
+}
+
+# --- commands -------------------------------------------------------------------------------
+
+cmd_up() {
+  find_instance
+  local s
+  s=$(state)
+  case "$s" in
+    running) echo "already running" ;;
+    pending) ;;
+    stopped) aws ec2 start-instances --instance-ids "$INSTANCE_ID" >/dev/null ;;
+    *) die "host is $s; try again in a minute" ;;
+  esac
+  echo -n "waiting for the host "
+  aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+  for _ in $(seq 1 60); do ssm_online && break; echo -n "."; sleep 5; done
+  echo
+  ssm_online || die "the host is running but Systems Manager cannot reach it yet; try again shortly"
+  echo "up: $INSTANCE_ID  $(public_ip)"
+}
+
+cmd_down() {
+  find_instance
+  aws ec2 stop-instances --instance-ids "$INSTANCE_ID" >/dev/null
+  echo -n "stopping "
+  aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"
+  echo "stopped: $INSTANCE_ID"
+}
+
+cmd_status() {
+  find_instance
+  local s ip
+  s=$(state)
+  ip=$(public_ip)
+  echo "instance:  $INSTANCE_ID ($AZ)"
+  echo "state:     $s"
+  echo "address:   $ip  (hostname ${ip//./-}.sslip.io)"
+  if [ "$s" = running ]; then
+    ssm_online && echo "reachable: yes (Systems Manager)" || echo "reachable: no"
+  fi
+  echo "autostop:  $(autostop_state)"
+}
+
+cmd_shell() { remote -t; }
+
+cmd_sync() {
+  ensure_key
+  local opts=()
+  while IFS= read -r line; do opts+=("$line"); done < <(ssh_opts)
+  # rsync takes one string for the remote shell; quote each part for it.
+  local rsh="ssh"
+  for o in "${opts[@]}"; do rsh+=" $(printf '%q' "$o")"; done
+  remote "sudo mkdir -p $REMOTE_DIR && sudo chown ec2-user:ec2-user $REMOTE_DIR"
+  rsync -az --delete --info=stats1 \
+    --exclude '.git/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'coverage/' \
+    --exclude '.terraform/' --exclude '*.tfstate*' --exclude '/reports/' --exclude '.DS_Store' \
+    --exclude 'packages/db/src/generated/' --exclude '.env*' --exclude 'tfplan' --exclude 'backend.hcl' \
+    -e "$rsh" "$ROOT/" "ec2-user@$INSTANCE_ID:$REMOTE_DIR/"
+  echo "synced $ROOT -> $REMOTE_DIR"
+}
+
+cmd_run() {
+  local detach=0 name=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --detach) detach=1; shift ;;
+      --name) name=${2:?--name needs a value}; shift 2 ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  [ $# -gt 0 ] || die "run needs a command after --"
+  local cmd
+  cmd=$(printf '%q ' "$@")
+  if [ "$detach" = 0 ]; then
+    remote -t "cd $REMOTE_DIR && $cmd"
+  else
+    name=${name:-run-$(date +%Y%m%d-%H%M%S)}
+    # The command travels base64-encoded so no quoting survives to bite. Output goes to a log, the
+    # exit code to a file next to it, and setsid detaches the run from this SSH session.
+    local b64
+    b64=$(printf '%s' "cd $REMOTE_DIR && $cmd" | base64 | tr -d '\n')
+    remote "mkdir -p /var/log/kestrel-run && echo $b64 | base64 -d > /var/log/kestrel-run/$name.sh && \
+      (setsid nohup bash -c 'bash /var/log/kestrel-run/$name.sh; echo \$? > /var/log/kestrel-run/$name.exit' \
+        > /var/log/kestrel-run/$name.log 2>&1 < /dev/null &); echo started"
+    echo "detached as '$name'. Follow with: bin/host logs $name -f"
+  fi
+}
+
+cmd_logs() {
+  local name="" follow=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f) follow="-f"; shift ;;
+      *) name=$1; shift ;;
+    esac
+  done
+  if [ -z "$name" ]; then
+    name=$(remote "ls -t /var/log/kestrel-run/*.log 2>/dev/null | head -1 | xargs -r basename | sed 's/\.log$//'")
+    [ -n "$name" ] || die "no detached runs yet"
+  fi
+  remote "tail -n 200 $follow /var/log/kestrel-run/$name.log"
+}
+
+cmd_jobs() {
+  remote 'cd /var/log/kestrel-run 2>/dev/null && for f in $(ls -t *.log 2>/dev/null); do
+      n=${f%.log}; if [ -f $n.exit ]; then s="exit $(cat $n.exit)"; else s=running; fi
+      printf "%-32s %s\n" "$n" "$s"; done || echo "no runs"'
+}
+
+cmd_forward() {
+  local spec=${1:?forward needs LOCAL:REMOTE, e.g. 8081:8081}
+  local lport=${spec%%:*} rport=${spec##*:}
+  find_instance
+  echo "forwarding localhost:$lport -> host:$rport (Ctrl-C to stop)"
+  aws ssm start-session --target "$INSTANCE_ID" --document-name AWS-StartPortForwardingSession \
+    --parameters "portNumber=$rport,localPortNumber=$lport"
+}
+
+cmd_check() { remote sudo /usr/local/bin/kestrel-host-check; }
+
+cmd_deploy() {
+  local ref=${1:-$(git -C "$ROOT" rev-parse HEAD)}
+  ensure_key
+  # I16: the host pulls with a read-only deploy key it generates itself; only the public half leaves it.
+  if ! remote 'sudo test -f /var/lib/kestrel/secrets/deploy_key'; then
+    echo "creating the host's read-only deploy key"
+    remote 'sudo install -d -m 0700 /var/lib/kestrel/secrets && sudo ssh-keygen -q -t ed25519 -N "" -C kestrel-host -f /var/lib/kestrel/secrets/deploy_key'
+    local pub
+    pub=$(remote 'sudo cat /var/lib/kestrel/secrets/deploy_key.pub')
+    gh repo deploy-key add - --repo vedantxn/kestrel --title "kestrel-host $(date +%F)" <<<"$pub"
+  fi
+  remote "set -e; export GIT_SSH_COMMAND='ssh -i /var/lib/kestrel/secrets/deploy_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/kestrel/secrets/known_hosts'
+    sudo -E bash -c '
+      set -e
+      [ -d /srv/kestrel-git/.git ] || git clone git@github.com:vedantxn/kestrel.git /srv/kestrel-git
+      cd /srv/kestrel-git && git fetch --all --prune && git checkout --force $ref
+      /usr/local/bin/kestrel-host-check
+      if [ -x infra/host/deploy.sh ]; then infra/host/deploy.sh; else echo \"no infra/host/deploy.sh at this ref yet (arrives with the platform containers)\"; fi
+    '"
+}
+
+cmd_bench() { cmd_run --detach --name "bench-$(date +%Y%m%d-%H%M%S)" -- npm run bench -- "$@"; }
+
+# --- the nightly stop -----------------------------------------------------------------------
+
+schedule_json() { aws scheduler get-schedule --name "$SCHEDULE" --output json; }
+autostop_state() { schedule_json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["State"])' 2>/dev/null || echo "unknown"; }
+
+cmd_autostop() {
+  local want=${1:-status}
+  case "$want" in
+    status) autostop_state ;;
+    on|off)
+      local state=ENABLED
+      [ "$want" = off ] && state=DISABLED
+      # update-schedule replaces the whole schedule, so read it and send it back with only the state changed.
+      schedule_json | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+args = ["--name", s["Name"], "--state", sys.argv[1],
+        "--schedule-expression", s["ScheduleExpression"],
+        "--flexible-time-window", json.dumps(s["FlexibleTimeWindow"]),
+        "--target", json.dumps(s["Target"])]
+if s.get("ScheduleExpressionTimezone"): args += ["--schedule-expression-timezone", s["ScheduleExpressionTimezone"]]
+print("\n".join(args))' "$state" > "${TMPDIR:-/tmp}/kestrel-autostop.args"
+      local args=()
+      while IFS= read -r line; do args+=("$line"); done < "${TMPDIR:-/tmp}/kestrel-autostop.args"
+      rm -f "${TMPDIR:-/tmp}/kestrel-autostop.args"
+      aws scheduler update-schedule "${args[@]}" >/dev/null
+      echo "autostop: $(autostop_state)"
+      ;;
+    *) usage ;;
+  esac
+}
+
+# --- dispatch -------------------------------------------------------------------------------
+
+[ $# -ge 1 ] || usage
+sub=$1; shift
+case "$sub" in
+  up) cmd_up ;;
+  down) cmd_down ;;
+  status) cmd_status ;;
+  shell) cmd_shell ;;
+  run) find_instance; cmd_run "$@" ;;
+  logs) cmd_logs "$@" ;;
+  jobs) cmd_jobs ;;
+  sync) cmd_sync ;;
+  deploy) cmd_deploy "$@" ;;
+  forward) cmd_forward "$@" ;;
+  bench) cmd_bench "$@" ;;
+  check) cmd_check ;;
+  autostop) cmd_autostop "$@" ;;
+  -h|--help|help) usage 0 ;;
+  *) usage ;;
+esac
