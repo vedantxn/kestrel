@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Run Terraform for one stack as the kestrel-admin IAM user.
+#
+#   bin/tf <bootstrap|main> <init|plan|apply|destroy|output|migrate-state|...> [terraform args]
+#
+# kestrel-admin signs in with `aws login --profile kestrel-admin` (a browser sign-in lasting up
+# to 12 hours). Terraform's AWS provider does not read that session type directly, so this wrapper
+# exports it into the environment first (v1 plan I3, experiment V7).
+#
+# apply and destroy show the plan and ask before acting; pass --yes to skip the question.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+PROFILE=${KESTREL_ADMIN_PROFILE:-kestrel-admin}
+REGION=${AWS_REGION:-us-east-1}
+
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+[ $# -ge 2 ] || usage
+STACK=$1; CMD=$2; shift 2
+case "$STACK" in bootstrap|main) ;; *) usage ;; esac
+DIR="$ROOT/infra/terraform/$STACK"
+
+YES=0
+ARGS=()
+for a in "$@"; do if [ "$a" = "--yes" ]; then YES=1; else ARGS+=("$a"); fi; done
+
+if ! creds=$(aws configure export-credentials --profile "$PROFILE" --format env 2>/dev/null); then
+  echo "No valid session for profile '$PROFILE'. Sign in first:  aws login --profile $PROFILE" >&2
+  exit 1
+fi
+eval "$creds"
+export AWS_REGION="$REGION"
+unset AWS_PROFILE
+
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+BUCKET="kestrel-tfstate-$ACCOUNT"
+echo "stack: $STACK   account: $ACCOUNT   as: $(aws sts get-caller-identity --query Arn --output text)" >&2
+
+cd "$DIR"
+
+backend_args() {
+  if [ "$STACK" = main ]; then
+    cat > backend.hcl <<HCL
+bucket       = "$BUCKET"
+key          = "main/terraform.tfstate"
+region       = "$REGION"
+use_lockfile = true
+encrypt      = true
+HCL
+    echo "-backend-config=backend.hcl"
+  elif [ -f backend_s3.tf ]; then
+    echo "-backend-config=bucket=$BUCKET -backend-config=key=bootstrap/terraform.tfstate -backend-config=region=$REGION -backend-config=use_lockfile=true -backend-config=encrypt=true"
+  fi
+}
+
+confirm() {
+  [ "$YES" = 1 ] && return 0
+  read -r -p "$1 [type 'yes' to continue] " answer
+  [ "$answer" = yes ]
+}
+
+case "$CMD" in
+  init)
+    # shellcheck disable=SC2046
+    terraform init -input=false $(backend_args) ${ARGS[@]+"${ARGS[@]}"}
+    ;;
+  migrate-state)
+    [ "$STACK" = bootstrap ] || { echo "only the bootstrap stack has local state to migrate" >&2; exit 2; }
+    printf 'terraform {\n  backend "s3" {}\n}\n' > backend_s3.tf
+    # shellcheck disable=SC2046
+    terraform init -input=false -migrate-state -force-copy $(backend_args)
+    ;;
+  apply)
+    # shellcheck disable=SC2046
+    terraform init -input=false $(backend_args) >/dev/null
+    terraform plan -input=false -out=tfplan ${ARGS[@]+"${ARGS[@]}"}
+    confirm "Apply this plan to stack '$STACK' in account $ACCOUNT?" || { rm -f tfplan; echo "not applied"; exit 1; }
+    terraform apply -input=false tfplan
+    rm -f tfplan
+    ;;
+  destroy)
+    [ "$STACK" = main ] || { echo "refusing to destroy the bootstrap stack (it holds the state bucket and the address)" >&2; exit 2; }
+    terraform init -input=false $(backend_args) >/dev/null
+    terraform plan -destroy -input=false -out=tfplan ${ARGS[@]+"${ARGS[@]}"}
+    confirm "DESTROY stack '$STACK' in account $ACCOUNT?" || { rm -f tfplan; echo "not destroyed"; exit 1; }
+    terraform apply -input=false tfplan
+    rm -f tfplan
+    ;;
+  *)
+    # plan, output, validate, state, ...
+    terraform "$CMD" ${ARGS[@]+"${ARGS[@]}"}
+    ;;
+esac
