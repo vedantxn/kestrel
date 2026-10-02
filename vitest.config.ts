@@ -2,7 +2,11 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["packages/*/src/**/*.test.ts", "apps/*/src/**/*.test.ts"],
+    include: [
+      "packages/*/src/**/*.test.ts",
+      "apps/*/src/**/*.test.ts",
+      "runtime/*/src/**/*.test.ts",
+    ],
     globalSetup: ["apps/api/src/test/global-setup.ts"],
     // The API tests share one Postgres database, so files run one at a time.
     fileParallelism: false,

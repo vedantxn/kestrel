@@ -18,6 +18,9 @@
     },
     {
       "path": "apps/egress"
+    },
+    {
+      "path": "runtime/runtimed"
     }
   ]
 }
