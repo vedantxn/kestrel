@@ -1,10 +1,5 @@
 import { createServer, type Server } from "node:http";
-import {
-  connect,
-  createServer as createTcp,
-  type AddressInfo,
-  type Socket,
-} from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { PROOF_HEADER } from "@kestrel/contracts";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,7 +10,6 @@ import { CdpForward } from "./forward.js";
 import { Supervisor, type Proc, type SpawnFn } from "./supervisor.js";
 import type { Env } from "./config.js";
 
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const PROOF = "ab".repeat(32);
 const TOKEN = "control-token-0123456789";
 
