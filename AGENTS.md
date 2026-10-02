@@ -15,6 +15,6 @@ Kestrel is an open-source cloud browser platform for AI agents. Read `docs/HLD.m
 - Node 24, TypeScript strict, npm workspaces (`packages/*`, `apps/*`). Tests sit beside the code as `*.test.ts` (Vitest).
 - `npm run check` runs format, lint, type-check and tests. Run it before committing.
 - The API's tests use a real Postgres 18 (`brew install postgresql@18`): `DATABASE_URL` defaults to `postgresql://kestrel:kestrel@localhost:5432/kestrel_test`, and the run refuses any database not named `*_test`. Migrations are applied automatically at the start of a run.
-- Small commits as each piece works; one branch and pull request per work package, merged with a merge commit.
+- Small commits as each piece works, straight to `main` (the owner does not want pull requests). Run `npm run build`, lint and the tests locally first: nothing gates a push.
 - Anything needing Docker or Linux networking runs on the AWS host (`bin/host`), not on macOS.
 - Secrets never go in the repo, in images or in Terraform state.
