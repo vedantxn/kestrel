@@ -1,0 +1,17 @@
+{
+  "name": "@kestrel/egress",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "prom-client": "^15.1.3",
+    "zod": "^4.6.5",
+    "@kestrel/contracts": "*",
+    "@kestrel/shared": "*"
+  }
+}
