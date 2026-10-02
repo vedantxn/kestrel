@@ -13,7 +13,10 @@ async function rig() {
   await bootWithPool(r);
   const server = createNodeServer(r.agent, SECRET, createLogger("t", "silent"));
   await new Promise<void>((res) => server.listen(0, "127.0.0.1", res));
-  close = () => server.closeAllConnections() && server.close();
+  close = () => {
+    server.closeAllConnections();
+    server.close();
+  };
   const port = (server.address() as AddressInfo).port;
   const call = async (
     method: string,
@@ -29,7 +32,10 @@ async function rig() {
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    return { status: res.status, json: await res.json() };
+    return {
+      status: res.status,
+      json: (await res.json()) as Record<string, unknown>,
+    };
   };
   return { r, call };
 }
