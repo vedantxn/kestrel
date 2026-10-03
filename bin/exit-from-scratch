@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Destroy the main stack and rebuild it from nothing, once (v1 plan WP9). The Elastic IP and the
+# state bucket live in the bootstrap stack, so the hostname survives.
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+VARS=(-var instance_type=m7i.2xlarge -var open_node_b_port=true -var autostop_enabled=false)
+start=$(date +%s)
+bin/tf main destroy --yes "${VARS[@]}"
+bin/tf main apply --yes "${VARS[@]}"
+bin/host up
+bin/host autostop off
+bin/host sync
+bin/host run -- sudo env SLOTS_A=6 POOL_A=3 SLOTS_B=6 POOL_B=3 infra/host/deploy.sh --two-nodes
+echo "rebuilt in $(( $(date +%s) - start )) s"
+bin/exit-check quick

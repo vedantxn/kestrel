@@ -10,7 +10,7 @@ set -a; . /var/lib/kestrel/compose.env; set +a
 mkdir -p /var/lib/kestrel/reports
 TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
 INSTANCE_TYPE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type)
-extra=()
+extra=(-e "SLOTS=$(( ${SLOTS_A:-0} + ${SLOTS_B:-0} ))" -e "POOL=$(( ${POOL_A:-0} + ${POOL_B:-0} ))")
 for kv in "$@"; do extra+=(-e "$kv"); done
 name=kestrel-bench
 docker rm -f "$name" >/dev/null 2>&1 || true
