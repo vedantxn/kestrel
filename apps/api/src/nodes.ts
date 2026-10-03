@@ -136,7 +136,12 @@ export async function heartbeat(
     });
 
     const heldIds = [...heldUuids.keys()];
-    const settled = state === "active" && !fenced && req.epoch === node.epoch;
+    // Not while the node still has reports to deliver: one of them may be this very session's removal.
+    const settled =
+      state === "active" &&
+      !fenced &&
+      req.epoch === node.epoch &&
+      req.pendingReports === 0;
 
     // Sessions the API is stopping on this node that the node no longer holds: absence is
     // confirmation. This repairs a lost stop and a lost start. The age floor keeps a heartbeat

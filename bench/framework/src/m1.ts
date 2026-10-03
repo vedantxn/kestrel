@@ -40,6 +40,26 @@ export interface M1Config {
 const EXPECT_TITLE = "Kestrel test page";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+async function waitForHot(host: HostConfig, ms: number): Promise<void> {
+  const n = host.nodes[0];
+  if (!n) return;
+  const secret = readFileSync(n.secretFile, "utf8").trim();
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    try {
+      const r = (await (
+        await fetch(`http://127.0.0.1:${n.agentPort}/v1/describe`, {
+          headers: { authorization: `Bearer ${secret}` },
+        })
+      ).json()) as { hotCount: number };
+      if (r.hotCount >= 1) return;
+    } catch {
+      /* try again */
+    }
+    await sleep(100);
+  }
+}
+
 export async function runM1(c: M1Config): Promise<Report> {
   const client = new KestrelClient(c.apiUrl, c.apiKey, 120_000);
   const report = makeReport("m1-exit-check", c.environment);
@@ -210,7 +230,8 @@ export async function runM1(c: M1Config): Promise<Report> {
         ["stopped", "failed", "timed_out"],
         20_000,
       );
-      await sleep(400); // let the pool refill: the target is for a pool that is keeping up
+      // The target is for a pool that is keeping up: wait until a browser is ready again before the next sample.
+      await waitForHot(c.host, 8_000);
     }
     const hotTimes = times.filter((_, i) => i >= 0);
     const s = summarize(hotTimes);

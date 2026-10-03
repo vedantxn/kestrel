@@ -150,6 +150,25 @@ describe("sessions the node no longer holds", () => {
     expect((await env.create()).statusCode).toBe(201);
   });
 
+  it("does not call a session vanished while the node still has reports to deliver", async () => {
+    const s = await created();
+    env.nodes.a!.held.clear();
+    env.clock.advance(7_000);
+    const body = { ...env.nodes.a!.heartbeatBody(), pendingReports: 1 };
+    await env.internal.inject({
+      method: "POST",
+      url: "/internal/nodes/heartbeat",
+      payload: body,
+      headers: { authorization: `Bearer ${env.nodes.a!.secret}` },
+    });
+    expect((await row(s.id)).status).toBe("ready"); // the removal report may be on its way
+    await env.nodes.a!.heartbeat(env.internal); // nothing pending now
+    expect(await row(s.id)).toMatchObject({
+      status: "failed",
+      endReason: "runtime_crash",
+    });
+  });
+
   it("does not touch a session the node does hold", async () => {
     const s = await created();
     for (let i = 0; i < 5; i++) {

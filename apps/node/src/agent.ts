@@ -1088,8 +1088,10 @@ export class NodeAgent {
     every(
       TIMINGS.heartbeatIntervalMs,
       async () => {
-        await this.heartbeat();
+        // Reports first: a heartbeat that stops listing a session before its `removed` report has been
+        // delivered makes the API think the session vanished, and it would record the wrong reason.
         await this.flushReports();
+        await this.heartbeat();
       },
       "heartbeat",
     );
