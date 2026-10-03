@@ -11,6 +11,7 @@ bin/tf main apply --yes "${VARS[@]}"
 bin/host up
 bin/host autostop off
 bin/host sync
+bin/host run -- sudo runtime/build.sh
 bin/host run -- sudo env SLOTS_A=6 POOL_A=3 SLOTS_B=6 POOL_B=3 infra/host/deploy.sh --two-nodes
 echo "rebuilt in $(( $(date +%s) - start )) s"
 bin/exit-check quick
