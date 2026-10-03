@@ -10,6 +10,10 @@ coverage/
 *.tfstate
 *.tfstate.*
 .vscode/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
 /reports/
 packages/db/src/generated/
 
