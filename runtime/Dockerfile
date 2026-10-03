@@ -19,7 +19,7 @@ ARG CHROME_VERSION
 # display, and fonts. `curl` and `unzip` are removed again once Chrome is installed.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip xvfb xauth \
+      ca-certificates curl unzip xvfb xauth ffmpeg \
       fonts-liberation fonts-noto-color-emoji fonts-noto-cjk \
       libasound2 libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 \
       libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
@@ -34,10 +34,12 @@ RUN apt-get update \
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 
+# /artifacts: the recording volume's mount point (W3). Docker gives a new named volume the image
+# directory's owner, so the recorder can write to it; without a volume it stays read-only.
 # One unprivileged user for everything inside (R10): nothing here is trusted, so separating users buys nothing.
 RUN useradd --uid 10001 --user-group --no-create-home --home-dir /home/kestrel --shell /usr/sbin/nologin kestrel \
- && mkdir -p /opt/runtimed /home/kestrel /profile \
- && chown -R 10001:10001 /home/kestrel /profile
+ && mkdir -p /opt/runtimed /home/kestrel /profile /artifacts \
+ && chown -R 10001:10001 /home/kestrel /profile /artifacts
 
 COPY runtimed.mjs /opt/runtimed/runtimed.mjs
 

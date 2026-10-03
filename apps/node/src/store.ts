@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS reports (
   body TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stops (session_id TEXT PRIMARY KEY, until INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS recordings (
+  session_id TEXT PRIMARY KEY,
+  volume TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 `;
 
 /**
@@ -345,5 +350,50 @@ export class Store {
   ackReports(ids: string[]): void {
     const del = this.db.prepare("DELETE FROM reports WHERE id = ?");
     this.db.transaction(() => ids.forEach((id) => del.run(id)))();
+  }
+
+  // --- recordings (W3) ---------------------------------------------------------------------------
+
+  /** A session that records keeps its container's volume after the container goes, until retention ends. */
+  addRecording(sessionId: string, volume: string, createdAt: number): void {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO recordings(session_id, volume, created_at) VALUES(?, ?, ?)",
+      )
+      .run(sessionId, volume, createdAt);
+  }
+
+  getRecording(
+    sessionId: string,
+  ): { sessionId: string; volume: string; createdAt: number } | undefined {
+    const r = this.db
+      .prepare("SELECT * FROM recordings WHERE session_id = ?")
+      .get(sessionId) as Record<string, unknown> | undefined;
+    return r
+      ? {
+          sessionId: r.session_id as string,
+          volume: r.volume as string,
+          createdAt: r.created_at as number,
+        }
+      : undefined;
+  }
+
+  allRecordings(): { sessionId: string; volume: string; createdAt: number }[] {
+    return (
+      this.db.prepare("SELECT * FROM recordings").all() as Record<
+        string,
+        unknown
+      >[]
+    ).map((r) => ({
+      sessionId: r.session_id as string,
+      volume: r.volume as string,
+      createdAt: r.created_at as number,
+    }));
+  }
+
+  deleteRecording(sessionId: string): void {
+    this.db
+      .prepare("DELETE FROM recordings WHERE session_id = ?")
+      .run(sessionId);
   }
 }

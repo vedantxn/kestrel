@@ -72,6 +72,7 @@ describe("session options", () => {
       viewport: { width: 1280, height: 720 },
       network: {},
       metadata: {},
+      recording: false,
     });
   });
 

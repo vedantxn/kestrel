@@ -27,3 +27,4 @@ packages/**/src/**/*.js.map
 infra/terraform/**/backend.hcl
 infra/terraform/**/backend_s3.tf
 infra/terraform/**/tfplan
+.claude/

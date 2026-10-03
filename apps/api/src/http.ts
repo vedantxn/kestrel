@@ -1,8 +1,11 @@
+import { Readable } from "node:stream";
 import {
   CreateSessionRequest,
   HeartbeatRequest,
   ListEventsQuery,
+  ComputerRequest,
   ListSessionsQuery,
+  MintTokenRequest,
   RegisterRequest,
   ReportsRequest,
   buildOpenApiDocument,
@@ -21,12 +24,17 @@ import { authenticate, safeEqual } from "./auth.js";
 import type { Auth, Ctx } from "./context.js";
 import { AppError } from "./errors.js";
 import { newRequestId } from "./ids.js";
+import { LIVE_PAGE, LIVE_PAGE_HEADERS } from "./live-page.js";
+import { registerMcp, type McpOptions } from "./mcp.js";
 import { heartbeat, ingestReports, registerNode } from "./nodes.js";
 import {
   createSession,
   getSession,
   listEvents,
   listSessions,
+  mintSessionToken,
+  sessionComputer,
+  sessionRecording,
   stopSession,
 } from "./sessions.js";
 import type { Sweeper } from "./sweeper.js";
@@ -161,7 +169,10 @@ function send(
 }
 
 /** The public listener (A2): what Caddy forwards. */
-export function buildPublicApp(ctx: Ctx): FastifyInstance {
+export function buildPublicApp(
+  ctx: Ctx,
+  opts: { mcp?: McpOptions } = {},
+): FastifyInstance {
   const app = baseApp(ctx, { bodyLimit: 64 * 1024 });
   const authed = async (req: FastifyRequest): Promise<Auth> => {
     req.auth = await authenticate(ctx.db, ctx.clock, req.headers);
@@ -213,6 +224,50 @@ export function buildPublicApp(ctx: Ctx): FastifyInstance {
     );
   });
 
+  app.post(
+    "/v1/sessions/:id/tokens",
+    { schema: { body: MintTokenRequest } },
+    async (req, reply) => {
+      const token = await mintSessionToken(
+        ctx,
+        await authed(req),
+        (req.params as { id: string }).id,
+        req.body as MintTokenRequest,
+      );
+      return reply.status(201).header("cache-control", "no-store").send(token);
+    },
+  );
+
+  app.post(
+    "/v1/sessions/:id/computer",
+    { schema: { body: ComputerRequest } },
+    async (req) =>
+      sessionComputer(
+        ctx,
+        await authed(req),
+        (req.params as { id: string }).id,
+        req.body as ComputerRequest,
+      ),
+  );
+
+  app.get("/v1/sessions/:id/recording", async (req, reply) => {
+    const r = await sessionRecording(
+      ctx,
+      await authed(req),
+      (req.params as { id: string }).id,
+    );
+    reply
+      .header("content-type", "video/mp4")
+      .header("cache-control", "no-store");
+    if (r.size > 0) reply.header("content-length", String(r.size));
+    return reply.send(Readable.fromWeb(r.body as never));
+  });
+
+  // W2. The viewer page; it carries no secret, so it needs no key (the token is in the fragment).
+  app.get("/live/:id", async (_req, reply) =>
+    reply.headers(LIVE_PAGE_HEADERS).send(LIVE_PAGE),
+  );
+
   app.get(
     "/v1/sessions/:id/events",
     { schema: { querystring: ListEventsQuery } },
@@ -225,6 +280,9 @@ export function buildPublicApp(ctx: Ctx): FastifyInstance {
       );
     },
   );
+
+  // W7: the MCP server, on the same key check as everything above.
+  registerMcp(app, ctx, authed, opts.mcp);
 
   return app;
 }

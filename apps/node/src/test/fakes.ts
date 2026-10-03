@@ -1,5 +1,7 @@
 import type Docker from "dockerode";
 import {
+  type ComputerRequest,
+  type ComputerResponse,
   newId,
   type ConfigureRequest,
   type ConfigureResponse,
@@ -17,11 +19,16 @@ import {
   type StartRequest,
 } from "@kestrel/contracts";
 import { FakeClock, Failpoints, createLogger } from "@kestrel/shared";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NodeAgent, type AgentConfig, type ApiClient } from "../agent.js";
-import type { ContainerInfo, DockerDriver, DockerEvent } from "../docker.js";
+import type {
+  ContainerInfo,
+  DockerDriver,
+  DockerEvent,
+  Volumes,
+} from "../docker.js";
 import type { EgressClient } from "../egress-client.js";
 import type { RuntimeClient } from "../runtime-client.js";
 import { Store } from "../store.js";
@@ -155,6 +162,19 @@ export class FakeRuntime implements RuntimeClient {
       deviceScaleFactor: 1,
       chromeVersion: "154.0.8037.92",
     };
+  }
+
+  async computer(
+    address: string,
+    _token: string,
+    req: ComputerRequest,
+  ): Promise<ComputerResponse> {
+    this.calls.push({ op: `computer:${req.action}`, address });
+    if (!this.alive(address)) throw new Error("connection refused");
+    return { ok: true, width: 1280, height: 720, url: "about:blank" };
+  }
+  async stopRecording(address: string): Promise<void> {
+    this.calls.push({ op: "stopRecording", address });
   }
 }
 
@@ -292,8 +312,35 @@ export interface Rig {
   failpoints: Failpoints;
   config: AgentConfig;
   dbPath: string;
+  volumes: FakeVolumes | undefined;
   /** A new agent process over the same durable store and the same world (a restart after a crash). */
   restart(): NodeAgent;
+}
+
+/** W3. Volumes as directories in a temporary folder, so recordings can be read back for real. */
+export class FakeVolumes implements Volumes {
+  root = mkdtempSync(join(tmpdir(), "vols-"));
+  vols = new Map<string, number>();
+  removed: string[] = [];
+  failCreates = false;
+  constructor(private readonly clock: FakeClock) {}
+  async create(name: string) {
+    if (this.failCreates) throw new Error("quota not supported");
+    mkdirSync(join(this.root, name));
+    this.vols.set(name, this.clock.now());
+  }
+  async remove(name: string) {
+    if (this.vols.delete(name)) {
+      this.removed.push(name);
+      rmSync(join(this.root, name), { recursive: true, force: true });
+    }
+  }
+  async list() {
+    return [...this.vols].map(([name, createdAt]) => ({ name, createdAt }));
+  }
+  async path(name: string) {
+    return this.vols.has(name) ? join(this.root, name) : null;
+  }
 }
 
 export const SPEC = {
@@ -308,9 +355,15 @@ export const SPEC = {
 
 export function makeRig(
   over: Partial<AgentConfig> = {},
-  opts: { failpoints?: string; dbPath?: string; skipBoot?: boolean } = {},
+  opts: {
+    failpoints?: string;
+    dbPath?: string;
+    skipBoot?: boolean;
+    volumes?: boolean;
+  } = {},
 ): Rig {
   const clock = new FakeClock();
+  const volumes = opts.volumes ? new FakeVolumes(clock) : undefined;
   const docker = new FakeDocker(clock);
   const runtime = new FakeRuntime(docker);
   const egress = new FakeEgress();
@@ -352,6 +405,7 @@ export function makeRig(
       log: createLogger("agent-test", "silent"),
       failpoints,
       dockerSpec: SPEC,
+      ...(volumes ? { volumes } : {}),
     });
   const rig: Rig = {
     agent: build(),
@@ -366,6 +420,7 @@ export function makeRig(
     failpoints,
     config,
     dbPath,
+    volumes,
     restart: () => (rig.agent = build()),
   };
   return rig;

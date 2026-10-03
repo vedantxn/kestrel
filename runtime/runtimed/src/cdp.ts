@@ -1,8 +1,16 @@
 import type { Viewport } from "@kestrel/contracts";
 import WebSocket from "ws";
 
-/** A minimal CDP client: just enough to size the window and measure the page. */
-class Cdp {
+export interface CdpEvent {
+  method: string;
+  params: Record<string, unknown>;
+  sessionId?: string;
+}
+
+/** A minimal CDP client: enough to size the window, measure the page, and run live view (W2). */
+export class Cdp {
+  private listeners = new Set<(e: CdpEvent) => void>();
+  private closeListeners = new Set<() => void>();
   private id = 0;
   private waiting = new Map<
     number,
@@ -16,8 +24,20 @@ class Cdp {
           id?: number;
           result?: unknown;
           error?: { message?: string };
+          method?: string;
+          params?: Record<string, unknown>;
+          sessionId?: string;
         };
-        if (m.id === undefined) return;
+        if (m.id === undefined) {
+          if (typeof m.method === "string")
+            for (const l of this.listeners)
+              l({
+                method: m.method,
+                params: m.params ?? {},
+                ...(m.sessionId ? { sessionId: m.sessionId } : {}),
+              });
+          return;
+        }
         const w = this.waiting.get(m.id);
         if (!w) return;
         this.waiting.delete(m.id);
@@ -27,7 +47,10 @@ class Cdp {
         /* ignore */
       }
     });
-    ws.on("close", () => this.failAll(new Error("CDP connection closed")));
+    ws.on("close", () => {
+      this.failAll(new Error("CDP connection closed"));
+      for (const l of this.closeListeners) l();
+    });
     ws.on("error", () => this.failAll(new Error("CDP connection error")));
   }
 
@@ -36,7 +59,7 @@ class Cdp {
       const ws = new WebSocket(url, {
         perMessageDeflate: false,
         handshakeTimeout: 5000,
-        maxPayload: 8 * 1024 * 1024,
+        maxPayload: 32 * 1024 * 1024, // screenshots
       });
       ws.once("open", () => resolve(new Cdp(ws)));
       ws.once("error", reject);
@@ -73,6 +96,15 @@ class Cdp {
         }),
       );
     });
+  }
+
+  onEvent(l: (e: CdpEvent) => void): () => void {
+    this.listeners.add(l);
+    return () => this.listeners.delete(l);
+  }
+
+  onClose(l: () => void): void {
+    this.closeListeners.add(l);
   }
 
   close(): void {
@@ -123,6 +155,8 @@ export async function applyViewport(
   viewport: Viewport;
   deviceScaleFactor: number;
   chromeVersion: string;
+  /** The whole window, toolbar included: what the recorder captures (W3). */
+  window: { width: number; height: number };
 }> {
   const v = await getVersion(chromePort);
   const cdp = await Cdp.connect(v.wsUrl);
@@ -180,6 +214,7 @@ export async function applyViewport(
       viewport: { width: m.iw, height: m.ih },
       deviceScaleFactor: m.dpr,
       chromeVersion: v.browser,
+      window: { width: m.ow, height: m.oh },
     };
   } finally {
     cdp.close();

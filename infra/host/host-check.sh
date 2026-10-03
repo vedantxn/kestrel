@@ -35,6 +35,13 @@ else
   bad "/data is not an xfs mount"
 fi
 
+# Recording volumes (W3): Docker's volumes directory is noexec, nosuid, nodev.
+if findmnt -no OPTIONS /data/docker/volumes 2>/dev/null | grep -q noexec; then
+  findmnt -no OPTIONS /data/docker/volumes | grep -q nosuid && ok "/data/docker/volumes is noexec,nosuid" || bad "/data/docker/volumes is not nosuid"
+else
+  bad "/data/docker/volumes is not a noexec mount (recordings would be executable)"
+fi
+
 # Instance metadata: tokens required, hop limit 1 (I11). A container must not obtain instance credentials.
 tok=$(curl -s -m 3 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' || true)
 if [ -n "$tok" ]; then

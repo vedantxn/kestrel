@@ -25,6 +25,10 @@ export const RUNTIME_PORTS = {
 export const RUNTIME_PATHS = {
   health: "/health",
   configure: "/configure",
+  /** W4: one `/computer` action on the page live view shows. */
+  computer: "/computer",
+  /** W3: finish the recording so its last fragment is written; the agent calls it before removal. */
+  recordingStop: "/recording/stop",
 } as const;
 
 /** `GET /health`. A pooled container is "hot" only when this says `ready`. */
@@ -45,6 +49,8 @@ export type RuntimeHealth = z.infer<typeof RuntimeHealth>;
 export const ConfigureRequest = z.object({
   sessionProof: SessionProof,
   viewport: Viewport,
+  /** W3. Start recording the display once configured; needs the recording volume at RECORDING_DIR. */
+  recording: z.boolean().default(false),
 });
 export type ConfigureRequest = z.infer<typeof ConfigureRequest>;
 
@@ -72,3 +78,15 @@ export interface RuntimeModule {
   onConfigure?(req: ConfigureRequest): Promise<void>;
   stop?(): Promise<void>;
 }
+
+/** W3. Where the recording volume is mounted in the container, and the file the recorder writes. */
+export const RECORDING_DIR = "/artifacts";
+export const RECORDING_FILE = "recording.mp4";
+export const RECORDING_LIMITS = {
+  /** The volume's quota; the recorder stops itself a little before it. */
+  volumeBytes: 600 * 1024 * 1024,
+  fileBytes: 580 * 1024 * 1024,
+  framerate: 10,
+  /** Kept on the node this long after the session ends. */
+  retentionMs: 24 * 60 * 60_000,
+} as const;

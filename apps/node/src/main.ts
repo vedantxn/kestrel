@@ -9,7 +9,7 @@ import { NodeAgent, DEFAULT_CONFIG } from "./agent.js";
 import { HttpApiClient } from "./api-client.js";
 import { copyCertificate } from "./cert-copy.js";
 import { Env } from "./config.js";
-import { DockerodeDriver } from "./docker.js";
+import { DockerodeDriver, DockerVolumes } from "./docker.js";
 import { UnixEgressClient } from "./egress-client.js";
 import { Firewall } from "./firewall.js";
 import { GatewayHub } from "./gateway-hub.js";
@@ -77,6 +77,14 @@ agent = new NodeAgent({
   clock: systemClock,
   log,
   failpoints,
+  ...(env.RECORDING === "on"
+    ? {
+        volumes: new DockerVolumes(env.NODE_ID, {
+          socketPath: env.DOCKER_SOCKET,
+          timeout: 60_000,
+        }),
+      }
+    : {}),
   dockerSpec: {
     nodeId: env.NODE_ID,
     image: env.RUNTIME_IMAGE,

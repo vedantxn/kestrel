@@ -5,6 +5,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyViewport } from "./cdp.js";
 import { chromeArgs } from "./chrome-args.js";
+import { Tabs } from "./page.js";
 import { ControlServer } from "./control.js";
 import { CdpForward } from "./forward.js";
 import { Supervisor, type Proc, type SpawnFn } from "./supervisor.js";
@@ -121,6 +122,7 @@ const baseCfg: Env = {
   KESTREL_CONTROL_TOKEN: TOKEN,
   KESTREL_PROXY: "http://172.30.1.1:3128",
   KESTREL_NODE: "a",
+  RECORDING_DIR: "/nonexistent",
   CHROME_PATH: "/opt/chrome/chrome",
   XVFB_PATH: "Xvfb",
   DISPLAY_NUM: ":99",
@@ -314,11 +316,14 @@ describe("sizing the page to the viewport (A6)", () => {
     chrome = new FakeChrome();
     const port = await chrome.start();
     const r = await applyViewport(port, { width: 1000, height: 600 });
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       viewport: { width: 1000, height: 600 },
       deviceScaleFactor: 1,
       chromeVersion: "Chrome/154.0.8037.92",
     });
+    // The whole window is larger than the page by the toolbar and borders: what the recorder captures.
+    expect(r.window.width).toBeGreaterThan(1000);
+    expect(r.window.height).toBeGreaterThan(600);
     expect(chrome.bounds[0]).toMatchObject({
       left: 0,
       top: 0,
@@ -486,7 +491,7 @@ describe("the control API (C5)", () => {
       "/dev/null",
       { displayMs: 200, chromeMs: 2000, pollMs: 20 },
     );
-    const control = new ControlServer(TOKEN, sup, fwd, port);
+    const control = new ControlServer(TOKEN, sup, fwd, port, new Tabs());
     const cport = await control.listen(0, "127.0.0.1");
     closers.push(() => control.close());
     const call = async (

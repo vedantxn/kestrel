@@ -3,8 +3,15 @@ import {
   NodeId,
   SessionOptions,
   TIMINGS,
+  COMPUTER_LIMITS,
+  TOKEN_TTL,
   buildConnectUrl,
+  buildLiveViewUrl,
   uuidToId,
+  type MintTokenRequest,
+  type SessionToken,
+  type ComputerRequest,
+  type ComputerResponse,
   type CreateSessionRequest,
   type EndReason,
   type ListEventsResponse,
@@ -16,6 +23,7 @@ import {
 } from "@kestrel/contracts";
 import type { Prisma } from "@kestrel/db";
 import { type Session as SessionRow } from "@kestrel/db";
+import { randomBytes } from "node:crypto";
 import { FailpointError, sleep } from "@kestrel/shared";
 import type { Auth, Ctx } from "./context.js";
 import { AppError } from "./errors.js";
@@ -283,6 +291,7 @@ async function startOnNode(
       timeoutMs: options.timeout,
       idleTimeoutMs: options.idleTimeout,
       stopOnDisconnect: options.stopOnDisconnect,
+      recording: options.recording,
     };
 
     let result;
@@ -476,6 +485,137 @@ export async function getSession(
     : null;
   if (!row) throw new AppError("not_found", "No such session.");
   return toApiSession(ctx, row);
+}
+
+/**
+ * W1. A token for one session: `cdp` re-issues the connect URL; `view` and `control` open live
+ * view, for a shorter time the caller may choose. Only a running session gets one.
+ */
+export async function mintSessionToken(
+  ctx: Ctx,
+  auth: Auth,
+  id: string,
+  req: MintTokenRequest,
+): Promise<SessionToken> {
+  const uuid = sessionUuid(id);
+  const row = uuid
+    ? await ctx.db.session.findFirst({
+        where: { id: uuid, projectId: auth.projectId },
+      })
+    : null;
+  if (!row) throw new AppError("not_found", "No such session.");
+  const node = row.nodeId ? ctx.nodes.get(row.nodeId) : undefined;
+  if (
+    (row.status !== "ready" && row.status !== "active") ||
+    !node ||
+    !row.readyAt ||
+    !row.nodeId
+  )
+    throw new AppError("conflict", "The session is not running.", {
+      retryable: false,
+    });
+  const options = SessionOptions.parse(row.options);
+  const publicId = publicSessionId(row.id);
+  const live = req.scope !== "cdp";
+  let ttlMs = live ? (req.ttlMs ?? TOKEN_TTL.liveDefaultMs) : req.ttlMs;
+  if (req.singleUse)
+    ttlMs = Math.min(
+      ttlMs ?? TOKEN_TTL.singleUseMaxMs,
+      TOKEN_TTL.singleUseMaxMs,
+    );
+  const { token, expMs } = await ctx.signer.mintWithExpiry({
+    sessionId: publicId,
+    projectId: uuidToId("prj", row.projectId),
+    nodeId: row.nodeId,
+    scope: req.scope,
+    deadlineMs: row.readyAt.getTime() + options.timeout,
+    nowMs: ctx.clock.now(),
+    ...(ttlMs !== undefined ? { ttlMs } : {}),
+    ...(req.singleUse ? { jti: randomBytes(16).toString("hex") } : {}),
+  });
+  return {
+    scope: req.scope,
+    token,
+    url: live
+      ? buildLiveViewUrl(ctx.publicHostname, node.connectPort, publicId, token)
+      : buildConnectUrl(ctx.publicHostname, node.connectPort, publicId, token),
+    expiresAt: new Date(expMs).toISOString(),
+  };
+}
+
+/**
+ * W3. A session's recording, from the node it ran on. Available while it runs and after it
+ * ends, until the node's retention removes it; gone if the node is.
+ */
+export async function sessionRecording(
+  ctx: Ctx,
+  auth: Auth,
+  id: string,
+): Promise<{ body: ReadableStream<Uint8Array>; size: number }> {
+  const uuid = sessionUuid(id);
+  const row = uuid
+    ? await ctx.db.session.findFirst({
+        where: { id: uuid, projectId: auth.projectId },
+        select: { id: true, nodeId: true, options: true },
+      })
+    : null;
+  if (!row) throw new AppError("not_found", "No such session.");
+  if (!row.nodeId || !SessionOptions.parse(row.options).recording)
+    throw new AppError("not_found", "This session was not recorded.");
+  let r;
+  try {
+    r = await ctx.nodeClient.recording(
+      row.nodeId,
+      publicSessionId(row.id),
+      10_000,
+    );
+  } catch {
+    throw new AppError("internal", "The session's node did not answer.");
+  }
+  if (!r)
+    throw new AppError(
+      "not_found",
+      "No recording is available for this session (the node could not record, or it has been removed).",
+    );
+  return r;
+}
+
+/** W4. One `/computer` action on a running session, through its node agent. */
+export async function sessionComputer(
+  ctx: Ctx,
+  auth: Auth,
+  id: string,
+  action: ComputerRequest,
+): Promise<ComputerResponse> {
+  const uuid = sessionUuid(id);
+  const row = uuid
+    ? await ctx.db.session.findFirst({
+        where: { id: uuid, projectId: auth.projectId },
+        select: { id: true, status: true, nodeId: true },
+      })
+    : null;
+  if (!row) throw new AppError("not_found", "No such session.");
+  if ((row.status !== "ready" && row.status !== "active") || !row.nodeId)
+    throw new AppError("conflict", "The session is not running.", {
+      retryable: false,
+    });
+  let r;
+  try {
+    r = await ctx.nodeClient.computer(
+      row.nodeId,
+      publicSessionId(row.id),
+      action,
+      COMPUTER_LIMITS.actionTimeoutMs + 5_000,
+    );
+  } catch {
+    throw new AppError("internal", "The session's node did not answer.");
+  }
+  if (r.ok) return r.response;
+  if (r.status === 404 || r.status === 409)
+    throw new AppError("conflict", "The session is not running.", {
+      retryable: false,
+    });
+  throw new AppError("internal", r.error);
 }
 
 function encodeCursor(parts: (string | number)[]): string {

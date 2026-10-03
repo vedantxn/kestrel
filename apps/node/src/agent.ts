@@ -1,10 +1,17 @@
 import { randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
+import { join } from "node:path";
 import {
   LIMITS,
   NODE_PROTOCOL_VERSION,
+  RECORDING_FILE,
+  RECORDING_LIMITS,
   RUNTIME_PORTS,
   TIMINGS,
   type Attachment,
+  type ComputerRequest,
+  type ComputerResponse,
   type EndReason,
   type HeartbeatRequest,
   type HeartbeatResponse,
@@ -31,6 +38,7 @@ import {
   type DockerDriver,
   type NodeConfigForDocker,
   type Role,
+  type Volumes,
 } from "./docker.js";
 import type { EgressClient } from "./egress-client.js";
 import type { Firewall } from "./firewall.js";
@@ -85,6 +93,8 @@ export interface AgentDeps {
   log: Logger;
   failpoints: Failpoints;
   dockerSpec: NodeConfigForDocker;
+  /** W3. Recording volumes; without them sessions are not recorded. */
+  volumes?: Volumes;
 }
 
 const hex = (n: number): string => randomBytes(n).toString("hex");
@@ -380,11 +390,25 @@ export class NodeAgent {
         });
         await this.d.failpoints.hit("node.start.after_policy");
 
+        // W3. Recorded only if the container has a volume. The volume is kept from now on, so even a
+        // start that fails later leaves nothing unaccounted for: retention removes it.
+        let recording = false;
+        if (req.recording) {
+          const volume = (await this.d.docker.inspect(got.containerId))?.labels[
+            "kestrel.volume"
+          ];
+          if (volume) {
+            this.store.addRecording(id, volume, this.now());
+            recording = true;
+          }
+        }
+
         // Configuring the container is also its health check: a browser that cannot apply it never gets a route.
         const proof = hex(32);
         const cfg = await this.d.runtime.configure(got.address, got.token, {
           sessionProof: proof as never,
           viewport: req.viewport,
+          recording,
         });
         // The container is untrusted: check that what it reports is what was asked (A6).
         if (
@@ -546,9 +570,16 @@ export class NodeAgent {
     role: Role,
   ): Promise<{ info: ContainerInfo; token: string }> {
     const token = hex(24);
-    const info = await this.d.docker.run(
-      buildContainerSpec(this.d.dockerSpec, role, token),
-    );
+    const volume = await this.makeRecordingVolume();
+    let info: ContainerInfo;
+    try {
+      info = await this.d.docker.run(
+        buildContainerSpec(this.d.dockerSpec, role, token, volume),
+      );
+    } catch (e) {
+      if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
+      throw e;
+    }
     if (!info.address) {
       await this.d.docker.remove(info.id).catch(() => undefined);
       throw new Error("the container has no address on the session network");
@@ -632,6 +663,39 @@ export class NodeAgent {
 
   // --- stop (G10, G14) ------------------------------------------------------------------------
 
+  /**
+   * W4. One `/computer` action on a running session's page. It counts as activity (HLD 4.1):
+   * a session nobody is attached to has its idle deadline pushed back.
+   */
+  async computer(
+    sessionId: string,
+    req: ComputerRequest,
+  ): Promise<
+    | { ok: true; response: ComputerResponse }
+    | { ok: false; status: 404 | 409 | 502; error: string }
+  > {
+    const b = this.store.getBinding(sessionId);
+    if (!b) return { ok: false, status: 404, error: "no such session" };
+    if (b.state !== "ready" || !b.address || !b.controlToken)
+      return { ok: false, status: 409, error: "the session is not running" };
+    if (b.idleAt !== null)
+      this.store.updateBinding(sessionId, {
+        idleAt: this.now() + b.idleTimeoutMs,
+      });
+    try {
+      return {
+        ok: true,
+        response: await this.d.runtime.computer(b.address, b.controlToken, req),
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        status: 502,
+        error: `the browser did not complete the action: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`,
+      };
+    }
+  }
+
   async stop(req: StopRequest): Promise<StopResponse> {
     const id = req.sessionId as string;
     const b = this.store.getBinding(id);
@@ -673,9 +737,22 @@ export class NodeAgent {
       this.store.updateBinding(id, { state: "stopping", stopReason: reason });
     this.d.hub.removeRoute(id);
     await this.d.failpoints.hit("node.stop.after_route_removed");
+    const recorded = this.store.getRecording(id);
+    // W3. Let the recorder finish its last fragment; best effort, the file is playable without it.
+    if (recorded && b.address && b.controlToken)
+      await this.d.runtime
+        .stopRecording(b.address, b.controlToken)
+        .catch(() => undefined);
     if (b.address) await this.clearPolicyBeforeRemoval(id, b.address);
     await this.d.failpoints.hit("node.stop.after_policy_cleared");
+    const volume =
+      b.containerId && !recorded
+        ? (await this.d.docker.inspect(b.containerId).catch(() => null))
+            ?.labels["kestrel.volume"]
+        : undefined;
     if (b.containerId) await this.d.docker.remove(b.containerId);
+    // A volume nobody recorded to goes with its container; reconciliation catches any left behind.
+    if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
     await this.d.failpoints.hit("node.stop.after_container_removed");
 
     const seconds = b.readyAt
@@ -892,6 +969,91 @@ export class NodeAgent {
       );
       await this.d.docker.remove(c.id).catch(() => undefined);
     }
+    await this.reapVolumes(containers, now).catch((e) =>
+      this.d.log.warn(
+        { err: e instanceof Error ? e.message : String(e) },
+        "could not reap recording volumes",
+      ),
+    );
+  }
+
+  // --- recordings (W3) --------------------------------------------------------------------------
+
+  private volumeWarned = false;
+
+  /** A size-limited volume for a new container's recording, or none if this host cannot limit its size. */
+  private async makeRecordingVolume(): Promise<string | undefined> {
+    if (!this.d.volumes) return undefined;
+    const name = `kestrel-rec-${this.c.nodeId}-${hex(8)}`;
+    try {
+      await this.d.volumes.create(name, RECORDING_LIMITS.volumeBytes);
+      return name;
+    } catch (e) {
+      if (!this.volumeWarned) {
+        this.volumeWarned = true;
+        this.d.log.warn(
+          { err: e instanceof Error ? e.message : String(e) },
+          "cannot make size-limited recording volumes; sessions on this node will not be recorded",
+        );
+      }
+      return undefined;
+    }
+  }
+
+  /**
+   * Remove recording volumes no container uses and no kept recording names, and recordings past
+   * retention. A volume younger than the new-container grace may belong to a container being made.
+   */
+  private async reapVolumes(
+    containers: ContainerInfo[],
+    now: number,
+  ): Promise<void> {
+    const v = this.d.volumes;
+    if (!v) return;
+    for (const r of this.store.allRecordings()) {
+      if (now - r.createdAt < RECORDING_LIMITS.retentionMs) continue;
+      if (this.store.getBinding(r.sessionId)) continue; // still running
+      await v.remove(r.volume);
+      this.store.deleteRecording(r.sessionId);
+    }
+    const used = new Set<string>();
+    for (const c of containers)
+      if (c.labels["kestrel.volume"]) used.add(c.labels["kestrel.volume"]);
+    for (const r of this.store.allRecordings()) used.add(r.volume);
+    for (const vol of await v.list()) {
+      if (used.has(vol.name)) continue;
+      if (now - vol.createdAt < this.c.newContainerGraceMs) continue;
+      await v.remove(vol.name).catch(() => undefined);
+    }
+  }
+
+  /**
+   * W3. The session's recording file, opened safely: the volume was written by an untrusted
+   * container, so the file must be a regular file reached without following a link, and no
+   * larger than the recorder's limit (threat model: anything read back from a container is hostile).
+   */
+  async openRecording(
+    sessionId: string,
+  ): Promise<{ fd: FileHandle; size: number } | null> {
+    const r = this.store.getRecording(sessionId);
+    if (!r || !this.d.volumes) return null;
+    const dir = await this.d.volumes.path(r.volume);
+    if (!dir) return null;
+    let fd: FileHandle;
+    try {
+      fd = await open(
+        join(dir, RECORDING_FILE),
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      );
+    } catch {
+      return null;
+    }
+    const st = await fd.stat();
+    if (!st.isFile() || st.size > RECORDING_LIMITS.volumeBytes) {
+      await fd.close();
+      return null;
+    }
+    return { fd, size: st.size };
   }
 
   /**

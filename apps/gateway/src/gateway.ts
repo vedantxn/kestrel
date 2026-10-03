@@ -11,7 +11,9 @@ import type { Duplex } from "node:stream";
 import {
   CLOSE_CODES,
   CONNECT_LIMITS,
+  LIVE_MODE_HEADER,
   PROOF_HEADER,
+  RUNTIME_LIVE_PATH,
   TOKEN_QUERY_PARAM,
   matchGatewayPath,
   redactToken,
@@ -19,6 +21,7 @@ import {
   type GatewayRoute,
 } from "@kestrel/contracts";
 import {
+  SpentTokens,
   systemClock,
   type Clock,
   type Logger,
@@ -55,7 +58,13 @@ export interface GatewayOptions {
 }
 
 type Auth =
-  | { ok: true; route: GatewayRoute; entry: RouteEntry; token: string }
+  | {
+      ok: true;
+      route: GatewayRoute;
+      entry: RouteEntry;
+      token: string;
+      scope: "cdp" | "view" | "control";
+    }
   | { ok: false; close: number; status: number; message: string };
 
 /**
@@ -67,6 +76,10 @@ export class Gateway {
   private server: Server | undefined;
   private readonly wss: WebSocketServer;
   private relays = new Map<string, Set<Relay>>();
+  /** W2. View-only live sockets: they must not keep a session alive (HLD 4.1), so they are left out of attachments. */
+  private passive = new WeakSet<Relay>();
+  /** W1. Single-use tokens already spent on this gateway. */
+  private spent = new SpentTokens();
   private pendingHandshakes = 0;
   private draining = false;
   private sweep: NodeJS.Timeout | undefined;
@@ -182,11 +195,11 @@ export class Gateway {
 
   attachments(): Attachment[] {
     return [...this.relays]
-      .filter(([, s]) => s.size > 0)
       .map(([sessionId, s]) => ({
         sessionId: sessionId as Attachment["sessionId"],
-        connections: s.size,
-      }));
+        connections: [...s].filter((r) => !this.passive.has(r)).length,
+      }))
+      .filter((a) => a.connections > 0);
   }
 
   /** Close every connection of a session, e.g. because its route is gone. */
@@ -214,8 +227,13 @@ export class Gateway {
       (typeof bearer === "string" && bearer.toLowerCase().startsWith("bearer ")
         ? bearer.slice(7).trim()
         : "");
+    // W1: the CDP paths take a `cdp` token; live view takes `view` or `control`.
+    const scopes =
+      route.kind === "live"
+        ? (["view", "control"] as const)
+        : (["cdp"] as const);
     const v = token
-      ? await this.o.verifier.verify(token, this.clock.now())
+      ? await this.o.verifier.verify(token, this.clock.now(), scopes)
       : ({ ok: false, reason: "invalid" } as const);
     if (!v.ok || v.claims.sub !== route.sessionId) {
       return {
@@ -251,7 +269,17 @@ export class Gateway {
         message: "token invalid or expired",
       };
     }
-    return { ok: true, route, entry, token };
+    // Spent last, so a token is used up only by a request that would otherwise have been served.
+    if (v.claims.once && v.claims.jti) {
+      if (!this.spent.spend(v.claims.jti, v.claims.exp, this.clock.now()))
+        return {
+          ok: false,
+          close: CLOSE_CODES.tokenInvalid,
+          status: 401,
+          message: "token already used",
+        };
+    }
+    return { ok: true, route, entry, token, scope: v.claims.scope };
   }
 
   private remote(req: IncomingMessage): string {
@@ -455,7 +483,7 @@ export class Gateway {
 
       let upstream: WebSocket;
       try {
-        upstream = await this.openUpstream(a.entry, a.route);
+        upstream = await this.openUpstream(a.entry, a.route, a.scope);
       } catch (e) {
         this.o.log.warn(
           {
@@ -474,7 +502,7 @@ export class Gateway {
         );
       }
       this.wss.handleUpgrade(req, socket, head, (client) =>
-        this.attach(a.route.sessionId, client, upstream),
+        this.attach(a.route.sessionId, client, upstream, a.scope === "view"),
       );
     } finally {
       this.pendingHandshakes--;
@@ -490,16 +518,25 @@ export class Gateway {
   private async openUpstream(
     entry: RouteEntry,
     route: GatewayRoute,
+    scope: "cdp" | "view" | "control" = "cdp",
   ): Promise<WebSocket> {
     let path: string;
-    if (route.kind === "browser-socket" || route.kind === "browser-socket-id")
+    const headers: Record<string, string> = { [PROOF_HEADER]: entry.proof };
+    if (route.kind === "live") {
+      // W2: runtimed's live module; the mode comes from the verified token, never from the client.
+      path = RUNTIME_LIVE_PATH;
+      headers[LIVE_MODE_HEADER] = scope === "control" ? "control" : "view";
+    } else if (
+      route.kind === "browser-socket" ||
+      route.kind === "browser-socket-id"
+    )
       path = await this.browserPath(entry);
     else if (route.kind === "page-socket")
       path = `/devtools/page/${route.targetId}`;
     else throw new Error("not a websocket route");
     return new Promise<WebSocket>((resolve, reject) => {
       const up = new WebSocket(`ws://${entry.address}:${entry.port}${path}`, {
-        headers: { [PROOF_HEADER]: entry.proof },
+        headers,
         perMessageDeflate: false,
         maxPayload: this.limits.maxMessageBytes,
         handshakeTimeout: this.o.upstreamTimeoutMs ?? 5_000,
@@ -521,6 +558,7 @@ export class Gateway {
     sessionId: string,
     client: WebSocket,
     upstream: WebSocket,
+    passive = false,
   ): void {
     const set = this.relays.get(sessionId) ?? new Set<Relay>();
     this.relays.set(sessionId, set);
@@ -537,6 +575,7 @@ export class Gateway {
       },
     });
     set.add(relay);
+    if (passive) this.passive.add(relay);
     this.o.metrics.connections.inc({ result: "ok" });
     this.o.metrics.open.set(this.connectionCount());
     relay.start();
@@ -556,6 +595,7 @@ export class Gateway {
   /** A route whose time has passed no longer serves its connections, whether or not the agent has said so. */
   private expireRoutes(): void {
     const now = this.clock.now();
+    this.spent.prune(now);
     for (const id of [...this.relays.keys()]) {
       const e = this.o.table.get(id);
       if (!e || e.notAfter * 1000 < now)

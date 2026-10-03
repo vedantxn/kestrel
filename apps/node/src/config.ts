@@ -24,6 +24,8 @@ export const Env = z.object({
   EGRESS_SOCKET: z.string().min(1),
   AGENT_SOCKET: z.string().min(1),
   CGROUP_PARENT: z.string().default("kestrel.slice"),
+  /** W3. Give containers size-limited recording volumes (needs xfs project quotas on Docker's data root). */
+  RECORDING: z.enum(["on", "off"]).default("on"),
   /** Seccomp profile JSON; omit to use Docker's default (decided by experiment V1). */
   SECCOMP_FILE: z.string().optional(),
   RUNTIME_VERSION: z.string().default("dev"),

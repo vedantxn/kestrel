@@ -96,6 +96,8 @@ services:
       - /run/xtables.lock:/run/xtables.lock
       - /srv/kestrel:/srv/kestrel:ro
       - /data/caddy:/data/caddy:ro
+      # W3: read recordings back from their volumes (opened without following links).
+      - /data/docker/volumes:/data/docker/volumes:ro
 
   gateway-a:
     <<: *platform
@@ -166,6 +168,8 @@ services:
       - /run/xtables.lock:/run/xtables.lock
       - /srv/kestrel:/srv/kestrel:ro
       - /data/caddy:/data/caddy:ro
+      # W3: read recordings back from their volumes (opened without following links).
+      - /data/docker/volumes:/data/docker/volumes:ro
 
   gateway-b:
     <<: *platform
