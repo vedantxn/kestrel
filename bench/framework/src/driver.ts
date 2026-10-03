@@ -92,6 +92,8 @@ export class PuppeteerDriver implements Driver {
     const browser = await puppeteer.connect({
       browserWSEndpoint: session.connectUrl,
       protocolTimeout: this.timeoutMs,
+      // Puppeteer otherwise emulates its own 800x600 viewport over whatever the session was created with.
+      defaultViewport: null,
     });
     try {
       const connectMs = performance.now() - t0;
