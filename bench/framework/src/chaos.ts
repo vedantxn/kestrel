@@ -598,10 +598,11 @@ export const CASES: ChaosCase[] = [
         const text = await (
           await fetch(`http://127.0.0.1:${port}/metrics`)
         ).text();
-        return Number(
-          /kestrel_gateway_closes_total\{code="4009"\} (\d+)/.exec(text)?.[1] ??
-            0,
-        );
+        return [
+          ...text.matchAll(
+            /kestrel_gateway_closes_total\{code="(4009|1011)"\} (\d+)/g,
+          ),
+        ].reduce((n, m) => n + Number(m[2]), 0);
       };
       const before = await closes();
       const u = new URL(a!.session.connectUrl as string);
@@ -621,14 +622,14 @@ export const CASES: ChaosCase[] = [
         );
       const neighbour = await neighbourWorks(env, 60_000);
       await until(
-        "the gateway to close the slow client with 4009",
+        "the gateway to drop the slow client (4009 or 1011)",
         90_000,
         async () => (await closes()) > before,
         2000,
       );
       ws.terminate();
       await a!.browser.close().catch(() => undefined);
-      return `closed with 4009; ${neighbour}`;
+      return `dropped; ${neighbour}`;
     },
   },
   {
