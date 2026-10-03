@@ -89,7 +89,7 @@ ${hostname} {
 		}
 	}
 
-	@public path /v1/* /healthz /openapi.json
+	@public path /v1/* /mcp /healthz /openapi.json
 	handle @public {
 		reverse_proxy 127.0.0.1:8080
 	}

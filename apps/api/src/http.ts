@@ -24,6 +24,7 @@ import type { Auth, Ctx } from "./context.js";
 import { AppError } from "./errors.js";
 import { newRequestId } from "./ids.js";
 import { LIVE_PAGE, LIVE_PAGE_HEADERS } from "./live-page.js";
+import { registerMcp, type McpOptions } from "./mcp.js";
 import { heartbeat, ingestReports, registerNode } from "./nodes.js";
 import {
   createSession,
@@ -166,7 +167,10 @@ function send(
 }
 
 /** The public listener (A2): what Caddy forwards. */
-export function buildPublicApp(ctx: Ctx): FastifyInstance {
+export function buildPublicApp(
+  ctx: Ctx,
+  opts: { mcp?: McpOptions } = {},
+): FastifyInstance {
   const app = baseApp(ctx, { bodyLimit: 64 * 1024 });
   const authed = async (req: FastifyRequest): Promise<Auth> => {
     req.auth = await authenticate(ctx.db, ctx.clock, req.headers);
@@ -261,6 +265,9 @@ export function buildPublicApp(ctx: Ctx): FastifyInstance {
       );
     },
   );
+
+  // W7: the MCP server, on the same key check as everything above.
+  registerMcp(app, ctx, authed, opts.mcp);
 
   return app;
 }
