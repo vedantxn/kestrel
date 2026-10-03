@@ -26,6 +26,8 @@ export async function connect(
   opts: ConnectOptions = {},
 ): Promise<KestrelBrowser> {
   const { connectTimeoutMs = 30_000, ...req } = opts;
+  // Before creating anything, so a missing Playwright costs no session.
+  const { chromium } = await loadPlaywright();
   const session = await sessions.create(req);
   let browser: Browser;
   try {
@@ -33,7 +35,6 @@ export async function connect(
       throw new KestrelError(
         `session ${session.id} is ${session.status} and has no connectUrl`,
       );
-    const { chromium } = await loadPlaywright();
     browser = await chromium.connectOverCDP(session.connectUrl, {
       timeout: connectTimeoutMs,
     });
