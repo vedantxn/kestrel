@@ -42,8 +42,8 @@ describe("starting a session (G6, G7)", () => {
     // the session's deadlines are absolute on the agent's clock
     expect(b.maxAt).toBe(r.clock.now() + 600_000);
     expect(b.idleAt).toBe(r.clock.now() + 300_000);
-    // the pool lost one and is refilled from spare slots only
-    expect(r.store.allPool()).toHaveLength(1);
+    // the pool lost one, and its replacement began at once (from spare slots only)
+    expect(r.store.allPool()).toHaveLength(2);
   });
 
   it("a pooled browser has no policy until it is assigned (R15)", async () => {

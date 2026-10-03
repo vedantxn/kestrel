@@ -255,6 +255,23 @@ describe("quota and capacity", () => {
     expect(Session.parse((await env.create()).json()).nodeId).toBe("a");
   });
 
+  it("counts a hot browser as taken at once, so a burst spreads to the next hot node", async () => {
+    // a has more room, so on free capacity alone it would take both sessions.
+    await reset({
+      nodes: [
+        { id: "a", slots: 9 },
+        { id: "b", slots: 5 },
+      ],
+    });
+    env.nodes.a!.hotCount = 1;
+    env.nodes.b!.hotCount = 1;
+    await env.syncAll();
+    // No heartbeat in between: without counting the first take, both would go to the same node.
+    const first = Session.parse((await env.create()).json()).nodeId;
+    const second = Session.parse((await env.create()).json()).nodeId;
+    expect(new Set([first, second])).toEqual(new Set(["a", "b"]));
+  });
+
   it("skips nodes whose heartbeat has gone stale, and fenced nodes", async () => {
     await reset({
       nodes: [

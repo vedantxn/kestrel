@@ -17,3 +17,7 @@ output "test_page_url" {
 output "data_volume_id" {
   value = aws_ebs_volume.data.id
 }
+
+output "runner_id" {
+  value = var.enable_runner ? aws_instance.runner[0].id : null
+}

@@ -274,7 +274,7 @@ describe("talking to the API (K7, G15)", () => {
       nodeId: "a",
       epoch: 1,
       slots: { total: 3, free: 2 },
-      hotCount: 1,
+      hotCount: 2, // the taken browser's replacement is already warm
       sessions: [{ sessionId: req.sessionId, state: "ready" }],
       pendingReports: 0,
     });

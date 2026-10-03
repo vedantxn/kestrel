@@ -44,4 +44,4 @@ Both harnesses type-check with the adapter (0 errors). Each ran against a Kestre
 | ComputeSDK lifecycle, 10 iterations  | 10/10 success          | create 315, connect 1,559, navigate 431, release 226, total 2,908 ms |
 | ComputeSDK throughput, 1 session     | success, 10/10 actions | (dominated by the distance)                                          |
 
-Real numbers need a runner in us-east-1. That is the next step, together with the hosted vendors re-run on the same day.
+Real numbers, from a runner in us-east-1 against Kestrel and Hyperbrowser on the same day: `docs/results/public-2026-10-03/`. To make a runner: `bin/tf main apply -var enable_runner=true`, then `KESTREL_TARGET=runner bin/host ...`, `run-public.sh` and `summarize.py`. Destroy it afterwards by applying without the variable.

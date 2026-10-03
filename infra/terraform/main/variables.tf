@@ -46,3 +46,15 @@ variable "budget_usd" {
   type    = number
   default = 60
 }
+
+variable "enable_runner" {
+  description = "Create the benchmark runner (runner.tf). Destroy it after a run by applying without it."
+  type        = bool
+  default     = false
+}
+
+variable "runner_instance_type" {
+  description = "Fixed-performance, so results repeat (HLD 13.3: no burstable CPU credits)."
+  type        = string
+  default     = "c7i.large"
+}

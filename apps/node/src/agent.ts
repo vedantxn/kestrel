@@ -59,6 +59,13 @@ export interface AgentConfig {
   /** Hot browsers to keep ready, filled only from slots sessions are not using (G5). */
   poolTarget: number;
   refillAtOnce: number;
+  /**
+   * The pool grows past `poolTarget` to meet recent demand (starts in the last
+   * DEMAND_WINDOW_MS), up to this many, and never into a slot a session needs. Default: slots.
+   */
+  poolMax?: number;
+  /** Send a session's `removed` report as soon as it is queued, not with the next heartbeat. Default on. */
+  reportOnRemoval?: boolean;
   /** Where the API reaches this agent, sent at registration. */
   address: string;
   runtimeVersion: string;
@@ -97,6 +104,9 @@ export interface AgentDeps {
   volumes?: Volumes;
 }
 
+/** How far back starts count towards the pool's size. */
+const DEMAND_WINDOW_MS = 10_000;
+
 const hex = (n: number): string => randomBytes(n).toString("hex");
 
 /**
@@ -115,6 +125,8 @@ export class NodeAgent {
   private tasks = new Set<Promise<unknown>>();
   /** Pooled browsers being created, not yet in the store: counted so a second refill cannot over-fill the pool. */
   private spawning = 0;
+  /** When recent starts arrived, for the demand-sized pool. */
+  private recentStarts: number[] = [];
   /** When a stuck teardown may next be retried. */
   private retryAt = new Map<string, number>();
   private syncing: Promise<void> | null = null;
@@ -492,6 +504,7 @@ export class NodeAgent {
     token: string;
     path: "hot" | "cold";
   }> {
+    this.recentStarts.push(this.now());
     // The container is recorded against the session the moment it is ours, before anything slow:
     // reconciliation must never be able to judge a container that a start is still waiting on.
     const bind = (
@@ -512,6 +525,7 @@ export class NodeAgent {
     // A hot one. `takePool` succeeds for exactly one caller, so two starts can never share a container.
     for (const p of this.store.allPool().filter((p) => p.state === "hot")) {
       if (!this.store.takePool(p.containerId)) continue;
+      void this.refillPool();
       const taken = bind(p.containerId, p.address, p.controlToken, "hot");
       const info = await this.d.docker.inspect(p.containerId).catch(() => null);
       if (info?.running) return taken;
@@ -603,12 +617,33 @@ export class NodeAgent {
     }
   }
 
-  /** Top the pool up from slots no session is using, a few at a time (G5). */
+  /**
+   * The pool size wanted now: at least `poolTarget`, and as many as the starts of the last
+   * DEMAND_WINDOW_MS, so a burst finds hot browsers rather than one per `poolTarget`. Capped by
+   * `poolMax`; the caller also caps it by the room sessions leave.
+   */
+  private poolWanted(): number {
+    if (this.c.poolTarget === 0) return 0; // pooling is switched off: demand does not switch it on
+    const now = this.now();
+    this.recentStarts = this.recentStarts.filter(
+      (t) => now - t < DEMAND_WINDOW_MS,
+    );
+    return Math.min(
+      this.c.poolMax ?? this.c.slotsTotal,
+      Math.max(this.c.poolTarget, this.recentStarts.length),
+    );
+  }
+
+  /**
+   * Top the pool up from slots no session is using, a few at a time (G5). Runs every second, and
+   * at once when a pooled browser is taken or a session ends, so its replacement starts warming
+   * while the next request is still on its way rather than up to a second later.
+   */
   async refillPool(): Promise<void> {
     if (!this.firewallOk || !this.booted) return;
     const have = this.store.allPool().length + this.spawning;
     const room = this.c.slotsTotal - this.sessionCount() - have;
-    const want = Math.min(this.c.poolTarget - have, this.c.refillAtOnce, room);
+    const want = Math.min(this.poolWanted() - have, this.c.refillAtOnce, room);
     for (let i = 0; i < want; i++) {
       this.spawning++;
       this.spawn(this.spawnPooled());
@@ -759,6 +794,11 @@ export class NodeAgent {
       ? Math.max(0, (this.now() - b.readyAt) / 1000)
       : 0;
     // The binding goes and the report is queued in one transaction: a crash cannot lose the report.
+    queueMicrotask(() => {
+      void this.refillPool(); // a slot is free again
+      // and the API should know it now, not at the next heartbeat
+      if (this.c.reportOnRemoval ?? true) void this.flushSoon();
+    });
     this.store.finishBinding(id, (rid) => ({
       id: rid,
       at: new Date(this.now()).toISOString(),
@@ -1163,6 +1203,30 @@ export class NodeAgent {
       await this.stop({ sessionId: s, reason: "node_refused" });
   }
 
+  /**
+   * Send reports at once rather than with the next heartbeat (up to 2 s later). A session's slot
+   * is counted as used until the API hears its container is gone, so under a steady stream of
+   * short sessions every second of delay keeps slots out of use. Flushes never overlap: one asked
+   * for during another runs once more after it.
+   */
+  private flushing: Promise<void> | null = null;
+  private flushAgain = false;
+  flushSoon(): Promise<void> {
+    if (this.flushing) {
+      this.flushAgain = true;
+      return this.flushing;
+    }
+    this.flushing = (async () => {
+      do {
+        this.flushAgain = false;
+        await this.flushReports().catch(() => undefined);
+      } while (this.flushAgain);
+    })().finally(() => {
+      this.flushing = null;
+    });
+    return this.flushing;
+  }
+
   async flushReports(): Promise<void> {
     // Drain a few batches per call, so a backlog does not take a heartbeat per hundred reports to clear.
     for (let batch = 0; batch < 5; batch++) {
@@ -1252,7 +1316,7 @@ export class NodeAgent {
       async () => {
         // Reports first: a heartbeat that stops listing a session before its `removed` report has been
         // delivered makes the API think the session vanished, and it would record the wrong reason.
-        await this.flushReports();
+        await this.flushSoon();
         await this.heartbeat();
       },
       "heartbeat",

@@ -87,6 +87,12 @@ export async function admit(
   const best = (await rankNodes(ctx, tx, []))[0];
   if (!best) return { kind: "full" };
 
+  // The node is about to take a hot browser, if it had one. Count it as taken now, so the next
+  // admission in a burst prefers a node that still has one; the node's next heartbeat (2 s)
+  // reports the truth again. The row is locked by rankNodes.
+  if (best.hot)
+    await tx.$executeRaw`UPDATE nodes SET hot_count = GREATEST(hot_count - 1, 0) WHERE id = ${best.id}`;
+
   const now = new Date(ctx.clock.now());
   const id = newUuid();
   await tx.session.create({

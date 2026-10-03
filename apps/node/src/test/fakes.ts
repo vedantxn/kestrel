@@ -389,6 +389,8 @@ export function makeRig(
     startRetries: 2,
     readyTimeoutMs: 1000,
     newContainerGraceMs: 15_000,
+    // Off here so tests can see what was queued; pool.test.ts covers the immediate send.
+    reportOnRemoval: false,
     ...over,
   };
   const build = (): NodeAgent =>

@@ -67,6 +67,11 @@ export function kestrel(o: KestrelOptions) {
             width: Math.min(v.width, 1920),
             height: Math.min(v.height, 1000),
           };
+        // When every slot is busy, Kestrel answers 503 at once unless asked to wait: queue for a
+        // slot, as a client of Kestrel would, so the wait shows up in creation time, not as a failure.
+        body.waitForCapacityMs = Number(
+          process.env.KESTREL_WAIT_FOR_CAPACITY_MS ?? 30_000,
+        );
         const s = await call("POST", "/v1/sessions", body);
         if (!s?.id || !s?.connectUrl)
           throw new Error(

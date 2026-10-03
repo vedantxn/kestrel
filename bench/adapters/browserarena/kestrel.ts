@@ -51,7 +51,14 @@ export class KestrelProvider implements ProviderClient {
     const s = await this.call(
       "POST",
       "/v1/sessions",
-      opts?.recording ? { recording: true } : {},
+      // When every slot is busy, Kestrel answers 503 at once unless asked to wait: queue for a
+      // slot, as a client of Kestrel would, so the wait shows up in creation time, not as a failure.
+      {
+        waitForCapacityMs: Number(
+          process.env.KESTREL_WAIT_FOR_CAPACITY_MS ?? 30_000,
+        ),
+        ...(opts?.recording ? { recording: true } : {}),
+      },
     );
     if (!s?.id || !s?.connectUrl)
       throw new Error(`Invalid Kestrel session response (status ${s?.status})`);

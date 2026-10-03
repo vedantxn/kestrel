@@ -14,6 +14,8 @@
 #   bin/host forward LOCAL:REMOTE    forward a local port to a port on the host
 #   bin/host bench [ARGS...]         run the benchmark harness on the host, detached
 #   bin/host check                   check the host prerequisites (C15)
+#
+# KESTREL_TARGET=runner points every command at the benchmark runner (runner.tf) instead.
 #   bin/host autostop on|off|status  the nightly 02:00 India time stop
 #
 # There is no SSH port. Shell, file sync and port forwarding all travel over AWS Systems Manager,
@@ -40,10 +42,10 @@ find_instance() {
   [ -n "$INSTANCE_ID" ] && return 0
   local row
   row=$(aws ec2 describe-instances \
-    --filters Name=tag:Project,Values=kestrel Name=tag:Name,Values=kestrel-host \
+    --filters Name=tag:Project,Values=kestrel Name=tag:Name,Values=kestrel-${KESTREL_TARGET:-host} \
               Name=instance-state-name,Values=pending,running,stopping,stopped \
     --query 'Reservations[].Instances[].[InstanceId,Placement.AvailabilityZone]' --output text)
-  [ -n "$row" ] || die "no Kestrel host exists (create it with: bin/tf main apply)"
+  [ -n "$row" ] || die "no kestrel-${KESTREL_TARGET:-host} instance exists (create it with: bin/tf main apply)"
   [ "$(printf '%s\n' "$row" | wc -l)" -eq 1 ] || die "more than one Kestrel host found"
   INSTANCE_ID=$(printf '%s' "$row" | awk '{print $1}')
   AZ=$(printf '%s' "$row" | awk '{print $2}')
