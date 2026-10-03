@@ -122,7 +122,7 @@ export function mp4Boxes(b: Buffer): string[] {
     const type = b.toString("latin1", off + 4, off + 8);
     if (size === 1 && off + 16 <= b.length)
       size = Number(b.readBigUInt64BE(off + 8));
-    if (size < 8) break;
+    if (size < 8 || !/^[a-zA-Z0-9 ]{4}$/.test(type)) break;
     out.push(type);
     off += size;
   }
