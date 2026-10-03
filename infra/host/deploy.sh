@@ -33,6 +33,14 @@ printf 'postgresql://kestrel:%s@127.0.0.1:5432/kestrel' "$(cat "$SECRETS/db.pass
 chown 1001:1001 "$SECRETS/database-url" "$SECRETS/node-a.secret" "$SECRETS/node-b.secret" 2>/dev/null || true
 chmod 0640 "$SECRETS/node-a.secret" "$SECRETS/node-b.secret"; chmod 0400 "$SECRETS/database-url" "$SECRETS/db.password"
 chmod 0711 "$SECRETS"; install -d -m 0755 /run/kestrel /var/lib/kestrel/a /var/lib/kestrel/b /var/lib/kestrel/postgres /run/kestrel/a /run/kestrel/b
+# /run is emptied by a reboot: have systemd make the runtime directories again at every boot, before
+# Docker starts the platform, or the node agent cannot open its sockets and restarts forever.
+cat > /etc/tmpfiles.d/kestrel.conf <<'TMPFILES'
+d /run/kestrel 0755 root root -
+d /run/kestrel/a 0755 root root -
+d /run/kestrel/b 0755 root root -
+TMPFILES
+systemd-tmpfiles --create /etc/tmpfiles.d/kestrel.conf
 touch /run/xtables.lock
 mkdir -p /var/lib/kestrel/postgres && chown 999:999 /var/lib/kestrel/postgres 2>/dev/null || true
 

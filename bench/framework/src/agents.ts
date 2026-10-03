@@ -20,8 +20,12 @@ const need = (k: string): string => {
   return v;
 };
 const MODEL = env.AGENT_MODEL ?? "claude-sonnet-5-5";
-const TOOL_VERSION = env.COMPUTER_TOOL ?? "computer_20250124";
-const TOOL_BETA = env.COMPUTER_BETA ?? "computer-use-2025-01-24";
+/**
+ * The 2026 computer toolset: no display size (the model reads it from the screenshots), no beta
+ * header. Older models take `computer_20250124` with `COMPUTER_BETA=computer-use-2025-01-24`.
+ */
+const TOOL_VERSION = env.COMPUTER_TOOL ?? "computer_toolset_20260801";
+const TOOL_BETA = env.COMPUTER_BETA;
 const MAX_STEPS = Number(env.AGENT_MAX_STEPS ?? 20);
 
 const FIXTURE = `<!doctype html><title>agent fixture</title>
@@ -61,19 +65,21 @@ async function claude(
     headers: {
       "x-api-key": need("ANTHROPIC_API_KEY"),
       "anthropic-version": "2023-06-01",
-      "anthropic-beta": TOOL_BETA,
+      ...(TOOL_BETA ? { "anthropic-beta": TOOL_BETA } : {}),
       "content-type": "application/json",
     },
     body: JSON.stringify({
       model: MODEL,
       max_tokens: 1024,
       tools: [
-        {
-          type: TOOL_VERSION,
-          name: "computer",
-          display_width_px: width,
-          display_height_px: height,
-        },
+        TOOL_VERSION.startsWith("computer_toolset")
+          ? { type: TOOL_VERSION }
+          : {
+              type: TOOL_VERSION,
+              name: "computer",
+              display_width_px: width,
+              display_height_px: height,
+            },
       ],
       messages,
     }),
@@ -212,16 +218,27 @@ export async function claudeComputerUse(k: KestrelClient): Promise<string> {
       if (uses.length === 0) break;
       const results = [];
       for (const u of uses) {
-        const r = await act(
-          k,
-          session.id,
-          u.input as Record<string, unknown>,
-        ).catch((e: Error): { png?: string; error?: string } => ({
+        // The toolset serves each action as its own tool (name "left_click", input {coordinate});
+        // the older tool is one "computer" tool with {action, ...}; either may batch {actions: [...]}.
+        const input = (u.input ?? {}) as Record<string, unknown>;
+        const actions: Record<string, unknown>[] = Array.isArray(input.actions)
+          ? (input.actions as Record<string, unknown>[])
+          : [input.action ? input : { ...input, action: u.name }];
+        const r = await (async () => {
+          let last: { png?: string; error?: string } = {};
+          for (const a of actions) {
+            last = await act(k, session.id, a);
+            if (last.error) break;
+          }
+          return last;
+        })().catch((e: Error): { png?: string; error?: string } => ({
           error: e.message,
         }));
         results.push({
           type: "tool_result",
           tool_use_id: u.id,
+          // A toolset member's result names its toolset, as the call did.
+          ...(u.toolset_name ? { toolset_name: u.toolset_name } : {}),
           ...(r.error
             ? { is_error: true, content: r.error }
             : {
