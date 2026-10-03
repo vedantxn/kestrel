@@ -1,0 +1,39 @@
+{
+  "name": "@kestrel/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript client for Kestrel, open-source cloud browsers for AI agents",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/test"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "playwright-core": ">=1.40.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright-core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@kestrel/contracts": "*",
+    "playwright-core": "^1.63.0",
+    "zod": "^4.6.5"
+  }
+}

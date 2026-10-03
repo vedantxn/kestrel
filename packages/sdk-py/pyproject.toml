@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kestrel-sdk"
+version = "0.1.0"
+description = "Python client for Kestrel, open-source cloud browsers for AI agents"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+# `connect()` attaches Playwright to a new session.
+playwright = ["playwright>=1.40"]
+dev = ["pytest>=8", "respx>=0.21"]
+
+[tool.hatch.build.targets.wheel]
+# Imported as `kestrel_sdk`: the `kestrel` module name belongs to an unrelated PyPI project.
+packages = ["src/kestrel_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

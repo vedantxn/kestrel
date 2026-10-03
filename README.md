@@ -19,4 +19,5 @@ nvm use          # Node 24
 npm ci
 npm run check    # format, lint, type-check, tests
 npm run openapi  # regenerate docs/api/openapi.json from the contracts
+npm run test:py  # the Python SDK's tests (packages/sdk-py; needs uv, not part of npm test)
 ```

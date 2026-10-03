@@ -11,6 +11,12 @@
       "path": "packages/shared"
     },
     {
+      "path": "packages/sdk-ts"
+    },
+    {
+      "path": "packages/cli"
+    },
+    {
       "path": "apps/api"
     },
     {
