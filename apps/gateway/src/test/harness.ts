@@ -33,7 +33,9 @@ export interface Rig {
     s: Session | string,
     over?: {
       nod?: string;
-      scope?: "cdp" | "view";
+      scope?: "cdp" | "view" | "control";
+      jti?: string;
+      ttlMs?: number;
       deadlineMs?: number;
       project?: string;
     },
@@ -172,6 +174,8 @@ export async function makeRig(
         scope: o.scope ?? "cdp",
         deadlineMs: o.deadlineMs ?? clock.now() + 600_000,
         nowMs: clock.now(),
+        ...(o.jti ? { jti: o.jti } : {}),
+        ...(o.ttlMs ? { ttlMs: o.ttlMs } : {}),
       });
     },
     url(s, token, path = "") {

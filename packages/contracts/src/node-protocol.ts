@@ -21,6 +21,8 @@ export const NODE_PATHS = {
   start: "/v1/start",
   stop: "/v1/stop",
   describe: "/v1/describe",
+  /** W4: `{ sessionId, action }`, answered with a ComputerResponse. */
+  computer: "/v1/computer",
   // served by the API's internal listener
   register: "/internal/nodes/register",
   heartbeat: "/internal/nodes/heartbeat",

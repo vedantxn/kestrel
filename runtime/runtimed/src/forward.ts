@@ -1,6 +1,7 @@
 import { createServer, connect, type Server, type Socket } from "node:net";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { PROOF_HEADER } from "@kestrel/contracts";
+import { PROOF_HEADER, RUNTIME_LIVE_PATH } from "@kestrel/contracts";
+import type { LiveServer } from "./live.js";
 
 const MAX_HEAD = 16 * 1024;
 const HEAD_TIMEOUT_MS = 5_000;
@@ -24,7 +25,11 @@ export class CdpForward {
   private proof: string | null = null;
   private server: Server | undefined;
 
-  constructor(private readonly chromePort: number) {}
+  constructor(
+    private readonly chromePort: number,
+    /** W2: a request for RUNTIME_LIVE_PATH goes here instead of to Chrome. */
+    private readonly live?: LiveServer,
+  ) {}
 
   /** Idempotent for the same proof; false if a different one was already set (a container serves one session). */
   setProof(proof: string): boolean {
@@ -89,6 +94,18 @@ export class CdpForward {
     );
     if (!m || !same(this.proof, m[1] ?? ""))
       return this.refuse(client, 403, "Forbidden");
+
+    const requestLine = head.slice(0, head.indexOf("\r\n"));
+    const target = /^GET (\S+) HTTP\/1\.1$/.exec(requestLine)?.[1];
+    if (
+      this.live &&
+      target !== undefined &&
+      (target === RUNTIME_LIVE_PATH ||
+        target.startsWith(`${RUNTIME_LIVE_PATH}?`))
+    ) {
+      this.live.accept(client, all);
+      return;
+    }
 
     const chrome = connect({ host: "127.0.0.1", port: this.chromePort });
     chrome.on("error", () => client.destroy());

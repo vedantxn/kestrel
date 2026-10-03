@@ -45,6 +45,28 @@ export function cdpBasePath(sessionId: string): string {
   return `/v1/sessions/${sessionId}/cdp`;
 }
 
+/** W2. The live-view socket on the gateway; a `view` or `control` token opens it. */
+export function livePath(sessionId: string): string {
+  return `/v1/sessions/${sessionId}/live`;
+}
+
+/** W2. The path on the container's CDP forward that reaches runtimed's live module, and the header naming the mode. */
+export const RUNTIME_LIVE_PATH = "/kestrel/live";
+export const LIVE_MODE_HEADER = "x-kestrel-live-mode";
+export const LiveMode = ["view", "control"] as const;
+export type LiveMode = (typeof LiveMode)[number];
+
+/** W1. The viewer page's URL; the token and the socket address travel in the fragment, which never leaves the browser. */
+export function buildLiveViewUrl(
+  host: string,
+  gatewayPort: number,
+  sessionId: string,
+  token: string,
+): string {
+  const ws = `wss://${host}:${gatewayPort}${livePath(sessionId)}`;
+  return `https://${host}/live/${sessionId}#ws=${encodeURIComponent(ws)}&token=${encodeURIComponent(token)}`;
+}
+
 /** The URL placed in `Session.connectUrl`. */
 export function buildConnectUrl(
   host: string,
@@ -60,13 +82,17 @@ export type GatewayRoute =
   | { kind: "browser-socket-id"; sessionId: SessionId; id: string } // .../cdp/devtools/browser/<id>
   | { kind: "page-socket"; sessionId: SessionId; targetId: string } // .../cdp/devtools/page/<id>
   | { kind: "json-version"; sessionId: SessionId } // .../cdp/json/version[/]
-  | { kind: "json-list"; sessionId: SessionId }; // .../cdp/json, .../cdp/json/list[/]
+  | { kind: "json-list"; sessionId: SessionId } // .../cdp/json, .../cdp/json/list[/]
+  | { kind: "live"; sessionId: SessionId }; // /v1/sessions/<id>/live (W2)
 
 const BASE = /^\/v1\/sessions\/(ses_[0-7][0-9a-hjkmnp-tv-z]{25})\/cdp/;
+const LIVE = /^\/v1\/sessions\/(ses_[0-7][0-9a-hjkmnp-tv-z]{25})\/live\/?$/;
 const DEVTOOLS_ID = /^[A-Za-z0-9-]{1,128}$/;
 
 /** Classify a request path on the gateway, or null if the gateway does not serve it. */
 export function matchGatewayPath(pathname: string): GatewayRoute | null {
+  const live = LIVE.exec(pathname);
+  if (live) return { kind: "live", sessionId: SessionId.parse(live[1]) };
   const m = BASE.exec(pathname);
   if (!m) return null;
   const sessionId = SessionId.parse(m[1]);

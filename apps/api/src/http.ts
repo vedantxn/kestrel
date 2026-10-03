@@ -2,7 +2,9 @@ import {
   CreateSessionRequest,
   HeartbeatRequest,
   ListEventsQuery,
+  ComputerRequest,
   ListSessionsQuery,
+  MintTokenRequest,
   RegisterRequest,
   ReportsRequest,
   buildOpenApiDocument,
@@ -21,12 +23,15 @@ import { authenticate, safeEqual } from "./auth.js";
 import type { Auth, Ctx } from "./context.js";
 import { AppError } from "./errors.js";
 import { newRequestId } from "./ids.js";
+import { LIVE_PAGE, LIVE_PAGE_HEADERS } from "./live-page.js";
 import { heartbeat, ingestReports, registerNode } from "./nodes.js";
 import {
   createSession,
   getSession,
   listEvents,
   listSessions,
+  mintSessionToken,
+  sessionComputer,
   stopSession,
 } from "./sessions.js";
 import type { Sweeper } from "./sweeper.js";
@@ -212,6 +217,37 @@ export function buildPublicApp(ctx: Ctx): FastifyInstance {
       (req.params as { id: string }).id,
     );
   });
+
+  app.post(
+    "/v1/sessions/:id/tokens",
+    { schema: { body: MintTokenRequest } },
+    async (req, reply) => {
+      const token = await mintSessionToken(
+        ctx,
+        await authed(req),
+        (req.params as { id: string }).id,
+        req.body as MintTokenRequest,
+      );
+      return reply.status(201).header("cache-control", "no-store").send(token);
+    },
+  );
+
+  app.post(
+    "/v1/sessions/:id/computer",
+    { schema: { body: ComputerRequest } },
+    async (req) =>
+      sessionComputer(
+        ctx,
+        await authed(req),
+        (req.params as { id: string }).id,
+        req.body as ComputerRequest,
+      ),
+  );
+
+  // W2. The viewer page; it carries no secret, so it needs no key (the token is in the fragment).
+  app.get("/live/:id", async (_req, reply) =>
+    reply.headers(LIVE_PAGE_HEADERS).send(LIVE_PAGE),
+  );
 
   app.get(
     "/v1/sessions/:id/events",

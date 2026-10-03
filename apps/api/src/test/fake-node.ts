@@ -1,4 +1,5 @@
 import {
+  type ComputerRequest,
   NODE_PATHS,
   NodeId,
   type EndReason,
@@ -11,7 +12,11 @@ import {
   type StopResponse,
 } from "@kestrel/contracts";
 import type { FastifyInstance } from "fastify";
-import { NodeCallError, type NodeClient } from "../node-client.js";
+import {
+  NodeCallError,
+  type ComputerResult,
+  type NodeClient,
+} from "../node-client.js";
 
 export type StartMode =
   | "hot"
@@ -240,6 +245,29 @@ export class FakeNodeClient implements NodeClient {
   stop(nodeId: string, req: StopRequest): Promise<StopResponse> {
     return this.get(nodeId).stop(req);
   }
+  /** Every action succeeds on a 1280x720 blank page; tests check the API around it. */
+  async computer(
+    nodeId: string,
+    _sessionId: string,
+    action: ComputerRequest,
+  ): Promise<ComputerResult> {
+    this.get(nodeId);
+    this.computerCalls.push(action);
+    const shot =
+      action.action === "screenshot" ||
+      ("screenshot" in action && action.screenshot);
+    return {
+      ok: true,
+      response: {
+        ok: true,
+        width: 1280,
+        height: 720,
+        url: "about:blank",
+        ...(shot ? { screenshot: "iVBORw0KGgo=" } : {}),
+      },
+    };
+  }
+  computerCalls: ComputerRequest[] = [];
   private get(id: string): FakeNode {
     const n = this.nodes.get(id);
     if (!n) throw new NodeCallError(`unknown node ${id}`, "unreachable");

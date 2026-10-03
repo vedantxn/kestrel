@@ -1,5 +1,7 @@
 import type Docker from "dockerode";
 import {
+  type ComputerRequest,
+  type ComputerResponse,
   newId,
   type ConfigureRequest,
   type ConfigureResponse,
@@ -155,6 +157,16 @@ export class FakeRuntime implements RuntimeClient {
       deviceScaleFactor: 1,
       chromeVersion: "154.0.8037.92",
     };
+  }
+
+  async computer(
+    address: string,
+    _token: string,
+    req: ComputerRequest,
+  ): Promise<ComputerResponse> {
+    this.calls.push({ op: `computer:${req.action}`, address });
+    if (!this.alive(address)) throw new Error("connection refused");
+    return { ok: true, width: 1280, height: 720, url: "about:blank" };
   }
 }
 

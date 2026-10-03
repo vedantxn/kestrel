@@ -16,7 +16,7 @@ describe("openapi", () => {
     await expect(SwaggerParser.validate(doc)).resolves.toBeTruthy();
   });
 
-  it("documents exactly the endpoints in the plan (A1)", () => {
+  it("documents exactly the endpoints in the plan (A1, W1, W4)", () => {
     const paths = Object.entries(
       buildOpenApiDocument().paths as Record<string, object>,
     ).flatMap(([p, ops]) =>
@@ -29,6 +29,8 @@ describe("openapi", () => {
         "GET /v1/sessions/{id}",
         "POST /v1/sessions/{id}/stop",
         "GET /v1/sessions/{id}/events",
+        "POST /v1/sessions/{id}/tokens",
+        "POST /v1/sessions/{id}/computer",
         "GET /healthz",
         "GET /openapi.json",
       ].sort(),

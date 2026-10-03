@@ -5,6 +5,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyViewport } from "./cdp.js";
 import { chromeArgs } from "./chrome-args.js";
+import { Tabs } from "./page.js";
 import { ControlServer } from "./control.js";
 import { CdpForward } from "./forward.js";
 import { Supervisor, type Proc, type SpawnFn } from "./supervisor.js";
@@ -486,7 +487,7 @@ describe("the control API (C5)", () => {
       "/dev/null",
       { displayMs: 200, chromeMs: 2000, pollMs: 20 },
     );
-    const control = new ControlServer(TOKEN, sup, fwd, port);
+    const control = new ControlServer(TOKEN, sup, fwd, port, new Tabs());
     const cport = await control.listen(0, "127.0.0.1");
     closers.push(() => control.close());
     const call = async (

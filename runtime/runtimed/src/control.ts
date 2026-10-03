@@ -6,6 +6,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import {
+  ComputerAction,
   ConfigureRequest,
   ConfigureResponse,
   RUNTIME_PATHS,
@@ -14,6 +15,7 @@ import {
 } from "@kestrel/contracts";
 import { applyViewport } from "./cdp.js";
 import type { CdpForward } from "./forward.js";
+import { runComputer, type Tabs } from "./page.js";
 import type { Supervisor } from "./supervisor.js";
 
 const same = (a: string, b: string): boolean =>
@@ -43,6 +45,7 @@ export class ControlServer {
     private readonly supervisor: Supervisor,
     private readonly forward: CdpForward,
     private readonly chromePort: number,
+    private readonly tabs: Tabs,
   ) {}
 
   async listen(port: number, host = "0.0.0.0"): Promise<number> {
@@ -73,7 +76,7 @@ export class ControlServer {
     let size = 0;
     for await (const c of req) {
       size += (c as Buffer).length;
-      if (size > 8 * 1024) throw new Error("body too large");
+      if (size > 64 * 1024) throw new Error("body too large"); // `/computer` text is up to 10,000 characters
       chunks.push(c as Buffer);
     }
     return chunks.length
@@ -131,6 +134,22 @@ export class ControlServer {
         const response = ConfigureResponse.parse(applied);
         this.configured = { proof: sessionProof, viewport, response };
         return this.send(res, 200, response);
+      }
+
+      if (req.method === "POST" && path === RUNTIME_PATHS.computer) {
+        // Only a container bound to a session drives its page.
+        if (!this.configured)
+          return this.send(res, 409, { error: "no session is bound" });
+        const parsed = ComputerAction.safeParse(await this.body(req));
+        if (!parsed.success)
+          return this.send(res, 400, {
+            error: parsed.error.issues[0]?.message ?? "invalid",
+          });
+        return this.send(
+          res,
+          200,
+          await runComputer(this.chromePort, this.tabs, parsed.data),
+        );
       }
 
       this.send(res, 404, { error: "not found" });

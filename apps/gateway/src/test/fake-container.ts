@@ -1,6 +1,10 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { PROOF_HEADER } from "@kestrel/contracts";
+import {
+  LIVE_MODE_HEADER,
+  PROOF_HEADER,
+  RUNTIME_LIVE_PATH,
+} from "@kestrel/contracts";
 import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
 
@@ -21,8 +25,12 @@ export class FakeContainer {
   pageId = "PAGE0000000000000000000000000001";
   mode: ContainerMode = "echo";
   /** Every request seen: path and the proof header it carried. */
-  requests: { path: string; proof: string | undefined; kind: "http" | "ws" }[] =
-    [];
+  requests: {
+    path: string;
+    proof: string | undefined;
+    kind: "http" | "ws";
+    liveMode?: string | undefined;
+  }[] = [];
   sockets = new Set<WebSocket>();
   discoveryStatus = 200;
 
@@ -70,10 +78,12 @@ export class FakeContainer {
       res.end();
     });
     this.server.on("upgrade", (req, socket, head) => {
+      const mode = req.headers[LIVE_MODE_HEADER];
       this.requests.push({
         path: req.url ?? "",
         proof: this.header(req),
         kind: "ws",
+        liveMode: Array.isArray(mode) ? mode[0] : mode,
       });
       if (this.header(req) !== this.proof) {
         socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
@@ -81,7 +91,8 @@ export class FakeContainer {
       }
       const ok =
         req.url === `/devtools/browser/${this.browserId}` ||
-        req.url === `/devtools/page/${this.pageId}`;
+        req.url === `/devtools/page/${this.pageId}` ||
+        req.url === RUNTIME_LIVE_PATH;
       if (!ok) {
         socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
         return;

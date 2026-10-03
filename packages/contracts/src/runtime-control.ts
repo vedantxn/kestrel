@@ -25,6 +25,8 @@ export const RUNTIME_PORTS = {
 export const RUNTIME_PATHS = {
   health: "/health",
   configure: "/configure",
+  /** W4: one `/computer` action on the page live view shows. */
+  computer: "/computer",
 } as const;
 
 /** `GET /health`. A pooled container is "hot" only when this says `ready`. */

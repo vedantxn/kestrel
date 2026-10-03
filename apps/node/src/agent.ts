@@ -5,6 +5,8 @@ import {
   RUNTIME_PORTS,
   TIMINGS,
   type Attachment,
+  type ComputerRequest,
+  type ComputerResponse,
   type EndReason,
   type HeartbeatRequest,
   type HeartbeatResponse,
@@ -631,6 +633,39 @@ export class NodeAgent {
   }
 
   // --- stop (G10, G14) ------------------------------------------------------------------------
+
+  /**
+   * W4. One `/computer` action on a running session's page. It counts as activity (HLD 4.1):
+   * a session nobody is attached to has its idle deadline pushed back.
+   */
+  async computer(
+    sessionId: string,
+    req: ComputerRequest,
+  ): Promise<
+    | { ok: true; response: ComputerResponse }
+    | { ok: false; status: 404 | 409 | 502; error: string }
+  > {
+    const b = this.store.getBinding(sessionId);
+    if (!b) return { ok: false, status: 404, error: "no such session" };
+    if (b.state !== "ready" || !b.address || !b.controlToken)
+      return { ok: false, status: 409, error: "the session is not running" };
+    if (b.idleAt !== null)
+      this.store.updateBinding(sessionId, {
+        idleAt: this.now() + b.idleTimeoutMs,
+      });
+    try {
+      return {
+        ok: true,
+        response: await this.d.runtime.computer(b.address, b.controlToken, req),
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        status: 502,
+        error: `the browser did not complete the action: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`,
+      };
+    }
+  }
 
   async stop(req: StopRequest): Promise<StopResponse> {
     const id = req.sessionId as string;

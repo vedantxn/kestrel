@@ -5,7 +5,19 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import { NODE_PATHS, StartRequest, StopRequest } from "@kestrel/contracts";
+import {
+  ComputerAction,
+  NODE_PATHS,
+  SessionId,
+  StartRequest,
+  StopRequest,
+} from "@kestrel/contracts";
+import { z } from "zod";
+
+const NodeComputerRequest = z.object({
+  sessionId: SessionId,
+  action: ComputerAction,
+});
 import type { Logger } from "@kestrel/shared";
 import type { NodeAgent } from "./agent.js";
 
@@ -72,6 +84,20 @@ export function createNodeServer(
             error: parsed.error.issues[0]?.message ?? "invalid",
           });
         return send(res, 200, await agent.stop(parsed.data));
+      }
+      if (req.method === "POST" && path === NODE_PATHS.computer) {
+        const parsed = NodeComputerRequest.safeParse(await readBody(req));
+        if (!parsed.success)
+          return send(res, 400, {
+            error: parsed.error.issues[0]?.message ?? "invalid",
+          });
+        const r = await agent.computer(
+          parsed.data.sessionId,
+          parsed.data.action,
+        );
+        return r.ok
+          ? send(res, 200, r.response)
+          : send(res, r.status, { error: r.error });
       }
       send(res, 404, { error: "not found" });
     } catch (e) {
