@@ -218,11 +218,18 @@ export async function runM1(c: M1Config): Promise<Report> {
   if (want(6)) {
     c.log(`check 6: ${c.latencySamples} create latencies at the API`);
     const times: number[] = [];
+    const samples: { ms: number; path: string | null; hotBefore: number }[] =
+      [];
     let hot = 0;
     for (let i = 0; i < c.latencySamples; i++) {
       const t0 = performance.now();
       const { session } = await client.create({});
       times.push(performance.now() - t0);
+      samples.push({
+        ms: Math.round(performance.now() - t0),
+        path: session.startPath,
+        hotBefore: -1,
+      });
       if (session.startPath === "hot") hot++;
       await client.stop(session.id);
       await client.waitFor(
@@ -242,6 +249,7 @@ export async function runM1(c: M1Config): Promise<Report> {
       detail: `p50 ${s.p50.toFixed(0)} ms, p95 ${s.p95.toFixed(0)} ms, p99 ${s.p99.toFixed(0)} ms, ${((hot / times.length) * 100).toFixed(0)}% hot, n=${times.length}`,
     });
     report.measure("createLatencyMs", s);
+    report.measure("createSamples", samples);
   }
 
   if (want(7)) {

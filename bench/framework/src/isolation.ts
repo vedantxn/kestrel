@@ -431,6 +431,7 @@ export async function fromChrome(
       });
     }
     try {
+      await page.goto("about:blank"); // a clean slate: the last attack's navigation must not interrupt the control
       await page.goto(cfg.testPageUrl, { timeout: 20_000 });
       const title = await page.title();
       findings.push({
