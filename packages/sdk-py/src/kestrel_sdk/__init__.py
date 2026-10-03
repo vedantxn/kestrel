@@ -13,6 +13,8 @@ from ._sync import Kestrel, KestrelBrowser, Sessions
 from ._types import (
     SESSION_STATUSES,
     TERMINAL_STATUSES,
+    ComputerActionName,
+    ComputerResponse,
     EndReason,
     ErrorCode,
     EventType,
@@ -22,6 +24,8 @@ from ._types import (
     SessionEvent,
     SessionOptions,
     SessionStatus,
+    SessionToken,
+    TokenScope,
     Usage,
     Viewport,
 )
@@ -36,6 +40,8 @@ __all__ = [
     "AsyncKestrel",
     "AsyncKestrelBrowser",
     "AsyncSessions",
+    "ComputerActionName",
+    "ComputerResponse",
     "EndReason",
     "ErrorCode",
     "EventType",
@@ -50,7 +56,9 @@ __all__ = [
     "SessionEvent",
     "SessionOptions",
     "SessionStatus",
+    "SessionToken",
     "Sessions",
+    "TokenScope",
     "Usage",
     "Viewport",
 ]

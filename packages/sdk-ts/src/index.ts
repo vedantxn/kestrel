@@ -11,6 +11,7 @@ export {
   Sessions,
   type CallOptions,
   type IterEventsOptions,
+  type LiveViewOptions,
   type WaitOptions,
 } from "./sessions.js";
 export * from "./types.js";

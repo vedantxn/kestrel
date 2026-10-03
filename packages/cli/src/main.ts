@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import {
   ApiError,
@@ -22,13 +23,19 @@ export interface Io {
 export const USAGE = `Usage: kestrel <command> [options]
 
 Commands:
-  sessions create [--timeout ms] [--idle-timeout ms] [--viewport WxH]
+  sessions create [--timeout ms] [--idle-timeout ms] [--viewport WxH] [--record]
                   [--allow host]... [--deny host]... [--wait-for-capacity ms]
   sessions list [--status s] [--limit n] [--cursor c]
   sessions get <id>
   sessions stop <id>
   logs <id> [--follow]          a session's events; --follow polls until it ends
   connect-url <id>              print the session's wss:// URL (it contains a token)
+  live <id> [--control] [--ttl ms]
+                                print a live-view page URL (it contains a token);
+                                --control lets the viewer use mouse and keyboard
+  screenshot <id> [-o file.png] save a PNG of the current page (default <id>.png)
+  recording <id> [-o file.mp4]  save the session's video (default <id>.mp4);
+                                the session must be created with --record
 
 Options:
   --json             print the API's JSON (logs: one event per line)
@@ -68,6 +75,7 @@ const COMMANDS: Record<string, Command> = {
       allow: { type: "string", multiple: true },
       deny: { type: "string", multiple: true },
       "wait-for-capacity": { type: "string" },
+      record: { type: "boolean" },
     },
     args: [],
     async run(k, _args, v, io) {
@@ -75,6 +83,7 @@ const COMMANDS: Record<string, Command> = {
         timeout: int(v, "timeout"),
         idleTimeout: int(v, "idle-timeout"),
         waitForCapacityMs: int(v, "wait-for-capacity"),
+        recording: v.record === true ? true : undefined,
       };
       if (typeof v.viewport === "string") req.viewport = viewport(v.viewport);
       if (v.allow || v.deny)
@@ -173,6 +182,55 @@ const COMMANDS: Record<string, Command> = {
         return 1;
       }
       io.stdout(`${s.connectUrl}\n`);
+      return 0;
+    },
+  },
+
+  live: {
+    options: { control: { type: "boolean" }, ttl: { type: "string" } },
+    args: ["id"],
+    async run(k, [id], v, io) {
+      const t = await k.sessions.mintToken(
+        id!,
+        { scope: v.control ? "control" : "view", ttlMs: int(v, "ttl") },
+        { signal: io.signal },
+      );
+      if (v.json) return json(io, t);
+      io.stdout(`${t.url}\n`);
+      return 0;
+    },
+  },
+
+  screenshot: {
+    options: { output: { type: "string", short: "o" } },
+    args: ["id"],
+    async run(k, [id], v, io) {
+      const path = (v.output as string | undefined) ?? `${id}.png`;
+      const r = await k.sessions.computer(
+        id!,
+        { action: "screenshot" },
+        { signal: io.signal },
+      );
+      if (!r.screenshot)
+        throw new KestrelError("the API answered without a screenshot");
+      await writeFile(path, Buffer.from(r.screenshot, "base64"));
+      if (v.json)
+        return json(io, { path, width: r.width, height: r.height, url: r.url });
+      io.stdout(`${path}  ${r.width}x${r.height}  ${r.url}\n`);
+      return 0;
+    },
+  },
+
+  recording: {
+    options: { output: { type: "string", short: "o" } },
+    args: ["id"],
+    async run(k, [id], v, io) {
+      const path = (v.output as string | undefined) ?? `${id}.mp4`;
+      const bytes = await k.sessions.saveRecording(id!, path, {
+        signal: io.signal,
+      });
+      if (v.json) return json(io, { path, bytes });
+      io.stdout(`${path}  ${bytes} bytes\n`);
       return 0;
     },
   },
@@ -297,6 +355,7 @@ function details(s: Session): string {
     ["viewport", `${s.viewport.width}x${s.viewport.height}`],
     ["timeout", `${s.options.timeout} ms`],
     ["idle timeout", `${s.options.idleTimeout} ms`],
+    ["recording", s.options.recording ? "yes" : "no"],
     ["browser seconds", String(s.usage.browserSeconds)],
   ];
   const meta = Object.entries(s.options.metadata);

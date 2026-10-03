@@ -59,6 +59,8 @@ export interface SessionOptions {
   stopOnDisconnect: boolean;
   viewport: Viewport;
   network: NetworkPolicy;
+  /** Record the browser's display to video, fetched with `sessions.recording`. */
+  recording: boolean;
   metadata: Record<string, string>;
 }
 
@@ -69,6 +71,8 @@ export interface CreateSessionRequest {
   stopOnDisconnect?: boolean | undefined;
   viewport?: Viewport | undefined;
   network?: NetworkPolicy | undefined;
+  /** Record the browser's display to video. Default false. */
+  recording?: boolean | undefined;
   metadata?: Record<string, string> | undefined;
   /**
    * Repeating a create with the same key returns the original session. The SDK makes one
@@ -183,4 +187,64 @@ export interface ErrorBody {
   requestId: string;
   /** For `invalid_request`: the request field the error is about. */
   param?: string | undefined;
+}
+
+// --- Tokens and live view (W1, W2) ------------------------------------------------------
+
+/** `cdp` re-issues a connect URL; `view` opens live view; `control` opens it with mouse and keyboard. */
+export type TokenScope = "cdp" | "view" | "control";
+
+export interface MintTokenRequest {
+  scope: TokenScope;
+  /** For `view` and `control`: default 10 minutes, at most 1 hour, never past the session's deadline. */
+  ttlMs?: number | undefined;
+  /** Opens one connection only, and lives at most 5 minutes. */
+  singleUse?: boolean | undefined;
+}
+
+export interface SessionToken {
+  scope: TokenScope;
+  token: string;
+  /** `cdp`: the wss:// connect URL. `view`/`control`: the viewer page, the token in its fragment. */
+  url: string;
+  expiresAt: string;
+}
+
+// --- /computer (W4) ---------------------------------------------------------------------
+
+/** Coordinates are CSS pixels of the page; a response's `width` and `height` give its size. */
+export type ComputerAction =
+  | { action: "screenshot" }
+  | {
+      action: "click";
+      x: number;
+      y: number;
+      button?: "left" | "middle" | "right" | undefined;
+      clicks?: number | undefined;
+      screenshot?: boolean | undefined;
+    }
+  | { action: "move"; x: number; y: number; screenshot?: boolean | undefined }
+  | {
+      action: "scroll";
+      x: number;
+      y: number;
+      dx?: number | undefined;
+      dy: number;
+      screenshot?: boolean | undefined;
+    }
+  | { action: "type"; text: string; screenshot?: boolean | undefined }
+  | {
+      action: "key";
+      /** A DOM key name such as `Enter`, `Tab`, `ArrowDown`, or one character. */
+      key: string;
+      screenshot?: boolean | undefined;
+    };
+
+export interface ComputerResponse {
+  ok: true;
+  /** PNG, base64: for `screenshot`, and for any action that asked for one. */
+  screenshot?: string | undefined;
+  width: number;
+  height: number;
+  url: string;
 }

@@ -1,5 +1,9 @@
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Session, SessionEvent } from "@kestrel/sdk";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { USAGE, main, table } from "./main.js";
 
 const ID = "ses_01k6e4m9t8f2xq3w5y7z9a1b2c";
@@ -22,6 +26,7 @@ function session(overrides: Partial<Session> = {}): Session {
       stopOnDisconnect: false,
       viewport: { width: 1280, height: 720 },
       network: {},
+      recording: false,
       metadata: { run: "nightly" },
     },
     nodeId: "a",
@@ -56,6 +61,11 @@ async function cli(argv: string[], route: Route, env = {}) {
     };
     calls.push(call);
     const r = route(call);
+    if (Buffer.isBuffer(r.body))
+      return new Response(new Uint8Array(r.body), {
+        status: r.status,
+        headers: { "content-type": "video/mp4" },
+      });
     return new Response(JSON.stringify(r.body), {
       status: r.status,
       headers: { "content-type": "application/json" },
@@ -175,6 +185,94 @@ describe("sessions", () => {
     );
     expect(r.calls[0]!.auth).toBe("Bearer ksl_flag");
     expect(r.calls[0]!.url.host).toBe("other.test");
+  });
+});
+
+describe("recording, live view and screenshots", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "kestrel-cli-"));
+  });
+  afterEach(() => rm(dir, { recursive: true, force: true }));
+
+  it("create --record asks for a recording", async () => {
+    const r = await cli(["sessions", "create", "--record"], () => ({
+      status: 201,
+      body: session({ options: { ...session().options, recording: true } }),
+    }));
+    expect(r.calls[0]!.body).toMatchObject({ recording: true });
+    expect(r.stdout).toMatch(/^recording\s+yes$/m);
+  });
+
+  it("live prints a view URL, or a control URL with --control and --ttl", async () => {
+    const viewer = `https://kestrel.test/live/${ID}#ws=x&token=t`;
+    const minted = ok({
+      scope: "view",
+      token: "t",
+      url: viewer,
+      expiresAt: "2026-10-03T10:10:00.000Z",
+    });
+    const view = await cli(["live", ID], minted);
+    expect(view.stdout).toBe(`${viewer}\n`);
+    expect(view.calls[0]!.url.pathname).toBe(`/v1/sessions/${ID}/tokens`);
+    expect(view.calls[0]!.body).toEqual({ scope: "view" });
+
+    const control = await cli(
+      ["live", ID, "--control", "--ttl", "60000"],
+      minted,
+    );
+    expect(control.calls[0]!.body).toEqual({ scope: "control", ttlMs: 60_000 });
+  });
+
+  it("screenshot writes the PNG from /computer", async () => {
+    const png = Buffer.from("\x89PNG\r\n\x1a\nfake");
+    const out = join(dir, "shot.png");
+    const r = await cli(
+      ["screenshot", ID, "-o", out],
+      ok({
+        ok: true,
+        screenshot: png.toString("base64"),
+        width: 1280,
+        height: 720,
+        url: "https://example.com/",
+      }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]!.url.pathname).toBe(`/v1/sessions/${ID}/computer`);
+    expect(r.calls[0]!.body).toEqual({ action: "screenshot" });
+    expect((await readFile(out)).equals(png)).toBe(true);
+    expect(r.stdout).toBe(`${out}  1280x720  https://example.com/\n`);
+  });
+
+  it("recording saves the video", async () => {
+    const video = Buffer.from("\0\0\0\x18ftypisom-video");
+    const out = join(dir, "s.mp4");
+    const r = await cli(["recording", ID, "--output", out, "--json"], () => ({
+      status: 200,
+      body: video,
+    }));
+    expect(r.code).toBe(0);
+    expect(r.calls[0]!.url.pathname).toBe(`/v1/sessions/${ID}/recording`);
+    expect((await readFile(out)).equals(video)).toBe(true);
+    expect(JSON.parse(r.stdout)).toEqual({ path: out, bytes: video.length });
+  });
+
+  it("recording of an unrecorded session exits 1 and writes nothing", async () => {
+    const out = join(dir, "s.mp4");
+    const r = await cli(["recording", ID, "-o", out], () => ({
+      status: 404,
+      body: {
+        error: {
+          code: "not_found",
+          message: "This session was not recorded.",
+          retryable: false,
+          requestId: "req-7",
+        },
+      },
+    }));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("not recorded");
+    expect(existsSync(out)).toBe(false);
   });
 });
 

@@ -74,6 +74,7 @@ def create_body(
     viewport: Viewport | Mapping[str, int] | None,
     network: NetworkPolicy | Mapping[str, Any] | None,
     metadata: Mapping[str, str] | None,
+    recording: bool | None,
     wait_for_capacity_ms: int | None,
     idempotency_key: str | None,
 ) -> dict[str, Any]:
@@ -87,10 +88,20 @@ def create_body(
         "viewport": viewport.to_dict() if isinstance(viewport, Viewport) else viewport,
         "network": network.to_dict() if isinstance(network, NetworkPolicy) else network,
         "metadata": dict(metadata) if metadata is not None else None,
+        "recording": recording,
         "waitForCapacityMs": wait_for_capacity_ms,
         "idempotencyKey": idempotency_key or str(uuid.uuid4()),
     }
     return {k: v for k, v in body.items() if v is not None}
+
+
+def mint_body(scope: str, ttl_ms: int | None, single_use: bool | None) -> dict[str, Any]:
+    return query(scope=scope, ttlMs=ttl_ms, singleUse=single_use)
+
+
+def computer_body(action: str, **fields: Any) -> dict[str, Any]:
+    """One /computer action. Every field name is one word, so it is the same in JSON."""
+    return {"action": action, **query(**fields)}
 
 
 def query(**params: Any) -> dict[str, Any]:

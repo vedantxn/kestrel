@@ -19,11 +19,15 @@ import pytest
 from kestrel_sdk import (
     ApiError,
     AsyncSessions,
+    ComputerActionName,
+    ComputerResponse,
     NetworkPolicy,
     Session,
     SessionEvent,
     SessionOptions,
     Sessions,
+    SessionToken,
+    TokenScope,
     Usage,
     Viewport,
 )
@@ -69,6 +73,8 @@ def params(fn: Any, *skip: str) -> set[str]:
         (Viewport, SCHEMAS["Viewport"]),
         (NetworkPolicy, SCHEMAS["NetworkPolicy"]),
         (Usage, SCHEMAS["Session"]["properties"]["usage"]),
+        (SessionToken, SCHEMAS["SessionToken"]),
+        (ComputerResponse, SCHEMAS["ComputerResponse"]),
     ],
     ids=lambda x: getattr(x, "__name__", ""),
 )
@@ -105,3 +111,16 @@ def test_api_error_carries_every_error_field() -> None:
     e = ApiError(500, "internal", "m", True, "req", "p")
     for name in props(SCHEMAS["Error"]):
         assert hasattr(e, name), name
+
+
+def test_token_scopes_and_computer_actions() -> None:
+    assert set(get_args(TokenScope)) == enum(SCHEMAS["MintTokenRequest"]["properties"]["scope"])
+    actions = {v["properties"]["action"]["const"] for v in SCHEMAS["ComputerRequest"]["oneOf"]}
+    assert set(get_args(ComputerActionName)) == actions
+
+
+@pytest.mark.parametrize("resource", [Sessions, AsyncSessions])
+def test_token_and_computer_arguments_match_the_requests(resource: type) -> None:
+    assert params(resource.mint_token, "session_id") == props(SCHEMAS["MintTokenRequest"])
+    every_action_field = set().union(*(props(v) for v in SCHEMAS["ComputerRequest"]["oneOf"]))
+    assert params(resource.computer, "session_id") == every_action_field

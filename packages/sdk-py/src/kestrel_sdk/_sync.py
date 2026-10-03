@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -11,10 +13,14 @@ from . import _base
 from ._errors import KestrelConnectionError, KestrelError, SessionEndedError
 from ._types import (
     TERMINAL_STATUSES,
+    ComputerActionName,
+    ComputerResponse,
     NetworkPolicy,
     Page,
     Session,
     SessionEvent,
+    SessionToken,
+    TokenScope,
     Viewport,
 )
 
@@ -23,28 +29,33 @@ _sleep = time.sleep
 
 
 class Sessions:
-    """``/v1/sessions`` and everything under it. New per-session endpoints (tokens, computer,
-    recording) belong here as further methods once their schemas are in ``openapi.json``."""
+    """``/v1/sessions`` and everything under it. New per-session endpoints belong here."""
 
     def __init__(self, http: httpx.Client, config: _base.Config) -> None:
         self._http = http
         self._config = config
 
-    def _request(
+    def _send(
         self,
         method: str,
         path: str,
         *,
         json: Any = None,
         params: Mapping[str, Any] | None = None,
-    ) -> Any:
+        stream: bool = False,
+    ) -> httpx.Response:
         """Send one call, retrying when the API says ``retryable`` or no answer came back.
-        Every endpoint is safe to repeat: reads, an idempotent stop, and creates that carry
-        an idempotency key."""
+        Every endpoint is safe to repeat: reads, an idempotent stop, creates that carry an
+        idempotency key, token mints and single page actions. With ``stream``, a successful
+        answer is returned unread and the caller closes it."""
         attempt = 0
         while True:
+            request = self._http.build_request(method, path, json=json, params=params)
             try:
-                response = self._http.request(method, path, json=json, params=params)
+                response = self._http.send(request, stream=stream)
+                if stream and not response.is_success:
+                    response.read()
+                    response.close()
             except httpx.TransportError as e:
                 if attempt >= self._config.max_retries:
                     raise KestrelConnectionError(
@@ -54,7 +65,7 @@ class Sessions:
                 attempt += 1
                 continue
             if response.is_success:
-                return _base.parse_ok(response)
+                return response
             err = _base.to_api_error(response)
             if not err.retryable or attempt >= self._config.max_retries:
                 raise err
@@ -65,6 +76,16 @@ class Sessions:
             )
             attempt += 1
 
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> Any:
+        return _base.parse_ok(self._send(method, path, json=json, params=params))
+
     def create(
         self,
         *,
@@ -74,6 +95,7 @@ class Sessions:
         viewport: Viewport | Mapping[str, int] | None = None,
         network: NetworkPolicy | Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
+        recording: bool | None = None,
         wait_for_capacity_ms: int | None = None,
         idempotency_key: str | None = None,
     ) -> Session:
@@ -86,6 +108,7 @@ class Sessions:
             viewport=viewport,
             network=network,
             metadata=metadata,
+            recording=recording,
             wait_for_capacity_ms=wait_for_capacity_ms,
             idempotency_key=idempotency_key,
         )
@@ -167,6 +190,103 @@ class Sessions:
             if time.monotonic() >= until:
                 raise KestrelError(f"session {session_id} is still {s.status} after {timeout} s")
             _sleep(poll_interval)
+
+    def mint_token(
+        self,
+        session_id: str,
+        scope: TokenScope,
+        *,
+        ttl_ms: int | None = None,
+        single_use: bool | None = None,
+    ) -> SessionToken:
+        """Mint a token for a running session: ``cdp`` re-issues a connect URL, ``view`` and
+        ``control`` open live view (default 10 minutes, at most 1 hour). ``single_use`` tokens
+        open one connection."""
+        return SessionToken.from_dict(
+            self._request(
+                "POST",
+                _base.session_path(session_id, "/tokens"),
+                json=_base.mint_body(scope, ttl_ms, single_use),
+            )
+        )
+
+    def live_view_url(
+        self,
+        session_id: str,
+        *,
+        control: bool = False,
+        ttl_ms: int | None = None,
+        single_use: bool | None = None,
+    ) -> str:
+        """The URL of a page that shows the browser live; with ``control`` a person can drive
+        it too. The URL holds a token: share it only with whoever should watch."""
+        scope: TokenScope = "control" if control else "view"
+        return self.mint_token(session_id, scope, ttl_ms=ttl_ms, single_use=single_use).url
+
+    def computer(
+        self,
+        session_id: str,
+        action: ComputerActionName,
+        *,
+        x: int | None = None,
+        y: int | None = None,
+        button: str | None = None,
+        clicks: int | None = None,
+        dx: int | None = None,
+        dy: int | None = None,
+        text: str | None = None,
+        key: str | None = None,
+        screenshot: bool | None = None,
+    ) -> ComputerResponse:
+        """One action on the session's current page, no CDP client needed: ``screenshot``;
+        ``click`` (x, y, button, clicks); ``move`` (x, y); ``scroll`` (x, y, dx, dy);
+        ``type`` (text); ``key`` (key, a DOM key name such as ``Enter``). Any action but
+        ``screenshot`` may pass ``screenshot=True`` to get the page afterwards."""
+        body = _base.computer_body(
+            action,
+            x=x,
+            y=y,
+            button=button,
+            clicks=clicks,
+            dx=dx,
+            dy=dy,
+            text=text,
+            key=key,
+            screenshot=screenshot,
+        )
+        return ComputerResponse.from_dict(
+            self._request("POST", _base.session_path(session_id, "/computer"), json=body)
+        )
+
+    def iter_recording(self, session_id: str, *, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+        """The session's video (fragmented MP4) in chunks, for a session created with
+        ``recording=True``. While the session runs it ends at the latest fragment."""
+        response = self._send("GET", _base.session_path(session_id, "/recording"), stream=True)
+        try:
+            yield from response.iter_bytes(chunk_size)
+        finally:
+            response.close()
+
+    def recording(self, session_id: str) -> bytes:
+        """The whole video at once. For a long session prefer ``save_recording``."""
+        return b"".join(self.iter_recording(session_id))
+
+    def save_recording(self, session_id: str, path: str | os.PathLike[str]) -> int:
+        """Download the video to ``path`` and return its size in bytes. It is written beside
+        ``path`` first and renamed when complete, so a failed download leaves no partial
+        file under the name asked for."""
+        target = Path(path)
+        partial = target.with_name(target.name + ".part")
+        size = 0
+        try:
+            with partial.open("wb") as f:
+                for chunk in self.iter_recording(session_id):
+                    f.write(chunk)
+                    size += len(chunk)
+            partial.replace(target)
+        finally:
+            partial.unlink(missing_ok=True)
+        return size
 
 
 class KestrelBrowser:

@@ -43,6 +43,24 @@ ok<SameShape<C.EventBody, S.EventBody>>();
 ok<SameShape<C.EventBody["type"], S.EventBody["type"]>>();
 ok<SameShape<C.SessionEvent, S.SessionEvent>>();
 ok<SameShape<C.ApiError, S.ErrorBody>>();
+ok<SameShape<C.TokenScope, S.TokenScope>>();
+ok<SameShape<z.input<typeof C.MintTokenRequest>, S.MintTokenRequest>>();
+ok<SameShape<C.SessionToken, S.SessionToken>>();
+ok<SameShape<z.input<typeof C.ComputerRequest>, S.ComputerAction>>();
+ok<SameShape<C.ComputerRequest["action"], S.ComputerAction["action"]>>();
+ok<SameShape<C.ComputerResponse, S.ComputerResponse>>();
+// Each action on its own too, since keys that only some variants have are not in `keyof`.
+type ComputerIn = z.input<typeof C.ComputerRequest>;
+type SameAction<A extends S.ComputerAction["action"]> = SameShape<
+  Extract<ComputerIn, { action: A }>,
+  Extract<S.ComputerAction, { action: A }>
+>;
+ok<SameAction<"screenshot">>();
+ok<SameAction<"click">>();
+ok<SameAction<"move">>();
+ok<SameAction<"scroll">>();
+ok<SameAction<"type">>();
+ok<SameAction<"key">>();
 
 describe("SDK types", () => {
   it("lists the same terminal statuses as the contracts", () => {

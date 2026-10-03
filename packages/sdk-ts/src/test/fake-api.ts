@@ -16,6 +16,7 @@ export interface Recorded {
 
 export interface Reply {
   status: number;
+  /** JSON, or a Buffer sent as it is (as `video/mp4` unless a header says otherwise). */
   body?: unknown;
   headers?: Record<string, string>;
 }
@@ -73,11 +74,13 @@ export async function fakeApi() {
 }
 
 function send(res: ServerResponse, reply: Reply): void {
+  const raw = Buffer.isBuffer(reply.body);
   res.writeHead(reply.status, {
-    "content-type": "application/json",
+    "content-type": raw ? "video/mp4" : "application/json",
     ...reply.headers,
   });
-  res.end(reply.body === undefined ? "" : JSON.stringify(reply.body));
+  if (raw) res.end(reply.body);
+  else res.end(reply.body === undefined ? "" : JSON.stringify(reply.body));
 }
 
 const RETRYABLE: Record<string, boolean> = {
@@ -118,6 +121,7 @@ export function fakeSession(overrides: Partial<Session> = {}): Session {
       stopOnDisconnect: false,
       viewport: { width: 1280, height: 720 },
       network: {},
+      recording: false,
       metadata: {},
     },
     nodeId: "a",

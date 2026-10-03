@@ -8,6 +8,7 @@ it was built from on ``.raw``. Durations are milliseconds, as in the API.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -56,6 +57,11 @@ EventType = Literal[
     "runtime.crashed",
     "node.lost",
 ]
+
+# `cdp` re-issues a connect URL; `view` opens live view; `control` opens it with input.
+TokenScope = Literal["cdp", "view", "control"]
+
+ComputerActionName = Literal["screenshot", "click", "move", "scroll", "type", "key"]
 
 ErrorCode = Literal[
     "unauthorized",
@@ -119,6 +125,7 @@ class SessionOptions:
     stop_on_disconnect: bool
     viewport: Viewport
     network: NetworkPolicy
+    recording: bool
     metadata: dict[str, str]
 
     @classmethod
@@ -129,6 +136,7 @@ class SessionOptions:
             stop_on_disconnect=d["stopOnDisconnect"],
             viewport=Viewport.from_dict(d["viewport"]),
             network=NetworkPolicy.from_dict(d.get("network") or {}),
+            recording=bool(d.get("recording", False)),
             metadata=dict(d.get("metadata") or {}),
         )
 
@@ -213,3 +221,54 @@ class Page(Generic[T]):
 
     data: list[T]
     next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class SessionToken:
+    """A minted token. ``url`` is ready to use: the connect URL for ``cdp``, the viewer page
+    (token in its fragment) for ``view`` and ``control``. Both are secrets, so kept out of
+    repr()."""
+
+    scope: str
+    token: str = field(repr=False)
+    url: str = field(repr=False)
+    expires_at: datetime
+    raw: dict[str, Any] = field(repr=False, compare=False)
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> SessionToken:
+        return cls(
+            scope=d["scope"],
+            token=d["token"],
+            url=d["url"],
+            expires_at=_time(d["expiresAt"]),  # type: ignore[arg-type]
+            raw=dict(d),
+        )
+
+
+@dataclass(frozen=True)
+class ComputerResponse:
+    """The page after a /computer action. Coordinates are CSS pixels of a ``width`` by
+    ``height`` page. ``screenshot`` is a base64 PNG when one was taken."""
+
+    ok: bool
+    screenshot: str | None = field(repr=False)
+    width: int
+    height: int
+    url: str
+    raw: dict[str, Any] = field(repr=False, compare=False)
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> ComputerResponse:
+        return cls(
+            ok=d["ok"],
+            screenshot=d.get("screenshot"),
+            width=d["width"],
+            height=d["height"],
+            url=d["url"],
+            raw=dict(d),
+        )
+
+    @property
+    def screenshot_png(self) -> bytes | None:
+        return None if self.screenshot is None else base64.b64decode(self.screenshot)

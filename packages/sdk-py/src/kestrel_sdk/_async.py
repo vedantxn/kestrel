@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,10 +16,14 @@ from . import _base
 from ._errors import KestrelConnectionError, KestrelError, SessionEndedError
 from ._types import (
     TERMINAL_STATUSES,
+    ComputerActionName,
+    ComputerResponse,
     NetworkPolicy,
     Page,
     Session,
     SessionEvent,
+    SessionToken,
+    TokenScope,
     Viewport,
 )
 
@@ -32,18 +38,23 @@ class AsyncSessions:
         self._http = http
         self._config = config
 
-    async def _request(
+    async def _send(
         self,
         method: str,
         path: str,
         *,
         json: Any = None,
         params: Mapping[str, Any] | None = None,
-    ) -> Any:
+        stream: bool = False,
+    ) -> httpx.Response:
         attempt = 0
         while True:
+            request = self._http.build_request(method, path, json=json, params=params)
             try:
-                response = await self._http.request(method, path, json=json, params=params)
+                response = await self._http.send(request, stream=stream)
+                if stream and not response.is_success:
+                    await response.aread()
+                    await response.aclose()
             except httpx.TransportError as e:
                 if attempt >= self._config.max_retries:
                     raise KestrelConnectionError(
@@ -53,7 +64,7 @@ class AsyncSessions:
                 attempt += 1
                 continue
             if response.is_success:
-                return _base.parse_ok(response)
+                return response
             err = _base.to_api_error(response)
             if not err.retryable or attempt >= self._config.max_retries:
                 raise err
@@ -64,6 +75,16 @@ class AsyncSessions:
             )
             attempt += 1
 
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> Any:
+        return _base.parse_ok(await self._send(method, path, json=json, params=params))
+
     async def create(
         self,
         *,
@@ -73,6 +94,7 @@ class AsyncSessions:
         viewport: Viewport | Mapping[str, int] | None = None,
         network: NetworkPolicy | Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
+        recording: bool | None = None,
         wait_for_capacity_ms: int | None = None,
         idempotency_key: str | None = None,
     ) -> Session:
@@ -83,6 +105,7 @@ class AsyncSessions:
             viewport=viewport,
             network=network,
             metadata=metadata,
+            recording=recording,
             wait_for_capacity_ms=wait_for_capacity_ms,
             idempotency_key=idempotency_key,
         )
@@ -155,6 +178,96 @@ class AsyncSessions:
             if time.monotonic() >= until:
                 raise KestrelError(f"session {session_id} is still {s.status} after {timeout} s")
             await _sleep(poll_interval)
+
+    async def mint_token(
+        self,
+        session_id: str,
+        scope: TokenScope,
+        *,
+        ttl_ms: int | None = None,
+        single_use: bool | None = None,
+    ) -> SessionToken:
+        return SessionToken.from_dict(
+            await self._request(
+                "POST",
+                _base.session_path(session_id, "/tokens"),
+                json=_base.mint_body(scope, ttl_ms, single_use),
+            )
+        )
+
+    async def live_view_url(
+        self,
+        session_id: str,
+        *,
+        control: bool = False,
+        ttl_ms: int | None = None,
+        single_use: bool | None = None,
+    ) -> str:
+        scope: TokenScope = "control" if control else "view"
+        token = await self.mint_token(session_id, scope, ttl_ms=ttl_ms, single_use=single_use)
+        return token.url
+
+    async def computer(
+        self,
+        session_id: str,
+        action: ComputerActionName,
+        *,
+        x: int | None = None,
+        y: int | None = None,
+        button: str | None = None,
+        clicks: int | None = None,
+        dx: int | None = None,
+        dy: int | None = None,
+        text: str | None = None,
+        key: str | None = None,
+        screenshot: bool | None = None,
+    ) -> ComputerResponse:
+        body = _base.computer_body(
+            action,
+            x=x,
+            y=y,
+            button=button,
+            clicks=clicks,
+            dx=dx,
+            dy=dy,
+            text=text,
+            key=key,
+            screenshot=screenshot,
+        )
+        return ComputerResponse.from_dict(
+            await self._request("POST", _base.session_path(session_id, "/computer"), json=body)
+        )
+
+    async def iter_recording(
+        self, session_id: str, *, chunk_size: int = 64 * 1024
+    ) -> AsyncIterator[bytes]:
+        response = await self._send(
+            "GET", _base.session_path(session_id, "/recording"), stream=True
+        )
+        try:
+            async for chunk in response.aiter_bytes(chunk_size):
+                yield chunk
+        finally:
+            await response.aclose()
+
+    async def recording(self, session_id: str) -> bytes:
+        return b"".join([c async for c in self.iter_recording(session_id)])
+
+    async def save_recording(self, session_id: str, path: str | os.PathLike[str]) -> int:
+        """See ``Sessions.save_recording``. The writes are local and small, so they are made
+        directly rather than in a thread."""
+        target = Path(path)
+        partial = target.with_name(target.name + ".part")
+        size = 0
+        try:
+            with partial.open("wb") as f:
+                async for chunk in self.iter_recording(session_id):
+                    f.write(chunk)
+                    size += len(chunk)
+            partial.replace(target)
+        finally:
+            partial.unlink(missing_ok=True)
+        return size
 
 
 class AsyncKestrelBrowser:

@@ -30,18 +30,64 @@ const MAX_BACKOFF_MS = 8_000;
 export class Http {
   constructor(private readonly config: HttpConfig) {}
 
+  /** A call answered with JSON. */
   async request<T>(
     method: string,
     path: string,
     opts: RequestOptions = {},
   ): Promise<{ status: number; body: T }> {
+    const { res, value: text } = await this.exchange(method, path, opts, (r) =>
+      r.text(),
+    );
+    try {
+      return {
+        status: res.status,
+        body: (text ? JSON.parse(text) : undefined) as T,
+      };
+    } catch {
+      throw malformed(res, text);
+    }
+  }
+
+  /**
+   * A call answered with a body to stream (a video). Retries happen only until a successful
+   * answer starts; the client's timeout covers waiting for that answer, not the download,
+   * which may rightly take longer. The caller's `signal` still covers both.
+   */
+  async stream(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<Response> {
+    return (await this.exchange(method, path, opts, async (r) => r)).res;
+  }
+
+  private async exchange<T>(
+    method: string,
+    path: string,
+    opts: RequestOptions,
+    read: (res: Response) => Promise<T>,
+  ): Promise<{ res: Response; value: T }> {
+    const url = this.url(path, opts.query);
     for (let attempt = 0; ; attempt++) {
-      const url = this.url(path, opts.query);
+      const timer = new AbortController();
+      const t = setTimeout(
+        () =>
+          timer.abort(
+            new DOMException(
+              `no answer within ${this.config.timeoutMs} ms`,
+              "TimeoutError",
+            ),
+          ),
+        this.config.timeoutMs,
+      );
       let res: Response;
-      let text: string;
+      let value: T | undefined;
+      let text = "";
       try {
-        res = await this.send(method, url, opts);
-        text = await res.text();
+        res = await this.send(method, url, opts, timer.signal);
+        if (res.ok) value = await read(res);
+        else text = await res.text();
       } catch (e) {
         // The caller cancelled: stop at once, whatever the retry budget says.
         if (opts.signal?.aborted) throw opts.signal.reason;
@@ -52,17 +98,10 @@ export class Http {
           );
         await sleep(this.backoff(attempt), opts.signal);
         continue;
+      } finally {
+        clearTimeout(t);
       }
-      if (res.ok) {
-        try {
-          return {
-            status: res.status,
-            body: (text ? JSON.parse(text) : undefined) as T,
-          };
-        } catch {
-          throw malformed(res, text);
-        }
-      }
+      if (res.ok) return { res, value: value as T };
       const err = toApiError(res, text);
       if (!err.retryable || attempt >= this.config.maxRetries) throw err;
       await sleep(err.retryAfterMs ?? this.backoff(attempt), opts.signal);
@@ -80,14 +119,15 @@ export class Http {
     method: string,
     url: URL,
     opts: RequestOptions,
+    timeout: AbortSignal,
   ): Promise<Response> {
-    const timeout = AbortSignal.timeout(this.config.timeoutMs);
     return this.config.fetch(url, {
       method,
       headers: {
         authorization: `Bearer ${this.config.apiKey}`,
         "user-agent": `kestrel-sdk-ts/${SDK_VERSION}`,
-        accept: "application/json",
+        // Error answers are JSON even where success is not (a video).
+        accept: "application/json, */*",
         ...(opts.body === undefined
           ? {}
           : { "content-type": "application/json" }),
