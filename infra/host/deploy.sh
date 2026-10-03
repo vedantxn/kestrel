@@ -99,6 +99,13 @@ log "start the platform"
 SERVICES=(api egress-a node-a gateway-a)
 if [ "$TWO" = 1 ]; then SERVICES+=(egress-b node-b gateway-b); COMPOSE=("${COMPOSE[@]}" --profile b); fi
 "${COMPOSE[@]}" up -d --remove-orphans "${SERVICES[@]}"
+if [ "$TWO" = 0 ]; then
+  # Going back to one node: node b's services and anything it left (sessions, pool, recording
+  # volumes) go too, or they would sit unreaped with no agent to own them.
+  docker rm -f kestrel-egress-b-1 kestrel-node-b-1 kestrel-gateway-b-1 >/dev/null 2>&1 || true
+  docker ps -aq --filter label=kestrel.node=b | xargs -r docker rm -f >/dev/null
+  docker volume ls -q --filter label=kestrel.node=b | xargs -r docker volume rm -f >/dev/null
+fi
 sleep 8
 "${COMPOSE[@]}" ps
 curl -s -m 5 http://127.0.0.1:8080/healthz && echo
