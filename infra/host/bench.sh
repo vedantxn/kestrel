@@ -15,6 +15,8 @@ for kv in "$@"; do extra+=(-e "$kv"); done
 exec docker run --rm --network host -u 0:0 --cap-add NET_ADMIN --cap-add NET_RAW \
   -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/kestrel/secrets:/secrets:ro -v /run/kestrel:/run/kestrel \
   -v /run/xtables.lock:/run/xtables.lock -v /var/lib/kestrel/reports:/reports \
+  -v /usr/bin/docker:/usr/bin/docker:ro -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
+  -v /srv/kestrel:/srv/kestrel:ro -v /var/lib/kestrel/compose.env:/var/lib/kestrel/compose.env:ro \
   -e PUBLIC_HOSTNAME="$PUBLIC_HOSTNAME" -e PUBLIC_IP="$PUBLIC_IP" -e API_KEY_FILE=/secrets/harness-api-key \
   -e TEST_PAGE_URL="$TEST_PAGE_URL" -e INSTANCE_TYPE="$INSTANCE_TYPE" -e REPORT_DIR=/reports \
   "${extra[@]}" kestrel-platform:dev node bench/framework/dist/cli.js "$cmd"

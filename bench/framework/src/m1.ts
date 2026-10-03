@@ -11,6 +11,7 @@ import {
 } from "./driver.js";
 import { checkInvariants } from "./invariants.js";
 import { runIsolationSuite, type IsolationConfig } from "./isolation.js";
+import { runChaos } from "./chaos.js";
 import { runBatch } from "./lifecycle.js";
 import { makeReport, type Report } from "./report.js";
 import { summarize } from "./stats.js";
@@ -34,6 +35,8 @@ export interface M1Config {
   >;
   environment: Record<string, string | number>;
   only?: number[];
+  chaosOnly?: string[];
+  chaosRepeat: number;
   log: (m: string) => void;
 }
 
@@ -373,6 +376,33 @@ export async function runM1(c: M1Config): Promise<Report> {
     });
   }
 
+  if (want(9)) {
+    c.log("check 9: chaos cases");
+    const results = await runChaos(
+      {
+        client,
+        host: c.host,
+        testPageUrl: c.testPageUrl,
+        publicHostname: c.publicHostname,
+        log: c.log,
+      },
+      { ...(c.chaosOnly ? { only: c.chaosOnly } : {}), repeat: c.chaosRepeat },
+    );
+    const failed = results.filter((r) => !r.pass);
+    report.add({
+      id: "9",
+      name: `chaos cases (${results.length} runs, each followed by the invariant checker)`,
+      pass: failed.length === 0,
+      detail: failed.length
+        ? failed
+            .map((r) => `${r.id}: ${r.detail}`)
+            .join("; ")
+            .slice(0, 900)
+        : "every case held its invariants",
+    });
+    report.measure("chaos", results);
+  }
+
   return report.build();
 }
 
@@ -396,7 +426,24 @@ export function m1ConfigFromEnv(
     concurrentCount: Number(env.CONC_COUNT ?? (quick ? 16 : 300)),
     concurrency: Number(env.CONCURRENCY ?? 4),
     latencySamples: Number(env.LATENCY_SAMPLES ?? (quick ? 20 : 200)),
-    host: DEFAULT_HOST,
+    host:
+      env.TWO_NODES === "1"
+        ? {
+            ...DEFAULT_HOST,
+            nodes: [
+              ...DEFAULT_HOST.nodes,
+              {
+                id: "b",
+                agentPort: 7002,
+                gatewayMetricsPort: 7202,
+                secretFile: "/secrets/node-b.secret",
+                iface: "ksl-b",
+                bridgeIp: "172.30.2.1",
+                egressSocket: "/run/kestrel/b/egress.sock",
+              },
+            ],
+          }
+        : DEFAULT_HOST,
     isolation: {
       node: "a",
       network: "ksl-a",
@@ -414,6 +461,8 @@ export function m1ConfigFromEnv(
       quick: quick ? "yes" : "no",
     },
     ...(env.ONLY ? { only: env.ONLY.split(",").map(Number) } : {}),
+    ...(env.CHAOS_ONLY ? { chaosOnly: env.CHAOS_ONLY.split(",") } : {}),
+    chaosRepeat: Number(env.CHAOS_REPEAT ?? 1),
     log,
   };
 }
