@@ -397,6 +397,7 @@ export const CASES: ChaosCase[] = [
       const ids = (await Promise.all(creating)).filter(
         (x) => x !== null,
       ) as string[];
+      await sh("docker start kestrel-node-a-1");
       await sleep(25_000);
       await stopAll(env);
       for (const id of ids) {
@@ -757,6 +758,10 @@ export async function runChaos(
       env.log(`chaos: ${label}`);
       let detail: string;
       let pass = true;
+      await sh(
+        "docker start kestrel-postgres-1 kestrel-api-1 kestrel-egress-a-1 kestrel-node-a-1 kestrel-gateway-a-1 kestrel-egress-b-1 kestrel-node-b-1 kestrel-gateway-b-1 >/dev/null 2>&1",
+      );
+      await apiHealthy(env, 90_000).catch(() => undefined);
       try {
         detail = await c.run(env);
       } catch (e) {
