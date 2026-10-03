@@ -172,6 +172,39 @@ export class NodeAgent {
     };
   }
 
+  /** Everything the agent holds, for the invariant checker (H5). Authenticated like the rest of the node protocol. */
+  state(): {
+    sessions: {
+      sessionId: string;
+      state: string;
+      address: string | null;
+      containerId: string | null;
+    }[];
+    pool: { containerId: string; address: string; state: string }[];
+    pendingReports: number;
+    slotsTotal: number;
+    admitting: boolean;
+    failpoints: Record<string, string>;
+  } {
+    return {
+      sessions: this.store.allBindings().map((b) => ({
+        sessionId: b.sessionId,
+        state: b.state,
+        address: b.address,
+        containerId: b.containerId,
+      })),
+      pool: this.store.allPool().map((p) => ({
+        containerId: p.containerId,
+        address: p.address,
+        state: p.state,
+      })),
+      pendingReports: this.store.pendingReportCount(),
+      slotsTotal: this.c.slotsTotal,
+      admitting: this.firewallOk,
+      failpoints: this.d.failpoints.describe(),
+    };
+  }
+
   // --- boot (G9, I13, G17) --------------------------------------------------------------------
 
   /**

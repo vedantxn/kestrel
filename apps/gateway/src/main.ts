@@ -66,6 +66,15 @@ const internal = createServer(async (req, res) => {
     res.setHeader("content-type", metrics.registry.contentType);
     return res.end(await metrics.registry.metrics());
   }
+  if (req.url === "/routes") {
+    // Internal only (loopback): what the invariant checker compares with the node agent.
+    return res.end(
+      JSON.stringify({
+        routes: table.ids(),
+        attachments: gateway.attachments(),
+      }),
+    );
+  }
   if (req.url === "/healthz")
     return res.end(
       JSON.stringify({

@@ -53,6 +53,8 @@ export function createNodeServer(
         return send(res, 401, { error: "unauthorized" });
       const path = new URL(req.url ?? "/", "http://node").pathname;
 
+      if (req.method === "GET" && path === "/v1/state")
+        return send(res, 200, agent.state());
       if (req.method === "GET" && path === NODE_PATHS.describe)
         return send(res, 200, agent.describe());
       if (req.method === "POST" && path === NODE_PATHS.start) {

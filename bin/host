@@ -233,7 +233,7 @@ cmd_deploy() {
     '"
 }
 
-cmd_bench() { cmd_run --detach --name "bench-$(date +%Y%m%d-%H%M%S)" -- npm run bench -- "$@"; }
+cmd_bench() { cmd_run --detach --name "bench-$(date +%Y%m%d-%H%M%S)" -- sudo infra/host/bench.sh "${@:-m1}"; }
 
 # --- the nightly stop -----------------------------------------------------------------------
 

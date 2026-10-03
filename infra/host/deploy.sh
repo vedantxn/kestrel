@@ -34,10 +34,13 @@ chmod 0711 "$SECRETS"; install -d -m 0755 /run/kestrel /var/lib/kestrel/a /var/l
 touch /run/xtables.lock
 mkdir -p /var/lib/kestrel/postgres && chown 999:999 /var/lib/kestrel/postgres 2>/dev/null || true
 
+ACCOUNT=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | sed -n 's/.*"accountId" *: *"\([0-9]*\)".*/\1/p')
+TEST_PAGE_URL="https://kestrel-testpage-$ACCOUNT.s3.us-east-1.amazonaws.com/test/index.html"
 NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443}]'
 cat > /var/lib/kestrel/compose.env <<ENV
 PUBLIC_HOSTNAME=$HOSTNAME_PUBLIC
 PUBLIC_IP=$PUBLIC_IP
+TEST_PAGE_URL=$TEST_PAGE_URL
 KESTREL_NODES=$NODES
 ENV
 chmod 0600 /var/lib/kestrel/compose.env
