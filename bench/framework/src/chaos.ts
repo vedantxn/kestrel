@@ -730,7 +730,11 @@ export const CASES: ChaosCase[] = [
         {},
         180_000,
       );
-      expect(r.code === 0, `could not restart Docker: ${r.out.slice(0, 160)}`);
+      // The helper's own Docker client loses its connection when the daemon restarts, so "unexpected EOF" is success.
+      expect(
+        r.code === 0 || r.out.includes("unexpected EOF"),
+        `could not restart Docker: ${r.out.slice(0, 160)}`,
+      );
       await until(
         "Docker to come back",
         90_000,
