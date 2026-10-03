@@ -1,0 +1,23 @@
+{
+  "name": "@kestrel/cli",
+  "version": "0.1.0",
+  "description": "Command line for Kestrel, open-source cloud browsers for AI agents",
+  "type": "module",
+  "bin": {
+    "kestrel": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kestrel/sdk": "^0.1.0"
+  }
+}
