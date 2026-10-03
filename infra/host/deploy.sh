@@ -43,7 +43,7 @@ SIZES="SLOTS_A=5\nPOOL_A=2"
 if [ "$TWO" = 1 ]; then
   # Two nodes on one host, to exercise the multi-node paths (sizes: v1 plan 4.12).
   NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443},{"id":"b","address":"http://127.0.0.1:7002","secretFile":"/secrets/node-b.secret","connectPort":8444}]'
-  SIZES="SLOTS_A=${SLOTS_A:-3}\nPOOL_A=1\nSLOTS_B=${SLOTS_B:-2}\nPOOL_B=1"
+  SIZES="SLOTS_A=${SLOTS_A:-3}\nPOOL_A=${POOL_A:-1}\nSLOTS_B=${SLOTS_B:-2}\nPOOL_B=${POOL_B:-1}"
 fi
 cat > /var/lib/kestrel/compose.env <<ENV
 PUBLIC_HOSTNAME=$HOSTNAME_PUBLIC
