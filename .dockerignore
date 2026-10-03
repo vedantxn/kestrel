@@ -6,3 +6,4 @@ infra/terraform
 reports
 runtime/runtimed.mjs
 docs
+**/*.tsbuildinfo
