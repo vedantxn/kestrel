@@ -30,7 +30,6 @@ const fake = {
   connectUrls: [] as string[],
   closed: 0,
   text: "hello from the page",
-  shot: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0]),
   fail: undefined as Error | undefined,
 };
 
@@ -45,7 +44,6 @@ const fakeOpenPage: OpenPage = async (connectUrl) => {
     },
     title: async () => "Fake title",
     url: () => current,
-    screenshot: async () => fake.shot,
     evaluate: async (expr: string) => {
       const n = Number(/slice\(0, (\d+)\)/.exec(expr)?.[1]);
       return fake.text.slice(0, n);
@@ -114,7 +112,6 @@ beforeEach(async () => {
     connectUrls: [],
     closed: 0,
     text: "hello from the page",
-    shot: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0]),
     fail: undefined,
   });
   await start();
@@ -271,8 +268,8 @@ describe("session tools", () => {
   });
 });
 
-describe("browser tools (fake page)", () => {
-  it("navigate, get_page_text and screenshot use the session's connectUrl", async () => {
+describe("CDP tools (fake page)", () => {
+  it("navigate and get_page_text use the session's connectUrl", async () => {
     const c = await connect();
     const s = session(await call(c, "create_session"));
 
@@ -294,19 +291,8 @@ describe("browser tools (fake page)", () => {
       text: "hello from the page",
     });
 
-    const shot = await call(c, "screenshot", { sessionId: s.id });
-    expect(shot.content[0]).toMatchObject({
-      type: "image",
-      mimeType: "image/png",
-      data: fake.shot.toString("base64"),
-    });
-
-    expect(fake.connectUrls).toEqual([
-      s.connectUrl,
-      s.connectUrl,
-      s.connectUrl,
-    ]);
-    expect(fake.closed).toBe(3); // every call disconnects
+    expect(fake.connectUrls).toEqual([s.connectUrl, s.connectUrl]);
+    expect(fake.closed).toBe(2); // every call disconnects
   });
 
   it("bounds what comes back from the page", async () => {
@@ -319,18 +305,6 @@ describe("browser tools (fake page)", () => {
     ) as { truncated: boolean; text: string };
     expect(page.truncated).toBe(true);
     expect(page.text.length).toBe(1_000);
-
-    fake.shot = Buffer.from("<html>not an image</html>");
-    expect(errorOf(await call(c, "screenshot", { sessionId: s.id })).code).toBe(
-      "internal",
-    );
-    fake.shot = Buffer.concat([
-      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-      Buffer.alloc(MCP_LIMITS.maxScreenshotBytes),
-    ]);
-    expect(
-      String(errorOf(await call(c, "screenshot", { sessionId: s.id })).message),
-    ).toContain("jpeg");
   });
 
   it("refuses what it should not do", async () => {
@@ -347,7 +321,7 @@ describe("browser tools (fake page)", () => {
       await call(c, "create_session", { stopOnDisconnect: true }),
     );
     expect(
-      errorOf(await call(c, "screenshot", { sessionId: sod.id })).code,
+      errorOf(await call(c, "get_page_text", { sessionId: sod.id })).code,
     ).toBe("invalid_request");
 
     await call(c, "stop_session", { sessionId: s.id });
@@ -361,11 +335,205 @@ describe("browser tools (fake page)", () => {
     const c = await connect();
     const s = session(await call(c, "create_session"));
     fake.fail = new Error(`connect failed: ${s.connectUrl}\nstack line`);
-    const e = errorOf(await call(c, "screenshot", { sessionId: s.id }));
+    const e = errorOf(await call(c, "get_page_text", { sessionId: s.id }));
     expect(e).toMatchObject({ code: "internal", retryable: true });
     const token = new URL(s.connectUrl as string).searchParams.get("token");
     expect(JSON.stringify(e)).not.toContain(token);
     expect(String(e.message)).toContain("[redacted]");
+  });
+});
+
+// --- /computer and live view, through the fake node ---------------------------------------
+
+/** The fake node answers every computer call with this tiny PNG (its 8-byte signature). */
+const FAKE_PNG = "iVBORw0KGgo=";
+
+const imageOf = (r: CallToolResult) => {
+  expect(r.isError).toBeFalsy();
+  const img = r.content.find((c) => c.type === "image");
+  return img?.type === "image" ? img : undefined;
+};
+const jsonOf = (r: CallToolResult): unknown => {
+  const t = r.content.find((c) => c.type === "text");
+  return t?.type === "text" ? JSON.parse(t.text) : undefined;
+};
+
+describe("screenshot and computer (W4 path)", () => {
+  it("screenshot goes through the node, with no CDP connection", async () => {
+    const c = await connect();
+    const s = session(await call(c, "create_session"));
+    const shot = await call(c, "screenshot", { sessionId: s.id });
+    expect(imageOf(shot)).toEqual({
+      type: "image",
+      mimeType: "image/png",
+      data: FAKE_PNG,
+    });
+    expect(jsonOf(shot)).toEqual({
+      ok: true,
+      url: "about:blank",
+      width: 1280,
+      height: 720,
+    });
+    expect(env.nodeClient.computerCalls).toEqual([{ action: "screenshot" }]);
+    expect(fake.connectUrls).toEqual([]);
+  });
+
+  it("computer sends one validated action, with defaults applied", async () => {
+    const c = await connect();
+    const s = session(await call(c, "create_session"));
+
+    const click = await call(c, "computer", {
+      sessionId: s.id,
+      action: "click",
+      x: 10,
+      y: 20,
+      screenshot: true,
+    });
+    expect(imageOf(click)?.data).toBe(FAKE_PNG);
+    expect(jsonOf(click)).toMatchObject({ ok: true, width: 1280 });
+
+    const typed = await call(c, "computer", {
+      sessionId: s.id,
+      action: "type",
+      text: "hello",
+    });
+    expect(imageOf(typed)).toBeUndefined();
+    expect(jsonOf(typed)).toMatchObject({ ok: true });
+
+    expect(env.nodeClient.computerCalls).toEqual([
+      {
+        action: "click",
+        x: 10,
+        y: 20,
+        button: "left",
+        clicks: 1,
+        screenshot: true,
+      },
+      { action: "type", text: "hello", screenshot: false },
+    ]);
+  });
+
+  it("computer refuses actions the contract refuses", async () => {
+    const c = await connect();
+    const s = session(await call(c, "create_session"));
+    // A click needs coordinates.
+    expect(
+      errorOf(
+        await call(c, "computer", { sessionId: s.id, action: "click", x: 1 }),
+      ),
+    ).toMatchObject({ code: "invalid_request", param: "y" });
+    // A field that does not apply to the action is named, not ignored.
+    expect(
+      errorOf(
+        await call(c, "computer", {
+          sessionId: s.id,
+          action: "type",
+          text: "a",
+          x: 5,
+        }),
+      ),
+    ).toMatchObject({ code: "invalid_request", param: "x" });
+    expect(env.nodeClient.computerCalls).toEqual([]);
+
+    await call(c, "stop_session", { sessionId: s.id });
+    expect(
+      errorOf(
+        await call(c, "computer", {
+          sessionId: s.id,
+          action: "key",
+          key: "Enter",
+        }),
+      ),
+    ).toMatchObject({ code: "conflict", retryable: false });
+    const other = await connect(env.project2.key);
+    expect(
+      errorOf(await call(other, "screenshot", { sessionId: s.id })).code,
+    ).toBe("not_found");
+  });
+
+  it("passes on only a PNG of bounded size from the container", async () => {
+    const c = await connect();
+    const s = session(await call(c, "create_session"));
+    const answer = (screenshot: string) => {
+      env.nodeClient.computer = async () => ({
+        ok: true,
+        response: { ok: true, width: 1, height: 1, url: "x", screenshot },
+      });
+    };
+    answer(Buffer.from("<html>not an image</html>").toString("base64"));
+    expect(errorOf(await call(c, "screenshot", { sessionId: s.id })).code).toBe(
+      "internal",
+    );
+    answer(
+      Buffer.concat([
+        Buffer.from(FAKE_PNG, "base64"),
+        Buffer.alloc(MCP_LIMITS.maxScreenshotBytes),
+      ]).toString("base64"),
+    );
+    expect(
+      String(errorOf(await call(c, "screenshot", { sessionId: s.id })).message),
+    ).toContain("limit");
+  });
+});
+
+describe("get_live_view_url", () => {
+  const tokenOf = (url: string) =>
+    new URLSearchParams(new URL(url).hash.slice(1)).get("token") as string;
+
+  it("mints a view link by default, and control on request", async () => {
+    const c = await connect();
+    const s = session(await call(c, "create_session"));
+
+    const view = body(
+      await call(c, "get_live_view_url", { sessionId: s.id }),
+    ) as { url: string; scope: string; expiresAt: string };
+    expect(Object.keys(view).sort()).toEqual(["expiresAt", "scope", "url"]);
+    expect(view.scope).toBe("view");
+    expect(view.url).toMatch(
+      new RegExp(`^https://1-2-3-4\\.sslip\\.io/live/${s.id}#`),
+    );
+    expect(Date.parse(view.expiresAt) - env.clock.now()).toBe(10 * 60_000);
+    const claims = await env.verifier.verify(
+      tokenOf(view.url),
+      env.clock.now(),
+      ["view"],
+    );
+    expect(claims).toMatchObject({
+      ok: true,
+      claims: { sub: s.id, scope: "view" },
+    });
+
+    const control = body(
+      await call(c, "get_live_view_url", {
+        sessionId: s.id,
+        scope: "control",
+        ttlMs: 3_600_000,
+        singleUse: true,
+      }),
+    ) as { url: string; scope: string; expiresAt: string };
+    expect(control.scope).toBe("control");
+    // Single use caps the lifetime at five minutes.
+    expect(Date.parse(control.expiresAt) - env.clock.now()).toBe(5 * 60_000);
+  });
+
+  it("refuses an ended session and another project's", async () => {
+    const c = await connect();
+    const s = session(await call(c, "create_session"));
+    expect(
+      errorOf(
+        await call(await connect(env.project2.key), "get_live_view_url", {
+          sessionId: s.id,
+        }),
+      ).code,
+    ).toBe("not_found");
+    expect(
+      (await call(c, "get_live_view_url", { sessionId: s.id, ttlMs: 5 }))
+        .isError,
+    ).toBe(true);
+    await call(c, "stop_session", { sessionId: s.id });
+    expect(
+      errorOf(await call(c, "get_live_view_url", { sessionId: s.id })).code,
+    ).toBe("conflict");
   });
 });
 
@@ -451,10 +619,5 @@ describe.skipIf(!CHROME)("browser tools (real Chrome over CDP)", () => {
       title: "Kestrel test",
       text: "Hello from a real page",
     });
-    const shot = await call(c, "screenshot", { sessionId: s.id });
-    const img = shot.content[0];
-    expect(img?.type).toBe("image");
-    const bytes = Buffer.from(img?.type === "image" ? img.data : "", "base64");
-    expect(bytes.subarray(1, 4).toString()).toBe("PNG");
   });
 });
