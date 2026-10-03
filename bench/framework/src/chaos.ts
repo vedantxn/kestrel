@@ -195,6 +195,17 @@ async function inContainer(id: string, script: string): Promise<string> {
 const KILL_BY = (pattern: string) =>
   `for p in /proc/[0-9]*; do c=$(tr '\\0' ' ' < $p/cmdline 2>/dev/null); case "$c" in *${pattern}*) kill -9 \${p#/proc/} 2>/dev/null;; esac; done`;
 
+/** SIGKILL a container's main process from the host, as a crash would: the restart policy applies (it does not for `docker kill`). */
+async function crash(name: string): Promise<void> {
+  const pid = (
+    await sh(`docker inspect -f '{{.State.Pid}}' ${name}`)
+  ).out.trim();
+  expect(/^\d+$/.test(pid) && pid !== "0", `${name} is not running`);
+  await sh(
+    `docker run --rm --pid=host -u 0:0 --entrypoint kill kestrel-platform:dev -9 ${pid}`,
+  );
+}
+
 async function neighbourWorks(env: ChaosEnv, ms = 40_000): Promise<string> {
   const r = await runLifecycle(env.client, new PlaywrightDriver(), {
     testPageUrl: env.testPageUrl,
@@ -393,11 +404,10 @@ export const CASES: ChaosCase[] = [
           .catch(() => null),
       );
       await sleep(40);
-      await sh("docker kill kestrel-node-a-1");
+      await crash("kestrel-node-a-1");
       const ids = (await Promise.all(creating)).filter(
         (x) => x !== null,
       ) as string[];
-      await sh("docker start kestrel-node-a-1");
       await sleep(25_000);
       await stopAll(env);
       for (const id of ids) {
@@ -554,7 +564,7 @@ export const CASES: ChaosCase[] = [
       const url = h!.page.url();
       await h!.browser.close().catch(() => undefined);
       const node = (await containerOf(env, h!.session.id))?.node ?? "a";
-      await sh(`docker kill kestrel-gateway-${node}-1`);
+      await crash(`kestrel-gateway-${node}-1`);
       await sleep(15_000);
       const s = await env.client.get(h!.session.id);
       expect(
