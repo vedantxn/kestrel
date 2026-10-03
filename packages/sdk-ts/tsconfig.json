@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "include": ["src"],
+  // Only types.test.ts imports the contracts, to check the hand-written types against them.
+  "references": [{ "path": "../contracts" }]
+}
