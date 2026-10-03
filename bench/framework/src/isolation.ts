@@ -431,9 +431,12 @@ export async function fromChrome(
       });
     }
     try {
-      await page.goto("about:blank"); // a clean slate: the last attack's navigation must not interrupt the control
-      await page.goto(cfg.testPageUrl, { timeout: 20_000 });
-      const title = await page.title();
+      // A new page: an earlier attack's navigation may still be unwinding on the old one.
+      const ctx =
+        browser.contexts()[0] as import("playwright-core").BrowserContext;
+      const fresh = await ctx.newPage();
+      await fresh.goto(cfg.testPageUrl, { timeout: 20_000 });
+      const title = await fresh.title();
       findings.push({
         kind: 1,
         name: "positive control: Chrome loads the test page",
@@ -445,7 +448,7 @@ export async function fromChrome(
         kind: 1,
         name: "positive control: Chrome loads the test page",
         pass: false,
-        detail: (e as Error).message.slice(0, 120),
+        detail: (e as Error).message.slice(0, 160),
       });
     }
     await browser.close().catch(() => undefined);
