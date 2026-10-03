@@ -181,8 +181,15 @@ async function containerOf(
 }
 
 async function inContainer(id: string, script: string): Promise<string> {
-  const r = await sh(`docker exec ${id} sh -c ${JSON.stringify(script)}`);
-  return r.out;
+  return new Promise((resolve) => {
+    const child = execFile(
+      "docker",
+      ["exec", "-i", id, "sh"],
+      { timeout: 60_000 },
+      (_e, stdout, stderr) => resolve(`${stdout}${stderr}`),
+    );
+    child.stdin?.end(script);
+  });
 }
 
 const KILL_BY = (pattern: string) =>
