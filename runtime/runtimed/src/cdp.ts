@@ -155,6 +155,8 @@ export async function applyViewport(
   viewport: Viewport;
   deviceScaleFactor: number;
   chromeVersion: string;
+  /** The whole window, toolbar included: what the recorder captures (W3). */
+  window: { width: number; height: number };
 }> {
   const v = await getVersion(chromePort);
   const cdp = await Cdp.connect(v.wsUrl);
@@ -212,6 +214,7 @@ export async function applyViewport(
       viewport: { width: m.iw, height: m.ih },
       deviceScaleFactor: m.dpr,
       chromeVersion: v.browser,
+      window: { width: m.ow, height: m.oh },
     };
   } finally {
     cdp.close();

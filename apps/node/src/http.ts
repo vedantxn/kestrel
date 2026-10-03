@@ -85,6 +85,32 @@ export function createNodeServer(
           });
         return send(res, 200, await agent.stop(parsed.data));
       }
+      if (req.method === "GET" && path.startsWith(`${NODE_PATHS.recording}/`)) {
+        const sid = SessionId.safeParse(
+          path.slice(NODE_PATHS.recording.length + 1),
+        );
+        if (!sid.success)
+          return send(res, 400, { error: "invalid session id" });
+        const rec = await agent.openRecording(sid.data);
+        if (!rec) return send(res, 404, { error: "no recording" });
+        res.writeHead(200, {
+          "content-type": "video/mp4",
+          "content-length": String(rec.size),
+        });
+        // Exactly the size measured when it was opened: a recorder still writing cannot make this unbounded.
+        const stream = rec.fd.createReadStream({
+          start: 0,
+          end: Math.max(0, rec.size - 1),
+        });
+        stream.on("close", () => void rec.fd.close().catch(() => undefined));
+        stream.on("error", () => res.destroy());
+        if (rec.size === 0) {
+          stream.destroy();
+          return void res.end();
+        }
+        stream.pipe(res);
+        return;
+      }
       if (req.method === "POST" && path === NODE_PATHS.computer) {
         const parsed = NodeComputerRequest.safeParse(await readBody(req));
         if (!parsed.success)

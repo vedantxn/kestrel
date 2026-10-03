@@ -173,6 +173,12 @@ export const SessionOptions = z
       .describe("End the session when its last client disconnects."),
     viewport: Viewport.default(LIMITS.defaultViewport),
     network: NetworkPolicy.default({}),
+    recording: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Record the browser's display to video, retrievable from `/recording` after the session.",
+      ),
     metadata: Metadata.default({}),
   })
   .meta({ id: "SessionOptions" });

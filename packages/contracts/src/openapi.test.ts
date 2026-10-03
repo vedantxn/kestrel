@@ -31,6 +31,7 @@ describe("openapi", () => {
         "GET /v1/sessions/{id}/events",
         "POST /v1/sessions/{id}/tokens",
         "POST /v1/sessions/{id}/computer",
+        "GET /v1/sessions/{id}/recording",
         "GET /healthz",
         "GET /openapi.json",
       ].sort(),

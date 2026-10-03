@@ -31,6 +31,12 @@ export interface RuntimeClient {
     req: ComputerRequest,
     timeoutMs?: number,
   ): Promise<ComputerResponse>;
+  /** W3: let the recorder write its last fragment before the container is removed. */
+  stopRecording(
+    address: string,
+    token: string,
+    timeoutMs?: number,
+  ): Promise<void>;
 }
 
 const MAX_RESPONSE_BYTES = 16 * 1024;
@@ -135,6 +141,22 @@ export class HttpRuntimeClient implements RuntimeClient {
       req,
       timeoutMs,
       MAX_COMPUTER_RESPONSE_BYTES,
+    );
+  }
+
+  async stopRecording(
+    address: string,
+    token: string,
+    timeoutMs = 4000,
+  ): Promise<void> {
+    await this.call(
+      address,
+      token,
+      "POST",
+      RUNTIME_PATHS.recordingStop,
+      { parse: (v: unknown) => v },
+      undefined,
+      timeoutMs,
     );
   }
 }

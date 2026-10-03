@@ -23,6 +23,8 @@ export const NODE_PATHS = {
   describe: "/v1/describe",
   /** W4: `{ sessionId, action }`, answered with a ComputerResponse. */
   computer: "/v1/computer",
+  /** W3: `GET /v1/recording/<session id>` streams the session's video. */
+  recording: "/v1/recording",
   // served by the API's internal listener
   register: "/internal/nodes/register",
   heartbeat: "/internal/nodes/heartbeat",
@@ -42,6 +44,8 @@ export const StartRequest = z.object({
   timeoutMs: z.number().int().positive(),
   idleTimeoutMs: z.number().int().positive(),
   stopOnDisconnect: z.boolean(),
+  /** W3. Record the display; a node that cannot record starts the session anyway. */
+  recording: z.boolean().default(false),
 });
 export type StartRequest = z.infer<typeof StartRequest>;
 

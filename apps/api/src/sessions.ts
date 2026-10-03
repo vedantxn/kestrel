@@ -291,6 +291,7 @@ async function startOnNode(
       timeoutMs: options.timeout,
       idleTimeoutMs: options.idleTimeout,
       stopOnDisconnect: options.stopOnDisconnect,
+      recording: options.recording,
     };
 
     let result;
@@ -540,6 +541,43 @@ export async function mintSessionToken(
       : buildConnectUrl(ctx.publicHostname, node.connectPort, publicId, token),
     expiresAt: new Date(expMs).toISOString(),
   };
+}
+
+/**
+ * W3. A session's recording, from the node it ran on. Available while it runs and after it
+ * ends, until the node's retention removes it; gone if the node is.
+ */
+export async function sessionRecording(
+  ctx: Ctx,
+  auth: Auth,
+  id: string,
+): Promise<{ body: ReadableStream<Uint8Array>; size: number }> {
+  const uuid = sessionUuid(id);
+  const row = uuid
+    ? await ctx.db.session.findFirst({
+        where: { id: uuid, projectId: auth.projectId },
+        select: { id: true, nodeId: true, options: true },
+      })
+    : null;
+  if (!row) throw new AppError("not_found", "No such session.");
+  if (!row.nodeId || !SessionOptions.parse(row.options).recording)
+    throw new AppError("not_found", "This session was not recorded.");
+  let r;
+  try {
+    r = await ctx.nodeClient.recording(
+      row.nodeId,
+      publicSessionId(row.id),
+      10_000,
+    );
+  } catch {
+    throw new AppError("internal", "The session's node did not answer.");
+  }
+  if (!r)
+    throw new AppError(
+      "not_found",
+      "No recording is available for this session (the node could not record, or it has been removed).",
+    );
+  return r;
 }
 
 /** W4. One `/computer` action on a running session, through its node agent. */

@@ -3,6 +3,7 @@ import { ControlServer } from "./control.js";
 import { Env } from "./config.js";
 import { CdpForward } from "./forward.js";
 import { LiveServer } from "./live.js";
+import { Recorder } from "./recorder.js";
 import { Tabs } from "./page.js";
 import { Supervisor, type Proc } from "./supervisor.js";
 
@@ -32,6 +33,12 @@ const supervisor = new Supervisor(
 );
 
 const tabs = new Tabs();
+const recorder = new Recorder(
+  cfg.RECORDING_DIR,
+  cfg.DISPLAY_NUM,
+  undefined,
+  log,
+);
 const live = new LiveServer(cfg.CHROME_PORT, tabs, log);
 const forward = new CdpForward(cfg.CHROME_PORT, live);
 const control = new ControlServer(
@@ -40,6 +47,7 @@ const control = new ControlServer(
   forward,
   cfg.CHROME_PORT,
   tabs,
+  recorder,
 );
 
 await forward.listen(cfg.FORWARD_PORT);
@@ -52,4 +60,7 @@ log("runtimed listening", {
 await supervisor.start();
 log("browser ready", { version: supervisor.chromeVersion });
 
-process.on("SIGTERM", () => process.exit(0));
+// Docker stops a container with SIGTERM: finish the recording's last fragment first (StopTimeout is short).
+process.on("SIGTERM", () => {
+  void recorder.stop(1500).finally(() => process.exit(0));
+});

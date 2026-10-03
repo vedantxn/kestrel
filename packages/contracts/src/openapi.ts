@@ -191,6 +191,24 @@ export function buildOpenApiDocument(): Json {
           },
         },
       },
+      "/v1/sessions/{id}/recording": {
+        get: {
+          operationId: "getSessionRecording",
+          summary: "A session's video",
+          description:
+            "Fragmented MP4 of the browser window, for a session created with `recording: true`. Available while the session runs (up to its latest fragment) and for 24 hours after it ends, from the node it ran on. 404 if the session was not recorded, its node could not record, or the recording has been removed.",
+          parameters: [sessionIdParam],
+          responses: {
+            "200": {
+              description: "The video.",
+              content: {
+                "video/mp4": { schema: { type: "string", format: "binary" } },
+              },
+            },
+            ...errors("unauthorized", "not_found", "internal"),
+          },
+        },
+      },
       "/v1/sessions/{id}/computer": {
         post: {
           operationId: "sessionComputer",

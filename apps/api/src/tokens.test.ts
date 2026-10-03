@@ -197,3 +197,36 @@ describe("the live-view page (W2)", () => {
     expect(res.body).toContain("Kestrel live view");
   });
 });
+
+describe("GET /v1/sessions/{id}/recording (W3)", () => {
+  it("streams the node's recording for a recorded session", async () => {
+    const res = await env.create({ recording: true });
+    const s = Session.parse(res.json());
+    expect(s.options.recording).toBe(true);
+    env.nodeClient.recordings.set(s.id, new Uint8Array([1, 2, 3, 4]));
+    const got = await env.call("GET", `/v1/sessions/${s.id}/recording`);
+    expect(got.statusCode).toBe(200);
+    expect(got.headers["content-type"]).toBe("video/mp4");
+    expect([...got.rawPayload]).toEqual([1, 2, 3, 4]);
+  });
+
+  it("is 404 for a session that was not recorded, or whose node has nothing", async () => {
+    const plain = Session.parse((await env.create()).json());
+    expect(
+      (await env.call("GET", `/v1/sessions/${plain.id}/recording`)).statusCode,
+    ).toBe(404);
+    const rec = Session.parse((await env.create({ recording: true })).json());
+    expect(
+      (await env.call("GET", `/v1/sessions/${rec.id}/recording`)).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await env.call(
+          "GET",
+          `/v1/sessions/${rec.id}/recording`,
+          env.project2.key,
+        )
+      ).statusCode,
+    ).toBe(404);
+  });
+});

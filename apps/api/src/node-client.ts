@@ -21,6 +21,12 @@ export interface NodeClient {
     req: StopRequest,
     timeoutMs: number,
   ): Promise<StopResponse>;
+  /** W3. The session's recording as a stream, or null if the node has none. */
+  recording(
+    nodeId: string,
+    sessionId: string,
+    timeoutMs: number,
+  ): Promise<{ body: ReadableStream<Uint8Array>; size: number } | null>;
   /** W4. A refusal from the node (no such session, not running, the browser failed) is a result, not an error. */
   computer(
     nodeId: string,
@@ -61,6 +67,35 @@ export class HttpNodeClient implements NodeClient {
     timeoutMs: number,
   ): Promise<StopResponse> {
     return this.post(nodeId, NODE_PATHS.stop, req, StopResponse, timeoutMs);
+  }
+
+  async recording(
+    nodeId: string,
+    sessionId: string,
+    timeoutMs: number,
+  ): Promise<{ body: ReadableStream<Uint8Array>; size: number } | null> {
+    const node = this.nodes.get(nodeId);
+    if (!node) return null;
+    let res: Response;
+    try {
+      res = await fetch(
+        new URL(`${NODE_PATHS.recording}/${sessionId}`, node.address),
+        {
+          headers: { authorization: `Bearer ${node.secret}` },
+          // Only the headers are bounded by time: a long video may take a while to stream.
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+      );
+    } catch {
+      throw new NodeCallError(`node ${nodeId}: unreachable`, "unreachable");
+    }
+    if (res.status === 404) return null;
+    if (!res.ok || !res.body)
+      throw new NodeCallError(`node ${nodeId}: bad response`, "bad_response");
+    return {
+      body: res.body,
+      size: Number(res.headers.get("content-length") ?? 0),
+    };
   }
 
   async computer(

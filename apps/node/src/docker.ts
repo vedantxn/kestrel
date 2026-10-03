@@ -1,3 +1,4 @@
+import { RECORDING_DIR } from "@kestrel/contracts";
 import Docker from "dockerode";
 import { RUNTIME_PORTS } from "@kestrel/contracts";
 
@@ -27,6 +28,8 @@ export function buildContainerSpec(
   cfg: NodeConfigForDocker,
   role: Role,
   controlToken: string,
+  /** W3: the container's recording volume, if the node could make one. */
+  recordingVolume?: string,
 ): Docker.ContainerCreateOptions {
   const tmpfs = (size: number) =>
     `rw,noexec,nosuid,nodev,size=${size}m,uid=10001,gid=10001,mode=0700`;
@@ -38,7 +41,11 @@ export function buildContainerSpec(
       `KESTREL_PROXY=http://${cfg.bridgeIp}:${cfg.egressPort}`,
       `KESTREL_NODE=${cfg.nodeId}`,
     ],
-    Labels: { "kestrel.node": cfg.nodeId, "kestrel.role": role },
+    Labels: {
+      "kestrel.node": cfg.nodeId,
+      "kestrel.role": role,
+      ...(recordingVolume ? { "kestrel.volume": recordingVolume } : {}),
+    },
     // No exposed or published ports: the agent and gateway reach the container by its address on the internal network.
     HostConfig: {
       NetworkMode: cfg.network,
@@ -59,6 +66,18 @@ export function buildContainerSpec(
         "/tmp": tmpfs(64),
         "/home/kestrel": tmpfs(64),
       },
+      ...(recordingVolume
+        ? {
+            Mounts: [
+              {
+                Type: "volume" as const,
+                Source: recordingVolume,
+                Target: RECORDING_DIR,
+                ReadOnly: false,
+              },
+            ],
+          }
+        : {}),
       Init: true,
       CgroupParent: cfg.cgroupParent,
       RestartPolicy: { Name: "no" }, // a browser is used once: nothing is restarted in place (R6)
@@ -257,3 +276,68 @@ export class DockerodeDriver implements DockerDriver {
 }
 
 export const CDP_PORT = RUNTIME_PORTS.cdpForward;
+
+/**
+ * W3. A named volume per container for its recording, so the video outlives the container.
+ * Docker enforces the size with project quotas on the xfs data root; a node without them gets
+ * no volume and its sessions are not recorded. The volumes directory is mounted noexec on the
+ * host (`infra/terraform/main/userdata.sh.tpl`), which every mount of a volume inherits.
+ */
+export interface Volumes {
+  /** Create a size-limited volume; throws if the host cannot limit its size. */
+  create(name: string, sizeBytes: number): Promise<void>;
+  /** Idempotent. */
+  remove(name: string): Promise<void>;
+  /** This node's recording volumes, with when each was created (epoch ms). */
+  list(): Promise<{ name: string; createdAt: number }[]>;
+  /** The host directory holding the volume's files, as the agent sees it. */
+  path(name: string): Promise<string | null>;
+}
+
+export class DockerVolumes implements Volumes {
+  private docker: Docker;
+  constructor(
+    private readonly nodeId: string,
+    opts: Docker.DockerOptions = { socketPath: "/var/run/docker.sock" },
+  ) {
+    this.docker = new Docker(opts);
+  }
+
+  async create(name: string, sizeBytes: number): Promise<void> {
+    await this.docker.createVolume({
+      Name: name,
+      Driver: "local",
+      DriverOpts: { size: String(sizeBytes) },
+      Labels: { "kestrel.node": this.nodeId, "kestrel.role": "recording" },
+    });
+  }
+
+  async remove(name: string): Promise<void> {
+    try {
+      await this.docker.getVolume(name).remove({ force: true });
+    } catch (e) {
+      if ((e as { statusCode?: number }).statusCode !== 404) throw e;
+    }
+  }
+
+  async list(): Promise<{ name: string; createdAt: number }[]> {
+    const r = await this.docker.listVolumes({
+      filters: {
+        label: [`kestrel.node=${this.nodeId}`, "kestrel.role=recording"],
+      },
+    });
+    return (r.Volumes ?? []).map((v) => ({
+      name: v.Name,
+      createdAt: Date.parse((v as { CreatedAt?: string }).CreatedAt ?? "") || 0,
+    }));
+  }
+
+  async path(name: string): Promise<string | null> {
+    try {
+      const v = await this.docker.getVolume(name).inspect();
+      return v.Mountpoint || null;
+    } catch {
+      return null;
+    }
+  }
+}

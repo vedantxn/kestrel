@@ -268,6 +268,16 @@ export class FakeNodeClient implements NodeClient {
     };
   }
   computerCalls: ComputerRequest[] = [];
+  /** Recordings by session id, as bytes. */
+  recordings = new Map<string, Uint8Array>();
+  async recording(_nodeId: string, sessionId: string) {
+    const b = this.recordings.get(sessionId);
+    if (!b) return null;
+    return {
+      body: new Blob([b]).stream() as ReadableStream<Uint8Array>,
+      size: b.length,
+    };
+  }
   private get(id: string): FakeNode {
     const n = this.nodes.get(id);
     if (!n) throw new NodeCallError(`unknown node ${id}`, "unreachable");

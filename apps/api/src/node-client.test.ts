@@ -22,6 +22,7 @@ const startReq = {
   timeoutMs: 1000,
   idleTimeoutMs: 1000,
   stopOnDisconnect: false,
+  recording: false,
 };
 
 beforeAll(async () => {

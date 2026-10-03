@@ -16,6 +16,7 @@ import {
 import { applyViewport } from "./cdp.js";
 import type { CdpForward } from "./forward.js";
 import { runComputer, type Tabs } from "./page.js";
+import type { Recorder } from "./recorder.js";
 import type { Supervisor } from "./supervisor.js";
 
 const same = (a: string, b: string): boolean =>
@@ -46,6 +47,7 @@ export class ControlServer {
     private readonly forward: CdpForward,
     private readonly chromePort: number,
     private readonly tabs: Tabs,
+    private readonly recorder?: Recorder,
   ) {}
 
   async listen(port: number, host = "0.0.0.0"): Promise<number> {
@@ -133,7 +135,16 @@ export class ControlServer {
         const applied = await applyViewport(this.chromePort, viewport);
         const response = ConfigureResponse.parse(applied);
         this.configured = { proof: sessionProof, viewport, response };
+        // Started after the viewport is applied, so the video is the window the caller asked for.
+        if (parsed.data.recording) this.recorder?.start(applied.window);
         return this.send(res, 200, response);
+      }
+
+      if (req.method === "POST" && path === RUNTIME_PATHS.recordingStop) {
+        await this.recorder?.stop();
+        return this.send(res, 200, {
+          state: this.recorder?.state ?? "idle",
+        });
       }
 
       if (req.method === "POST" && path === RUNTIME_PATHS.computer) {

@@ -18,8 +18,12 @@ mkdir -p /data
 uuid=$(blkid -s UUID -o value "$dev")
 grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /data xfs defaults,noatime,prjquota,nofail 0 2" >> /etc/fstab
 mountpoint -q /data || mount /data
-mkdir -p /data/docker /data/kestrel /data/caddy
+mkdir -p /data/docker /data/kestrel /data/caddy /data/docker/volumes
 ln -sfn /data/kestrel /var/lib/kestrel
+# Recording volumes (W3) are written by untrusted containers: mount Docker's volumes directory
+# noexec, nosuid, nodev, which every volume mounted into a container inherits. Before Docker starts.
+grep -q " /data/docker/volumes " /etc/fstab || echo "/data/docker/volumes /data/docker/volumes none bind,noexec,nosuid,nodev,nofail 0 0" >> /etc/fstab
+mountpoint -q /data/docker/volumes || mount /data/docker/volumes
 mkdir -p /srv/kestrel /var/log/kestrel-run /run/kestrel
 chown ec2-user:ec2-user /srv/kestrel /var/log/kestrel-run
 

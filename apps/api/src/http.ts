@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import {
   CreateSessionRequest,
   HeartbeatRequest,
@@ -33,6 +34,7 @@ import {
   listSessions,
   mintSessionToken,
   sessionComputer,
+  sessionRecording,
   stopSession,
 } from "./sessions.js";
 import type { Sweeper } from "./sweeper.js";
@@ -247,6 +249,19 @@ export function buildPublicApp(
         req.body as ComputerRequest,
       ),
   );
+
+  app.get("/v1/sessions/:id/recording", async (req, reply) => {
+    const r = await sessionRecording(
+      ctx,
+      await authed(req),
+      (req.params as { id: string }).id,
+    );
+    reply
+      .header("content-type", "video/mp4")
+      .header("cache-control", "no-store");
+    if (r.size > 0) reply.header("content-length", String(r.size));
+    return reply.send(Readable.fromWeb(r.body as never));
+  });
 
   // W2. The viewer page; it carries no secret, so it needs no key (the token is in the fragment).
   app.get("/live/:id", async (_req, reply) =>

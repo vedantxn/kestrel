@@ -12,6 +12,8 @@ export const Env = z.object({
   /** The virtual screen. Chrome's window sits at the top-left (R3). */
   SCREEN: z.string().default("1920x1080x24"),
   PROFILE_DIR: z.string().default("/profile"),
+  /** W3. The recording volume, mounted by the agent when it can give the container one. */
+  RECORDING_DIR: z.string().default("/artifacts"),
   /** Chrome's own sandbox: on unless experiment V1 says it cannot work here (R12). */
   CHROME_SANDBOX: z.enum(["on", "off"]).default("on"),
   CONTROL_PORT: z.coerce.number().int().default(9000),
