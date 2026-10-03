@@ -113,3 +113,74 @@ services:
     volumes:
       - /run/kestrel:/run/kestrel
       - /var/lib/kestrel/secrets/token-public.pem:/secrets/token-public.pem:ro
+
+  # --- node b: the second node, switched on for tests (v1 plan 4.12). `deploy.sh --two-nodes` starts these. ---
+  egress-b:
+    <<: *platform
+    profiles: [b]
+    user: "0:0"
+    command: ["node", "apps/egress/dist/main.js"]
+    environment:
+      PROXY_HOST: 172.30.2.1
+      PROXY_PORT: "3128"
+      CONTROL_SOCKET: /run/kestrel/b/egress.sock
+      BLOCKED_ADDRESSES: ${PUBLIC_IP}
+      METRICS_PORT: "7302"
+    volumes:
+      - /run/kestrel:/run/kestrel
+
+  node-b:
+    <<: *platform
+    profiles: [b]
+    user: "0:0"
+    cap_add: [NET_ADMIN, NET_RAW]
+    command: ["node", "apps/node/dist/main.js"]
+    environment:
+      NODE_ID: b
+      NODE_SECRET_FILE: /secrets/node-b.secret
+      LISTEN_PORT: "7002"
+      API_URL: http://127.0.0.1:8081
+      STORE_PATH: /var/lib/kestrel/b/store.db
+      SLOTS: ${SLOTS_B:-2}
+      POOL_TARGET: ${POOL_B:-1}
+      REFILL_AT_ONCE: ${POOL_B:-1}
+      RUNTIME_IMAGE: kestrel-runtime:dev
+      NETWORK: ksl-b
+      IFACE: ksl-b
+      SUBNET: 172.30.2.0/24
+      BRIDGE_IP: 172.30.2.1
+      EGRESS_SOCKET: /run/kestrel/b/egress.sock
+      AGENT_SOCKET: /run/kestrel/b/agent.sock
+      SECCOMP_FILE: /srv/kestrel/runtime/seccomp/seccomp-chrome.json
+      CADDY_DATA: /data/caddy
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+      TLS_DIR: /run/kestrel/b/tls
+      GATEWAY_UID: "1500"
+      GATEWAY_GID: "1500"
+      KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS_NODE_B:-}
+    volumes:
+      - /run/kestrel:/run/kestrel
+      - /var/lib/kestrel:/var/lib/kestrel
+      - /var/lib/kestrel/secrets:/secrets:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /run/xtables.lock:/run/xtables.lock
+      - /srv/kestrel:/srv/kestrel:ro
+      - /data/caddy:/data/caddy:ro
+
+  gateway-b:
+    <<: *platform
+    profiles: [b]
+    user: "1500:1500"
+    command: ["node", "apps/gateway/dist/main.js"]
+    environment:
+      NODE_ID: b
+      LISTEN_PORT: "8444"
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+      TLS_DIR: /run/kestrel/b/tls
+      TOKEN_PUBLIC_KEY_FILE: /secrets/token-public.pem
+      AGENT_SOCKET: /run/kestrel/b/agent.sock
+      METRICS_PORT: "7202"
+      REUSE_PORT: "1"
+    volumes:
+      - /run/kestrel:/run/kestrel
+      - /var/lib/kestrel/secrets/token-public.pem:/secrets/token-public.pem:ro

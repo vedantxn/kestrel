@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Deploy the platform on this host from the tree in /srv/kestrel (v1 plan I15, I16). Idempotent.
 # Run as root (bin/host deploy and bin/host run do):
-#   sudo infra/host/deploy.sh [--no-build]
+#   sudo infra/host/deploy.sh [--no-build] [--two-nodes]
 #
 # Builds the images, makes the secrets the first time, starts Postgres, applies migrations,
 # creates the first project and API key, then starts the platform services.
 set -euo pipefail
+NO_BUILD=0; TWO=0
+for a in "$@"; do case "$a" in --no-build) NO_BUILD=1;; --two-nodes) TWO=1;; *) echo "unknown option $a" >&2; exit 2;; esac; done
 cd "$(dirname "$0")/../.."
 SECRETS=/var/lib/kestrel/secrets
 COMPOSE=(docker compose --env-file /var/lib/kestrel/compose.env -f infra/compose/docker-compose.yml)
@@ -37,15 +39,22 @@ mkdir -p /var/lib/kestrel/postgres && chown 999:999 /var/lib/kestrel/postgres 2>
 ACCOUNT=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | sed -n 's/.*"accountId" *: *"\([0-9]*\)".*/\1/p')
 TEST_PAGE_URL="https://kestrel-testpage-$ACCOUNT.s3.us-east-1.amazonaws.com/test/index.html"
 NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443}]'
+SIZES="SLOTS_A=5\nPOOL_A=2"
+if [ "$TWO" = 1 ]; then
+  # Two nodes on one host, to exercise the multi-node paths (sizes: v1 plan 4.12).
+  NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443},{"id":"b","address":"http://127.0.0.1:7002","secretFile":"/secrets/node-b.secret","connectPort":8444}]'
+  SIZES="SLOTS_A=${SLOTS_A:-3}\nPOOL_A=1\nSLOTS_B=${SLOTS_B:-2}\nPOOL_B=1"
+fi
 cat > /var/lib/kestrel/compose.env <<ENV
 PUBLIC_HOSTNAME=$HOSTNAME_PUBLIC
 PUBLIC_IP=$PUBLIC_IP
 TEST_PAGE_URL=$TEST_PAGE_URL
 KESTREL_NODES=$NODES
 ENV
+printf "$SIZES\n" >> /var/lib/kestrel/compose.env
 chmod 0600 /var/lib/kestrel/compose.env
 
-if [ "${1:-}" != "--no-build" ]; then
+if [ "$NO_BUILD" != 1 ]; then
   log "build the platform image"
   docker build -q -f infra/compose/Dockerfile -t kestrel-platform:dev . >/dev/null
   if ! docker image inspect kestrel-runtime:dev >/dev/null 2>&1; then
@@ -65,6 +74,11 @@ if ! docker network inspect ksl-a >/dev/null 2>&1; then
     --opt com.docker.network.bridge.enable_icc=false --subnet 172.30.1.0/24 --gateway 172.30.1.1 --label kestrel.node=a ksl-a >/dev/null
 fi
 
+if [ "$TWO" = 1 ] && ! docker network inspect ksl-b >/dev/null 2>&1; then
+  docker network create --internal --driver bridge --opt com.docker.network.bridge.name=ksl-b \
+    --opt com.docker.network.bridge.enable_icc=false --subnet 172.30.2.0/24 --gateway 172.30.2.1 --label kestrel.node=b ksl-b >/dev/null
+fi
+
 log "database"
 "${COMPOSE[@]}" up -d postgres
 for _ in $(seq 1 60); do "${COMPOSE[@]}" exec -T postgres pg_isready -U kestrel >/dev/null 2>&1 && break; sleep 1; done
@@ -82,7 +96,9 @@ if [ ! -f "$SECRETS/harness-api-key" ]; then
 fi
 
 log "start the platform"
-"${COMPOSE[@]}" up -d --remove-orphans api egress-a node-a gateway-a
+SERVICES=(api egress-a node-a gateway-a)
+if [ "$TWO" = 1 ]; then SERVICES+=(egress-b node-b gateway-b); COMPOSE=("${COMPOSE[@]}" --profile b); fi
+"${COMPOSE[@]}" up -d --remove-orphans "${SERVICES[@]}"
 sleep 8
 "${COMPOSE[@]}" ps
 curl -s -m 5 http://127.0.0.1:8080/healthz && echo
