@@ -1,3 +1,11 @@
+import { readFileSync as readSecretFile } from "node:fs";
+
+// Secrets are files, not environment variables (threat model G-09): DATABASE_URL_FILE names the file holding the URL.
+if (!process.env.DATABASE_URL && process.env.DATABASE_URL_FILE)
+  process.env.DATABASE_URL = readSecretFile(
+    process.env.DATABASE_URL_FILE,
+    "utf8",
+  ).trim();
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";

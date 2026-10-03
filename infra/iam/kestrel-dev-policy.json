@@ -56,10 +56,7 @@
     {
       "Sid": "OwnSessionsOnly",
       "Effect": "Allow",
-      "Action": [
-        "ssm:TerminateSession",
-        "ssm:ResumeSession"
-      ],
+      "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
       "Resource": "arn:aws:ssm:*:*:session/${aws:username}-*"
     },
     {
@@ -77,10 +74,7 @@
     {
       "Sid": "ToggleTheNightlyStopOnly",
       "Effect": "Allow",
-      "Action": [
-        "scheduler:GetSchedule",
-        "scheduler:UpdateSchedule"
-      ],
+      "Action": ["scheduler:GetSchedule", "scheduler:UpdateSchedule"],
       "Resource": "arn:aws:scheduler:us-east-1:792472359030:schedule/default/kestrel-nightly-stop"
     },
     {

@@ -1,0 +1,115 @@
+# The Kestrel platform on one host (v1 plan section 3). Everything runs in the host's network
+# namespace except Postgres. `restart: always` plus services that retry their dependencies means
+# start order does not matter and a reboot is routine (I13).
+#
+# Variables come from /var/lib/kestrel/compose.env, written by infra/host/deploy.sh.
+name: kestrel
+
+x-platform: &platform
+  image: kestrel-platform:dev
+  network_mode: host
+  restart: always
+  logging:
+    driver: journald
+    options: { mode: non-blocking, max-buffer-size: 4m }
+
+services:
+  postgres:
+    image: postgres:18
+    restart: always
+    ports: ["127.0.0.1:5432:5432"]
+    environment:
+      POSTGRES_USER: kestrel
+      POSTGRES_DB: kestrel
+      POSTGRES_PASSWORD_FILE: /run/secrets/db.password
+    volumes:
+      - /var/lib/kestrel/postgres:/var/lib/postgresql
+      - /var/lib/kestrel/secrets/db.password:/run/secrets/db.password:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kestrel"]
+      interval: 3s
+      retries: 20
+    logging:
+      driver: journald
+      options: { mode: non-blocking, max-buffer-size: 4m }
+
+  api:
+    <<: *platform
+    user: "1001:1001"
+    command: ["node", "apps/api/dist/server.js"]
+    environment:
+      DATABASE_URL_FILE: /secrets/database-url
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+      TOKEN_PRIVATE_KEY_FILE: /secrets/token-private.pem
+      KESTREL_NODES: ${KESTREL_NODES}
+      KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS:-}
+    volumes:
+      - /var/lib/kestrel/secrets:/secrets:ro
+
+  egress-a:
+    <<: *platform
+    user: "0:0"
+    command: ["node", "apps/egress/dist/main.js"]
+    environment:
+      PROXY_HOST: 172.30.1.1
+      PROXY_PORT: "3128"
+      CONTROL_SOCKET: /run/kestrel/a/egress.sock
+      BLOCKED_ADDRESSES: ${PUBLIC_IP}
+      METRICS_PORT: "7301"
+    volumes:
+      - /run/kestrel:/run/kestrel
+
+  node-a:
+    <<: *platform
+    user: "0:0"
+    # Root, the host's network, the Docker socket and firewall rights: the one component allowed all of them (G1).
+    cap_add: [NET_ADMIN, NET_RAW]
+    command: ["node", "apps/node/dist/main.js"]
+    environment:
+      NODE_ID: a
+      NODE_SECRET_FILE: /secrets/node-a.secret
+      LISTEN_PORT: "7001"
+      API_URL: http://127.0.0.1:8081
+      STORE_PATH: /var/lib/kestrel/a/store.db
+      SLOTS: ${SLOTS_A:-5}
+      POOL_TARGET: ${POOL_A:-2}
+      REFILL_AT_ONCE: ${POOL_A:-2}
+      RUNTIME_IMAGE: kestrel-runtime:dev
+      NETWORK: ksl-a
+      IFACE: ksl-a
+      SUBNET: 172.30.1.0/24
+      BRIDGE_IP: 172.30.1.1
+      EGRESS_SOCKET: /run/kestrel/a/egress.sock
+      AGENT_SOCKET: /run/kestrel/a/agent.sock
+      SECCOMP_FILE: /srv/kestrel/runtime/seccomp/seccomp-chrome.json
+      CADDY_DATA: /data/caddy
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+      TLS_DIR: /run/kestrel/a/tls
+      GATEWAY_UID: "1500"
+      GATEWAY_GID: "1500"
+      KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS_NODE:-}
+    volumes:
+      - /run/kestrel:/run/kestrel
+      - /var/lib/kestrel:/var/lib/kestrel
+      - /var/lib/kestrel/secrets:/secrets:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /run/xtables.lock:/run/xtables.lock
+      - /srv/kestrel:/srv/kestrel:ro
+      - /data/caddy:/data/caddy:ro
+
+  gateway-a:
+    <<: *platform
+    user: "1500:1500"
+    command: ["node", "apps/gateway/dist/main.js"]
+    environment:
+      NODE_ID: a
+      LISTEN_PORT: "8443"
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+      TLS_DIR: /run/kestrel/a/tls
+      TOKEN_PUBLIC_KEY_FILE: /secrets/token-public.pem
+      AGENT_SOCKET: /run/kestrel/a/agent.sock
+      METRICS_PORT: "7201"
+      REUSE_PORT: "1"
+    volumes:
+      - /run/kestrel:/run/kestrel
+      - /var/lib/kestrel/secrets/token-public.pem:/secrets/token-public.pem:ro
