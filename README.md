@@ -10,6 +10,7 @@ Open-source, self-hostable cloud browsers for AI agents. One API call returns a 
 - [Threat model](docs/threat-model.md)
 - [How the control plane works](docs/control-plane.md)
 - [Public API (OpenAPI)](docs/api/openapi.json)
+- [Docs for agents](docs/llms.txt): quickstart, sessions, MCP, errors, recipes
 
 ## Development
 
