@@ -35,7 +35,7 @@ else
   bad "/data is not an xfs mount"
 fi
 
-# Recording volumes (W3): Docker's volumes directory is noexec, nosuid, nodev.
+# Recording volumes (W3): Docker's volumes directory is noexec and nosuid.
 if findmnt -no OPTIONS /data/docker/volumes 2>/dev/null | grep -q noexec; then
   findmnt -no OPTIONS /data/docker/volumes | grep -q nosuid && ok "/data/docker/volumes is noexec,nosuid" || bad "/data/docker/volumes is not nosuid"
 else

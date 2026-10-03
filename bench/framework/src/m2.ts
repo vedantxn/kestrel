@@ -431,8 +431,11 @@ export async function runM2(c: M2Config): Promise<Report> {
 }
 
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 function require_resolve_playwright_mcp(): string {
-  return createRequire(import.meta.url).resolve("@playwright/mcp/cli.js");
+  // The package exports only its main module; its command-line entry sits beside it.
+  const main = createRequire(import.meta.url).resolve("@playwright/mcp");
+  return join(dirname(main), "cli.js");
 }
 
 export function m2ConfigFromEnv(

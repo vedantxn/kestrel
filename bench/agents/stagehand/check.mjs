@@ -12,7 +12,10 @@ await stagehand.init();
 try {
   const page = stagehand.context.pages()[0];
   await page.goto(process.env.TEST_PAGE_URL);
-  const { title } = await stagehand.extract("the page's main heading or title", z.object({ title: z.string() }));
+  const { title } = await stagehand.extract(
+    "the page's main heading or title",
+    z.object({ title: z.string() }),
+  );
   console.log("RESULT:", title);
 } finally {
   await stagehand.close();
