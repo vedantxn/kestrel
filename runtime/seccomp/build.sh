@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds seccomp-chrome.json: Docker's own default profile, plus one rule allowing what Chrome's
-# sandbox needs to create user namespaces (v1 plan R12, ADR 0013). Nothing else is changed, so the
+# sandbox needs to create user namespaces and chroot (v1 plan R12, ADR 0013). Nothing else is changed, so the
 # whole difference from Docker's default is the rule below.
 #
 #   runtime/seccomp/build.sh           regenerate
@@ -16,9 +16,9 @@ import json, sys, urllib.request
 src, out = sys.argv[1], sys.argv[2]
 profile = json.load(urllib.request.urlopen(src, timeout=30))
 profile["syscalls"].append({
-    "names": ["clone", "unshare", "setns"],
+    "names": ["clone", "unshare", "setns", "chroot"],
     "action": "SCMP_ACT_ALLOW",
-    "comment": "Kestrel: Chrome's sandbox creates user, pid and network namespaces (ADR 0013). This is the only addition to Docker's default profile.",
+    "comment": "Kestrel: Chrome's sandbox creates user, pid and network namespaces and chroots into an empty directory (ADR 0013). This is the only addition to Docker's default profile.",
 })
 with open(out, "w") as f:
     json.dump(profile, f, indent=2)

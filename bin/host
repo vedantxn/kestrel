@@ -142,17 +142,13 @@ cmd_shell() { remote -t; }
 
 cmd_sync() {
   ensure_key
-  local opts=()
-  while IFS= read -r line; do opts+=("$line"); done < <(ssh_opts)
-  # rsync takes one string for the remote shell; quote each part for it.
-  local rsh="ssh"
-  for o in "${opts[@]}"; do rsh+=" $(printf '%q' "$o")"; done
-  remote "sudo mkdir -p $REMOTE_DIR && sudo chown ec2-user:ec2-user $REMOTE_DIR"
-  rsync -az --delete --info=stats1 \
-    --exclude '.git/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'coverage/' \
-    --exclude '.terraform/' --exclude '*.tfstate*' --exclude '/reports/' --exclude '.DS_Store' \
-    --exclude 'packages/db/src/generated/' --exclude '.env*' --exclude 'tfplan' --exclude 'backend.hcl' \
-    -e "$rsh" "$ROOT/" "ec2-user@$INSTANCE_ID:$REMOTE_DIR/"
+  remote "sudo mkdir -p $REMOTE_DIR && sudo chown ec2-user:ec2-user $REMOTE_DIR && find $REMOTE_DIR -mindepth 1 -delete"
+  # A tar stream over the same SSH transport: no rsync (the macOS one cannot take this remote shell).
+  (cd "$ROOT" && COPYFILE_DISABLE=1 tar -czf - \
+    --exclude '.git' --exclude 'node_modules' --exclude 'dist' --exclude 'coverage' \
+    --exclude '.terraform' --exclude '*.tfstate*' --exclude './reports' --exclude '.DS_Store' \
+    --exclude 'packages/db/src/generated' --exclude '.env*' --exclude 'tfplan' --exclude 'backend.hcl' .) \
+    | remote "tar -xzf - -C $REMOTE_DIR"
   echo "synced $ROOT -> $REMOTE_DIR"
 }
 
