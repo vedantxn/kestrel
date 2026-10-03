@@ -98,6 +98,54 @@ export class KestrelClient {
     ).data.map((e) => e.type);
   }
 
+  /** W1. A token; `url` is the connect URL (cdp) or the viewer page (view, control). */
+  async mintToken(
+    id: string,
+    body: {
+      scope: "cdp" | "view" | "control";
+      ttlMs?: number;
+      singleUse?: boolean;
+    },
+  ): Promise<{ scope: string; token: string; url: string; expiresAt: string }> {
+    return (await this.call("POST", `/v1/sessions/${id}/tokens`, body))
+      .json as never;
+  }
+
+  /** W4. One `/computer` action. */
+  async computer(
+    id: string,
+    action: Record<string, unknown>,
+  ): Promise<{
+    ok: true;
+    screenshot?: string;
+    width: number;
+    height: number;
+    url: string;
+  }> {
+    return (await this.call("POST", `/v1/sessions/${id}/computer`, action))
+      .json as never;
+  }
+
+  /** W3. The recording's bytes, or null when there is none (404). */
+  async recording(id: string): Promise<Buffer | null> {
+    const res = await fetch(
+      new URL(`/v1/sessions/${id}/recording`, this.baseUrl),
+      {
+        headers: { authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok)
+      throw new ApiError(
+        res.status,
+        "recording_failed",
+        await res.text(),
+        false,
+      );
+    return Buffer.from(await res.arrayBuffer());
+  }
+
   /** Poll until the session reaches one of `statuses`, or throw. */
   async waitFor(
     id: string,
