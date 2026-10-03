@@ -64,6 +64,7 @@ agent = new NodeAgent({
     poolTarget: env.POOL_TARGET,
     refillAtOnce: env.REFILL_AT_ONCE,
     ...(env.POOL_MAX !== undefined ? { poolMax: env.POOL_MAX } : {}),
+    poolHeadroom: env.POOL_HEADROOM,
     address:
       env.ADVERTISE_ADDRESS ?? `http://${env.LISTEN_HOST}:${env.LISTEN_PORT}`,
     runtimeVersion: env.RUNTIME_VERSION,

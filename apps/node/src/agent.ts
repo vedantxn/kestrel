@@ -64,6 +64,13 @@ export interface AgentConfig {
    * DEMAND_WINDOW_MS), up to this many, and never into a slot a session needs. Default: slots.
    */
   poolMax?: number;
+  /**
+   * Extra containers the pool may hold beyond the slots. A slot reserves a session's full
+   * memory (2 GB); an idle pooled browser uses a tenth of it, and sessions stay capped at the
+   * slots, so a few warm browsers over the slots buy a deeper buffer for bursts at little cost.
+   * Default 0 (the v1 rule: the pool only uses slots no session holds).
+   */
+  poolHeadroom?: number;
   /** Send a session's `removed` report as soon as it is queued, not with the next heartbeat. Default on. */
   reportOnRemoval?: boolean;
   /** Where the API reaches this agent, sent at registration. */
@@ -205,6 +212,7 @@ export class NodeAgent {
     pool: { containerId: string; address: string; state: string }[];
     pendingReports: number;
     slotsTotal: number;
+    poolHeadroom: number;
     admitting: boolean;
     failpoints: Record<string, string>;
   } {
@@ -222,6 +230,7 @@ export class NodeAgent {
       })),
       pendingReports: this.store.pendingReportCount(),
       slotsTotal: this.c.slotsTotal,
+      poolHeadroom: this.c.poolHeadroom ?? 0,
       admitting: this.firewallOk,
       failpoints: this.d.failpoints.describe(),
     };
@@ -557,7 +566,8 @@ export class NodeAgent {
       }
     }
     // Cold. Free a slot's worth of pool first if the pool is using the room: sessions have priority.
-    const spare = this.c.slotsTotal - this.sessionCount();
+    const spare =
+      this.c.slotsTotal + (this.c.poolHeadroom ?? 0) - this.sessionCount();
     const pool = this.store.allPool();
     if (pool.length > Math.max(0, spare - 1)) {
       const victim = pool[pool.length - 1];
@@ -629,7 +639,7 @@ export class NodeAgent {
       (t) => now - t < DEMAND_WINDOW_MS,
     );
     return Math.min(
-      this.c.poolMax ?? this.c.slotsTotal,
+      this.c.poolMax ?? this.c.slotsTotal + (this.c.poolHeadroom ?? 0),
       Math.max(this.c.poolTarget, this.recentStarts.length),
     );
   }
@@ -642,7 +652,11 @@ export class NodeAgent {
   async refillPool(): Promise<void> {
     if (!this.firewallOk || !this.booted) return;
     const have = this.store.allPool().length + this.spawning;
-    const room = this.c.slotsTotal - this.sessionCount() - have;
+    const room =
+      this.c.slotsTotal +
+      (this.c.poolHeadroom ?? 0) -
+      this.sessionCount() -
+      have;
     const want = Math.min(this.poolWanted() - have, this.c.refillAtOnce, room);
     for (let i = 0; i < want; i++) {
       this.spawning++;
@@ -994,7 +1008,12 @@ export class NodeAgent {
     for (const b of this.store.allBindings())
       if (b.containerId) known.add(b.containerId);
     for (const p of this.store.allPool()) {
-      const c = byId.get(p.containerId);
+      // The container list is a snapshot from the start of this pass: a pooled browser made since
+      // then has a record but is not in it. Look again before treating it as gone, or its record
+      // is dropped while it runs, and 15 s later it is removed as unknown (a warm browser lost).
+      const c =
+        byId.get(p.containerId) ??
+        (await this.d.docker.inspect(p.containerId).catch(() => null));
       if (!c || !c.running) {
         this.store.deletePool(p.containerId);
         if (c) await this.d.docker.remove(c.id).catch(() => undefined);

@@ -45,6 +45,8 @@ export interface ApiSession {
 export interface AgentView {
   node: string;
   slotsTotal: number;
+  /** Warm browsers the pool may hold beyond the slots (agent POOL_HEADROOM). */
+  poolHeadroom?: number;
   sessions: {
     sessionId: string;
     state: string;
@@ -243,10 +245,13 @@ export function checkInvariants(s: Snapshot): Violation[] {
         "slots-oversubscribed",
         `agent ${a.node} holds ${a.sessions.length} sessions in ${a.slotsTotal} slots`,
       );
-    if (a.sessions.length + a.pool.length > a.slotsTotal)
+    if (
+      a.sessions.length + a.pool.length >
+      a.slotsTotal + (a.poolHeadroom ?? 0)
+    )
       bad(
         "pool-over-slots",
-        `agent ${a.node}: ${a.sessions.length} sessions + ${a.pool.length} pooled > ${a.slotsTotal} slots`,
+        `agent ${a.node}: ${a.sessions.length} sessions + ${a.pool.length} pooled > ${a.slotsTotal} slots + ${a.poolHeadroom ?? 0} headroom`,
       );
     if (a.pendingReports > 0)
       bad(

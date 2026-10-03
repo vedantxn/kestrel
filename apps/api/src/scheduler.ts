@@ -12,12 +12,13 @@ interface Candidate {
   epoch: number;
   free: number;
   hot: boolean;
+  hotCount: number;
 }
 
 /**
  * Lock every node that may take a session (FOR NO KEY UPDATE: a plain FOR UPDATE would conflict with the
  * foreign-key checks of unrelated session writes and deadlock), in id order (so two admissions can never wait on
- * each other), and rank those with room: nodes that last reported a hot browser first, then
+ * each other), and rank those with room: nodes that last reported a hot browser first (the most first), then
  * the most free capacity (K4). The reports only order the choice; they are never trusted for
  * correctness, because capacity is counted from the sessions table under the lock.
  */
@@ -49,11 +50,15 @@ async function rankNodes(
       epoch: n.epoch,
       free: n.slots_total - (usedBy.get(n.id) ?? 0),
       hot: n.hot_count > 0,
+      hotCount: n.hot_count,
     }))
     .filter((c) => c.free > 0)
     .sort(
       (a, b) =>
         Number(b.hot) - Number(a.hot) ||
+        // Spread over the nodes with warm browsers: the one with more goes first, and since a
+        // placement counts one as taken, consecutive starts alternate rather than drain one node.
+        b.hotCount - a.hotCount ||
         b.free - a.free ||
         a.id.localeCompare(b.id),
     );

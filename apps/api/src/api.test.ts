@@ -272,6 +272,24 @@ describe("quota and capacity", () => {
     expect(new Set([first, second])).toEqual(new Set(["a", "b"]));
   });
 
+  it("spreads a run of starts over nodes with warm browsers instead of draining one", async () => {
+    await reset({
+      nodes: [
+        { id: "a", slots: 9 },
+        { id: "b", slots: 9 },
+      ],
+    });
+    env.nodes.a!.hotCount = 3;
+    env.nodes.b!.hotCount = 3;
+    await env.syncAll();
+    const placed: string[] = [];
+    for (let i = 0; i < 4; i++)
+      placed.push(Session.parse((await env.create()).json()).nodeId!);
+    // Equal warm pools: the starts alternate, two each, rather than four on "a" by name.
+    expect(placed.filter((n) => n === "a")).toHaveLength(2);
+    expect(placed.filter((n) => n === "b")).toHaveLength(2);
+  });
+
   it("skips nodes whose heartbeat has gone stale, and fenced nodes", async () => {
     await reset({
       nodes: [

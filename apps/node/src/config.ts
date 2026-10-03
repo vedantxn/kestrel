@@ -15,6 +15,8 @@ export const Env = z.object({
   REFILL_AT_ONCE: z.coerce.number().int().positive().default(2),
   /** The pool may grow to this under demand; default: every slot. */
   POOL_MAX: z.coerce.number().int().min(0).optional(),
+  /** Warm browsers the pool may hold beyond the slots (idle ones use little memory). Default 0. */
+  POOL_HEADROOM: z.coerce.number().int().min(0).default(0),
   DOCKER_SOCKET: z.string().default("/var/run/docker.sock"),
   RUNTIME_IMAGE: z.string().min(1),
   /** Session network, by node: ksl-a, 172.30.1.0/24, egress at 172.30.1.1:3128 (v1 plan 4.12). */

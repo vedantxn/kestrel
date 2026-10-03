@@ -182,11 +182,13 @@ export async function collectSnapshot(
       pool: { containerId: string; address: string }[];
       pendingReports: number;
       slotsTotal: number;
+      poolHeadroom?: number;
       failpoints: Record<string, string>;
     };
     agents.push({
       node: n.id,
       slotsTotal: st.slotsTotal,
+      poolHeadroom: st.poolHeadroom ?? 0,
       sessions: st.sessions,
       pool: st.pool,
       pendingReports: st.pendingReports,

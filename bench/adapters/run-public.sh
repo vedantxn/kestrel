@@ -19,9 +19,11 @@ for p in "$@"; do
   echo "== $p: ComputeSDK lifecycle"
   (cd "$W/csdk" && npx tsx packages/benchsdk-runner/dist/bin.js run benchmarks/browser/browser.bench.ts --provider "$p" --iterations "${CSDK_ITERATIONS:-50}" --no-ingest) >"$OUT/csdk-lifecycle-$p.log" 2>&1
   cp "$W/csdk/results/browser/latest.json" "$OUT/csdk-lifecycle-$p.json" 2>/dev/null
-  echo "== $p: ComputeSDK throughput"
-  (cd "$W/csdk" && npx tsx packages/benchsdk-runner/dist/bin.js run benchmarks/browser/browser-throughput.bench.ts --provider "$p" --iterations "${CSDK_THROUGHPUT:-10}" --no-ingest) >"$OUT/csdk-throughput-$p.log" 2>&1
-  cp "$W/csdk/results/browser-throughput/latest.json" "$OUT/csdk-throughput-$p.json" 2>/dev/null
+  if [ "${CSDK_THROUGHPUT:-10}" != 0 ]; then
+    echo "== $p: ComputeSDK throughput"
+    (cd "$W/csdk" && npx tsx packages/benchsdk-runner/dist/bin.js run benchmarks/browser/browser-throughput.bench.ts --provider "$p" --iterations "${CSDK_THROUGHPUT:-10}" --no-ingest) >"$OUT/csdk-throughput-$p.log" 2>&1
+    cp "$W/csdk/results/browser-throughput/latest.json" "$OUT/csdk-throughput-$p.json" 2>/dev/null
+  fi
 done
 cp -R "$W/arena/results" "$OUT/arena-results"
 echo "RUN-DONE $OUT"

@@ -73,7 +73,8 @@ services:
       STORE_PATH: /var/lib/kestrel/a/store.db
       SLOTS: ${SLOTS_A:-5}
       POOL_TARGET: ${POOL_A:-2}
-      REFILL_AT_ONCE: ${POOL_A:-2}
+      REFILL_AT_ONCE: ${REFILL_AT_ONCE:-${POOL_A:-2}}
+      POOL_HEADROOM: ${POOL_HEADROOM:-0}
       RUNTIME_IMAGE: kestrel-runtime:dev
       NETWORK: ksl-a
       IFACE: ksl-a
@@ -145,7 +146,8 @@ services:
       STORE_PATH: /var/lib/kestrel/b/store.db
       SLOTS: ${SLOTS_B:-2}
       POOL_TARGET: ${POOL_B:-1}
-      REFILL_AT_ONCE: ${POOL_B:-1}
+      REFILL_AT_ONCE: ${REFILL_AT_ONCE:-${POOL_B:-1}}
+      POOL_HEADROOM: ${POOL_HEADROOM:-0}
       RUNTIME_IMAGE: kestrel-runtime:dev
       NETWORK: ksl-b
       IFACE: ksl-b

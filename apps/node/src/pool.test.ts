@@ -75,4 +75,43 @@ describe("pool refill under demand", () => {
       ),
     ).toBe(true);
   });
+
+  it("keeps warm browsers beyond the slots with headroom, but never admits more sessions than slots", async () => {
+    const r = makeRig({
+      slotsTotal: 4,
+      poolTarget: 2,
+      refillAtOnce: 6,
+      poolHeadroom: 3,
+    });
+    await bootWithPool(r);
+    for (let i = 0; i < 4; i++) await r.agent.start(startReq());
+    await r.agent.refillPool();
+    await r.agent.idle();
+    // Every slot holds a session, and the pool still has 3 warm browsers in the headroom.
+    expect(r.store.allBindings()).toHaveLength(4);
+    expect(r.store.allPool()).toHaveLength(3);
+    expect((await r.agent.start(startReq())).result).toBe("refused");
+  });
+
+  it("does not lose a pooled browser made while reconciliation is running", async () => {
+    const r = makeRig({ slotsTotal: 4, poolTarget: 1 });
+    await bootWithPool(r);
+    // Reconciliation lists containers, then a refill makes a new pooled browser before it walks the pool.
+    const list = r.docker.list.bind(r.docker);
+    r.docker.list = async () => {
+      const snapshot = await list();
+      const old = r.store.allPool()[0]!.containerId;
+      r.store.deletePool(old); // a session took the only one...
+      await r.docker.remove(old);
+      await r.agent.refillPool(); // ...and its replacement starts now, after the snapshot
+      await new Promise((res) => setTimeout(res, 5));
+      return snapshot;
+    };
+    await r.agent.reconcile();
+    r.docker.list = list;
+    await r.agent.idle();
+    const made = r.store.allPool();
+    expect(made).toHaveLength(1);
+    expect(r.docker.containers.has(made[0]!.containerId)).toBe(true);
+  });
 });
