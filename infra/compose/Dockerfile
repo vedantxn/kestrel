@@ -11,7 +11,10 @@ RUN apt-get update \
 WORKDIR /app
 COPY . .
 # Install, compile every workspace, then drop what only building needed. `prisma generate` runs on install.
-RUN npm ci && npm run build && npm prune --omit=dev
+# better-sqlite3 compiles a native module on install, so a toolchain is present for that step only.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+ && npm ci && npm run build && npm prune --omit=dev \
+ && apt-get purge -y --auto-remove python3 make g++ && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache
 
 ENV NODE_ENV=production
 CMD ["node", "--version"]
