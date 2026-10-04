@@ -3,7 +3,7 @@ import { connect, type AddressInfo } from "node:net";
 import { PROOF_HEADER } from "@kestrel/contracts";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
-import { applyViewport } from "./cdp.js";
+import { applyViewport, ViewportSizer } from "./cdp.js";
 import { chromeArgs } from "./chrome-args.js";
 import { Tabs } from "./page.js";
 import { ControlServer } from "./control.js";
@@ -28,6 +28,8 @@ class FakeChrome {
   requests: string[] = [];
   noPage = false;
   garbage = false;
+  /** CDP websocket connections opened. */
+  connections = 0;
 
   constructor() {
     this.server = createServer((req, res) => {
@@ -54,6 +56,7 @@ class FakeChrome {
   }
 
   private onSocket(ws: WebSocket): void {
+    this.connections++;
     ws.on("message", (d) => {
       const m = JSON.parse(d.toString()) as {
         id: number;
@@ -312,6 +315,23 @@ describe("the CDP forward (R7, C10)", () => {
 });
 
 describe("sizing the page to the viewport (A6)", () => {
+  it("sized once while warming, a start that asks for the same viewport only measures it", async () => {
+    chrome = new FakeChrome();
+    const port = await chrome.start();
+    const sizer = new ViewportSizer(port);
+    closers.push(async () => sizer.close());
+    await sizer.apply({ width: 1280, height: 720 });
+    expect(chrome.bounds).toHaveLength(1);
+    const r = await sizer.apply({ width: 1280, height: 720 });
+    expect(r.viewport).toEqual({ width: 1280, height: 720 });
+    expect(chrome.bounds).toHaveLength(1); // no second resize
+    expect(chrome.connections).toBe(1); // and no second connection
+    // A different viewport is still sized, on the same connection.
+    await sizer.apply({ width: 800, height: 500 });
+    expect(chrome.bounds).toHaveLength(2);
+    expect(chrome.connections).toBe(1);
+  });
+
   it("makes innerWidth and innerHeight exactly what was asked, by allowing for the toolbar and borders", async () => {
     chrome = new FakeChrome();
     const port = await chrome.start();
@@ -455,6 +475,24 @@ describe("the supervisor (R4-R6)", () => {
     expect(s.chromeReady).toBe(false);
   });
 
+  it("runs its preparation after Chrome answers and before it counts as ready", async () => {
+    const { s } = await sup();
+    const seen: string[] = [];
+    s.prepare = async () => {
+      seen.push(s.state);
+    };
+    await s.start();
+    expect(seen).toEqual(["starting"]);
+    expect(s.state).toBe("ready");
+  });
+
+  it("is ready even if its preparation fails", async () => {
+    const { s } = await sup();
+    s.prepare = () => Promise.reject(new Error("no page"));
+    await s.start();
+    expect(s.state).toBe("ready");
+  });
+
   it("fails if Chrome never answers", async () => {
     const { s, fatal } = await sup({ chromeUp: false });
     await s.start();
@@ -536,6 +574,26 @@ describe("the control API (C5)", () => {
       chromeReady: true,
       chromeVersion: "Chrome/154.0.8037.92",
     });
+  });
+
+  it("holds a health call with wait until the browser is ready", async () => {
+    const { sup, call } = await rig();
+    const pending = call("GET", "/health?wait=5000");
+    await new Promise((r) => setTimeout(r, 100));
+    void sup.start();
+    const t0 = Date.now();
+    expect((await pending).json).toMatchObject({
+      status: "ready",
+      chromeReady: true,
+    });
+    expect(Date.now() - t0).toBeLessThan(2000);
+    // and gives up after the wait if it never is
+    const { call: call2 } = await rig();
+    const t1 = Date.now();
+    expect((await call2("GET", "/health?wait=150")).json).toMatchObject({
+      status: "starting",
+    });
+    expect(Date.now() - t1).toBeGreaterThanOrEqual(140);
   });
 
   it("will not configure a browser that is not ready", async () => {

@@ -733,19 +733,29 @@ export class NodeAgent {
     return { info, token };
   }
 
-  /** Poll the container until its browser answers; "hot" must mean truly ready (R5). */
+  /**
+   * Wait until the container's browser answers; "hot" must mean truly ready (R5). Once runtimed
+   * listens, its health call is held until the browser is ready, so the agent learns it at once;
+   * until then (and with an older runtimed) it polls briefly.
+   */
   private async waitReady(address: string, token: string): Promise<boolean> {
     const until = this.now() + this.c.readyTimeoutMs;
     for (;;) {
+      const left = until - this.now();
       try {
-        const h = await this.d.runtime.health(address, token);
+        const h = await this.d.runtime.health(
+          address,
+          token,
+          2000,
+          Math.max(0, Math.min(5_000, left)),
+        );
         if (h.status === "ready" && h.chromeReady) return true;
         if (h.status === "failed") return false;
       } catch {
         /* not up yet */
       }
       if (this.now() > until) return false;
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 10));
     }
   }
 

@@ -13,7 +13,7 @@ import {
   RUNTIME_PROTOCOL_VERSION,
   RuntimeHealth,
 } from "@kestrel/contracts";
-import { applyViewport } from "./cdp.js";
+import { ViewportSizer } from "./cdp.js";
 import type { CdpForward } from "./forward.js";
 import { runComputer, type Tabs } from "./page.js";
 import type { Recorder } from "./recorder.js";
@@ -48,6 +48,7 @@ export class ControlServer {
     private readonly chromePort: number,
     private readonly tabs: Tabs,
     private readonly recorder?: Recorder,
+    private readonly sizer = new ViewportSizer(chromePort),
   ) {}
 
   async listen(port: number, host = "0.0.0.0"): Promise<number> {
@@ -62,6 +63,7 @@ export class ControlServer {
   }
 
   async close(): Promise<void> {
+    this.sizer.close();
     this.server?.closeAllConnections();
     await new Promise<void>((r) =>
       this.server ? this.server.close(() => r()) : r(),
@@ -101,6 +103,13 @@ export class ControlServer {
       const path = new URL(req.url ?? "/", "http://runtime").pathname;
 
       if (req.method === "GET" && path === RUNTIME_PATHS.health) {
+        // `?wait=<ms>` (at most 10 s) holds the answer until the browser is ready or failed, so
+        // the agent learns the moment it is ready instead of polling. Without it, answers at once.
+        const wait = Number(
+          new URL(req.url ?? "/", "http://runtime").searchParams.get("wait"),
+        );
+        if (Number.isFinite(wait) && wait > 0)
+          await this.supervisor.settle(Math.min(wait, 10_000));
         return this.send(
           res,
           200,
@@ -132,7 +141,7 @@ export class ControlServer {
           return this.send(res, 409, {
             error: "this container is bound to another session",
           });
-        const applied = await applyViewport(this.chromePort, viewport);
+        const applied = await this.sizer.apply(viewport);
         const response = ConfigureResponse.parse(applied);
         this.configured = { proof: sessionProof, viewport, response };
         // Started after the viewport is applied, so the video is the window the caller asked for.

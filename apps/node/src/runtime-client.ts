@@ -18,6 +18,8 @@ export interface RuntimeClient {
     address: string,
     token: string,
     timeoutMs?: number,
+    /** Hold the answer until the browser is ready or failed, up to this long. */
+    waitMs?: number,
   ): Promise<RuntimeHealth>;
   configure(
     address: string,
@@ -97,15 +99,20 @@ export class HttpRuntimeClient implements RuntimeClient {
     address: string,
     token: string,
     timeoutMs = 2000,
+    waitMs = 0,
   ): Promise<RuntimeHealth> {
+    // `wait` holds the answer until the browser is ready or failed (runtimed C5); an older
+    // runtimed ignores it and answers at once, and the caller polls as before.
     return this.call(
       address,
       token,
       "GET",
-      RUNTIME_PATHS.health,
+      waitMs > 0
+        ? `${RUNTIME_PATHS.health}?wait=${waitMs}`
+        : RUNTIME_PATHS.health,
       RuntimeHealth,
       undefined,
-      timeoutMs,
+      timeoutMs + waitMs,
     );
   }
 
