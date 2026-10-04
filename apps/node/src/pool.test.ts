@@ -275,4 +275,14 @@ describe("pool refill under demand", () => {
     ]);
     expect(r.docker.listCalls - before).toBe(2);
   });
+
+  it("removes hot browsers left over from a larger pool when it boots with a smaller one", async () => {
+    const r = makeRig({ slotsTotal: 6, poolTarget: 4, refillAtOnce: 4 });
+    await bootWithPool(r);
+    expect(r.store.allPool()).toHaveLength(4);
+    r.config.poolTarget = 0;
+    await r.restart().boot();
+    expect(r.store.allPool()).toHaveLength(0);
+    expect(r.docker.containers.size).toBe(0);
+  });
 });

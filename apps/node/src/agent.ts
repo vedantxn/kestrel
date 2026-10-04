@@ -327,6 +327,18 @@ export class NodeAgent {
     }
     await this.idle();
     await this.reconcile();
+    // A deploy may have lowered the pool's size: hot browsers past it are left over, not wanted.
+    const keep = Math.max(
+      this.c.poolTarget,
+      this.c.recordingPool ?? (this.d.volumes ? 1 : 0),
+    );
+    const hot = this.store.allPool().filter((p) => p.state === "hot");
+    for (const p of this.c.poolTarget === 0 ? hot : hot.slice(keep)) {
+      if (!this.store.takePool(p.containerId)) continue;
+      const vol = this.volumeOf.get(p.containerId);
+      this.volumeOf.delete(p.containerId);
+      await this.removeWithVolume(p.containerId, vol);
+    }
     await this.syncEgress();
     this.booted = true;
   }
@@ -1324,6 +1336,9 @@ export class NodeAgent {
     for (const c of containers) {
       if (known.has(c.id) || now - c.createdAt < this.c.newContainerGraceMs)
         continue;
+      // The listing is a snapshot: the reaper may have removed this one since (and taken it off
+      // its queue, so it is no longer known). Only one that still exists is a real leftover.
+      if (!(await this.d.docker.inspect(c.id).catch(() => null))) continue;
       this.d.log.warn(
         { container: c.id.slice(0, 12) },
         "removing a container nothing refers to",
