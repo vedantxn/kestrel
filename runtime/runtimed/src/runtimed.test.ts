@@ -132,6 +132,7 @@ const baseCfg: Env = {
   SCREEN: "1920x1080x24",
   PROFILE_DIR: "/profile",
   CHROME_SANDBOX: "on",
+  SNAPSHOT: "off",
   CONTROL_PORT: 9000,
   FORWARD_PORT: 9223,
   CHROME_PORT: 9222,
@@ -186,6 +187,17 @@ describe("Chrome's command line (R3, R8, R9, R12)", () => {
           a !== "--proxy-bypass-list=<-loopback>",
       ),
     ).toBe(false);
+  });
+
+  it("starts no spare renderer in a snapshot, so no page process is shared by its clones (V7)", () => {
+    const off = chromeArgs(baseCfg).find((a) =>
+      a.startsWith("--disable-features="),
+    );
+    expect(off).not.toMatch(/SpareRenderer/);
+    const on = chromeArgs({ ...baseCfg, SNAPSHOT: "on" }).find((a) =>
+      a.startsWith("--disable-features="),
+    );
+    expect(on).toMatch(/,SpareRendererForSitePerProcess$/);
   });
 
   it("puts the window at the top-left of the display and opens a blank page", () => {

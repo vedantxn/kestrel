@@ -16,6 +16,12 @@ export const Env = z.object({
   RECORDING_DIR: z.string().default("/artifacts"),
   /** Chrome's own sandbox: on unless experiment V1 says it cannot work here (R12). */
   CHROME_SANDBOX: z.enum(["on", "off"]).default("on"),
+  /**
+   * "on" in a microVM whose memory is a snapshot restored into many browsers (V7): no renderer is
+   * started before a page needs one, so every page's process, and its JavaScript random state, is
+   * made after the restore rather than copied from the snapshot.
+   */
+  SNAPSHOT: z.enum(["on", "off"]).default("off"),
   CONTROL_PORT: z.coerce.number().int().default(9000),
   FORWARD_PORT: z.coerce.number().int().default(9223),
   CHROME_PORT: z.coerce.number().int().default(9222),
