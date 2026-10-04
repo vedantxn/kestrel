@@ -68,6 +68,9 @@ agent = new NodeAgent({
     ...(env.REAP_MAX_QUEUE !== undefined
       ? { reapMaxQueue: env.REAP_MAX_QUEUE }
       : {}),
+    ...(env.RECORDING_POOL !== undefined
+      ? { recordingPool: env.RECORDING_POOL }
+      : {}),
     address:
       env.ADVERTISE_ADDRESS ?? `http://${env.LISTEN_HOST}:${env.LISTEN_PORT}`,
     runtimeVersion: env.RUNTIME_VERSION,
@@ -182,8 +185,7 @@ if (env.CADDY_DATA && env.PUBLIC_HOSTNAME && env.TLS_DIR) {
 
 agent.startLoops();
 docker.onEvent((e) => {
-  if (e.action === "die" || e.action === "oom")
-    void agent.reconcile().catch(() => undefined);
+  if (e.action === "die" || e.action === "oom") agent.containerDied(e.id);
 });
 log.info(
   { port: env.LISTEN_PORT, node: env.NODE_ID, slots: env.SLOTS },

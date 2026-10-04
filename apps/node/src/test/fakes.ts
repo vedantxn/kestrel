@@ -76,7 +76,9 @@ export class FakeDocker implements DockerDriver {
     if (!this.containers.has(id)) throw new Error("no such container");
     this.paused.add(id);
   }
+  listCalls = 0;
   async list() {
+    this.listCalls++;
     return [...this.containers.values()].map((c) => ({ ...c }));
   }
   onEvent(cb: (e: DockerEvent) => void) {

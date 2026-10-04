@@ -17,6 +17,8 @@ export const Env = z.object({
   POOL_MAX: z.coerce.number().int().min(0).optional(),
   /** Warm browsers the pool may hold beyond the slots (idle ones use little memory). Default 0. */
   POOL_HEADROOM: z.coerce.number().int().min(0).default(0),
+  /** Pooled browsers that carry a recording volume (W3); default 1. */
+  RECORDING_POOL: z.coerce.number().int().min(0).optional(),
   /** Stopped containers that may wait frozen for removal at once (deferred removal). */
   REAP_MAX_QUEUE: z.coerce.number().int().min(0).optional(),
   DOCKER_SOCKET: z.string().default("/var/run/docker.sock"),

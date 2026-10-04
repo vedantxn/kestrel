@@ -52,13 +52,14 @@ describe("recording volumes (W3)", () => {
     expect(r.volumes!.vols.has(vol)).toBe(true);
   });
 
-  it("removes the volume of a session that did not record", async () => {
+  it("gives a session that does not record no volume at all", async () => {
     const r = makeRig({}, { volumes: true });
     await r.agent.boot();
     const req = startReq();
     await r.agent.start(req);
     const b = r.store.getBinding(req.sessionId)!;
-    const vol = volumeOf(r, b.containerId!)!;
+    expect(volumeOf(r, b.containerId!)).toBeUndefined();
+    expect(r.volumes!.vols.size).toBe(0);
     expect(r.runtime.configured.get(b.address!)).toMatchObject({
       recording: false,
     });
@@ -67,8 +68,56 @@ describe("recording volumes (W3)", () => {
       reason: "client_stop",
     } as never);
     await r.agent.idle();
-    expect(r.volumes!.removed).toContain(vol);
     expect(r.runtime.calls.map((c) => c.op)).not.toContain("stopRecording");
+  });
+
+  it("keeps recordingPool pooled browsers with a volume, for sessions that record", async () => {
+    const r = makeRig({ poolTarget: 3, refillAtOnce: 3 }, { volumes: true });
+    await r.agent.boot();
+    await r.agent.refillPool();
+    await r.agent.idle();
+    const pool = r.store.allPool();
+    expect(pool).toHaveLength(3);
+    const withVolume = pool.filter((p) => volumeOf(r, p.containerId));
+    expect(withVolume).toHaveLength(1);
+
+    // A session that does not record leaves the volume-bearing browser alone.
+    const plain = startReq();
+    expect(await r.agent.start(plain)).toMatchObject({ startPath: "hot" });
+    expect(
+      volumeOf(r, r.store.getBinding(plain.sessionId)!.containerId!),
+    ).toBeUndefined();
+
+    // One that records takes it, hot.
+    const rec = startReq({ recording: true });
+    expect(await r.agent.start(rec)).toMatchObject({ startPath: "hot" });
+    expect(r.store.getBinding(rec.sessionId)!.containerId).toBe(
+      withVolume[0]!.containerId,
+    );
+    expect(r.store.getRecording(rec.sessionId)?.volume).toBe(
+      volumeOf(r, withVolume[0]!.containerId),
+    );
+  });
+
+  it("removes the volume of a session that took a volume-bearing browser but did not record", async () => {
+    const r = makeRig(
+      { poolTarget: 1, refillAtOnce: 1, recordingPool: 1 },
+      { volumes: true },
+    );
+    await r.agent.boot();
+    await r.agent.refillPool();
+    await r.agent.idle();
+    const req = startReq();
+    await r.agent.start(req);
+    const b = r.store.getBinding(req.sessionId)!;
+    const vol = volumeOf(r, b.containerId!)!;
+    expect(vol).toBeDefined();
+    await r.agent.stop({
+      sessionId: req.sessionId,
+      reason: "client_stop",
+    } as never);
+    await r.agent.idle();
+    expect(r.volumes!.removed).toContain(vol);
   });
 
   it("starts unrecorded when the host cannot limit volume size", async () => {

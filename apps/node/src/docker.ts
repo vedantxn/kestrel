@@ -224,7 +224,9 @@ export class DockerodeDriver implements DockerDriver {
     const out: ContainerInfo[] = [];
     for (const r of rows) {
       if ((r.Labels ?? {})["kestrel.node"] !== this.nodeId) continue;
-      if (r.State === "running") {
+      // A paused container is a frozen, retired one waiting for the reaper: Docker reports it as
+      // running, and the listing has all it needs, so it is not inspected either.
+      if (r.State === "running" || r.State === "paused") {
         out.push({
           id: r.Id,
           labels: r.Labels ?? {},
