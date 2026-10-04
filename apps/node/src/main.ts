@@ -65,6 +65,9 @@ agent = new NodeAgent({
     refillAtOnce: env.REFILL_AT_ONCE,
     ...(env.POOL_MAX !== undefined ? { poolMax: env.POOL_MAX } : {}),
     poolHeadroom: env.POOL_HEADROOM,
+    ...(env.REAP_MAX_QUEUE !== undefined
+      ? { reapMaxQueue: env.REAP_MAX_QUEUE }
+      : {}),
     address:
       env.ADVERTISE_ADDRESS ?? `http://${env.LISTEN_HOST}:${env.LISTEN_PORT}`,
     runtimeVersion: env.RUNTIME_VERSION,
@@ -79,6 +82,17 @@ agent = new NodeAgent({
   clock: systemClock,
   log,
   failpoints,
+  // The host's /proc/meminfo (a container sees the host's figures): deferred removal checks it.
+  memAvailableMb: () => {
+    try {
+      const m = /MemAvailable:\s+(\d+) kB/.exec(
+        readFileSync("/proc/meminfo", "utf8"),
+      );
+      return m ? Math.floor(Number(m[1]) / 1024) : undefined;
+    } catch {
+      return undefined;
+    }
+  },
   ...(env.RECORDING === "on"
     ? {
         volumes: new DockerVolumes(env.NODE_ID, {

@@ -71,6 +71,11 @@ export class FakeDocker implements DockerDriver {
   async remove(id: string) {
     if (this.containers.delete(id)) this.removed.push(id);
   }
+  paused = new Set<string>();
+  async pause(id: string) {
+    if (!this.containers.has(id)) throw new Error("no such container");
+    this.paused.add(id);
+  }
   async list() {
     return [...this.containers.values()].map((c) => ({ ...c }));
   }
@@ -391,6 +396,8 @@ export function makeRig(
     newContainerGraceMs: 15_000,
     // Off here so tests can see what was queued; pool.test.ts covers the immediate send.
     reportOnRemoval: false,
+    // Off here so tests see a stopped session's container go at once; pool.test.ts covers deferral.
+    deferRemoval: false,
     ...over,
   };
   const build = (): NodeAgent =>

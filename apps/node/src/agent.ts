@@ -71,6 +71,18 @@ export interface AgentConfig {
    * Default 0 (the v1 rule: the pool only uses slots no session holds).
    */
   poolHeadroom?: number;
+  /**
+   * Retire a stopped session's container by freezing it (`docker pause`) and remove it later,
+   * when no pooled browser is being made. Docker serializes container work, and a removal running
+   * beside container creations made each creation 3-4 times slower: during a burst that starved
+   * the pool. Bounded so nothing frozen outstays REAP_MAX_DELAY_MS, and at most REAP_MAX_QUEUE wait.
+   * Default on.
+   */
+  deferRemoval?: boolean;
+  /** The most a start waits for pooled browsers on their way (default WARM_WAIT_MS); tests shorten it. */
+  warmWaitMs?: number;
+  /** How many frozen containers may wait for removal at once (default REAP_MAX_QUEUE). */
+  reapMaxQueue?: number;
   /** Send a session's `removed` report as soon as it is queued, not with the next heartbeat. Default on. */
   reportOnRemoval?: boolean;
   /** Where the API reaches this agent, sent at registration. */
@@ -109,7 +121,23 @@ export interface AgentDeps {
   dockerSpec: NodeConfigForDocker;
   /** W3. Recording volumes; without them sessions are not recorded. */
   volumes?: Volumes;
+  /** The host's available memory in MiB, or undefined if unknown (deferred removal checks it). */
+  memAvailableMb?: () => number | undefined;
 }
+
+/**
+ * How long a start may wait for pooled browsers already on their way. A new container would join
+ * the same Docker queue behind them, so it can only finish later: a start makes its own only
+ * when none is on its way, or as a last resort past this bound (a refill that is stuck).
+ */
+const WARM_WAIT_MS = 15_000;
+
+/** A frozen, stopped container is removed within this long even if the pool is still refilling. */
+const REAP_MAX_DELAY_MS = 10_000;
+/** At most this many frozen containers wait at once; past it, teardown removes at once. */
+const REAP_MAX_QUEUE = 4;
+/** Below this much available host memory, a stopped container is removed at once, not frozen. */
+const REAP_MIN_FREE_MB = 4_096;
 
 /** How far back starts count towards the pool's size. */
 const DEMAND_WINDOW_MS = 10_000;
@@ -134,6 +162,18 @@ export class NodeAgent {
   private spawning = 0;
   /** When recent starts arrived, for the demand-sized pool. */
   private recentStarts: number[] = [];
+  /** Pooled browsers being made, from the first Docker call until they are hot (or failed). */
+  private makingPool = new Set<Promise<boolean>>();
+  /** Each container's recording volume, as made here: saves a Docker call per teardown (a restart falls back to inspect). */
+  private volumeOf = new Map<string, string>();
+  /** Stopped sessions' containers, frozen and waiting to be removed (deferRemoval). */
+  private reapQueue: { id: string; volume?: string; at: number }[] = [];
+  private reaping = false;
+  /** Where a start's time went (performance.now() marks), logged when a start is slow. */
+  private startMarks = new Map<string, [string, number][]>();
+  private mark(sessionId: string, phase: string): void {
+    this.startMarks.get(sessionId)?.push([phase, performance.now()]);
+  }
   /** When a stuck teardown may next be retried. */
   private retryAt = new Map<string, number>();
   private syncing: Promise<void> | null = null;
@@ -213,6 +253,7 @@ export class NodeAgent {
     pendingReports: number;
     slotsTotal: number;
     poolHeadroom: number;
+    retiring: string[];
     admitting: boolean;
     failpoints: Record<string, string>;
   } {
@@ -231,6 +272,7 @@ export class NodeAgent {
       pendingReports: this.store.pendingReportCount(),
       slotsTotal: this.c.slotsTotal,
       poolHeadroom: this.c.poolHeadroom ?? 0,
+      retiring: this.reapQueue.map((q) => q.id),
       admitting: this.firewallOk,
       failpoints: this.d.failpoints.describe(),
     };
@@ -391,7 +433,9 @@ export class NodeAgent {
     for (let attempt = 0; attempt <= this.c.startRetries; attempt++) {
       let held: { containerId: string; address: string } | null = null;
       try {
+        this.startMarks.set(id, [["begin", performance.now()]]);
         const got = await this.acquire(id);
+        this.mark(id, `acquired:${got.path}`);
         held = { containerId: got.containerId, address: got.address };
         this.store.updateBinding(id, {
           containerId: got.containerId,
@@ -426,6 +470,7 @@ export class NodeAgent {
 
         // Configuring the container is also its health check: a browser that cannot apply it never gets a route.
         const proof = hex(32);
+        this.mark(id, "policy");
         const cfg = await this.d.runtime.configure(got.address, got.token, {
           sessionProof: proof as never,
           viewport: req.viewport,
@@ -450,6 +495,8 @@ export class NodeAgent {
         if (this.aborted(id)) throw new StartAborted();
 
         const ready = this.now();
+        this.mark(id, "configured");
+        this.logSlowStart(id);
         this.store.updateBinding(id, {
           state: "ready",
           readyAt: ready,
@@ -497,6 +544,7 @@ export class NodeAgent {
           return { result: "failed", reason: "stopped while starting" };
       }
     }
+    this.startMarks.delete(id);
     this.store.deleteBinding(id);
     return { result: "failed", reason: lastError };
   }
@@ -532,38 +580,52 @@ export class NodeAgent {
     };
 
     // A hot one. `takePool` succeeds for exactly one caller, so two starts can never share a container.
-    for (const p of this.store.allPool().filter((p) => p.state === "hot")) {
-      if (!this.store.takePool(p.containerId)) continue;
-      void this.refillPool();
-      const taken = bind(p.containerId, p.address, p.controlToken, "hot");
-      const info = await this.d.docker.inspect(p.containerId).catch(() => null);
-      if (info?.running) return taken;
-      this.store.updateBinding(sessionId, {
-        containerId: null,
-        address: null,
-        controlToken: null,
-        startPath: null,
-      });
-      await this.d.docker.remove(p.containerId).catch(() => undefined);
-    }
-    // One still starting: wait for it, and take it only if nobody else did.
-    for (const p of this.store
-      .allPool()
-      .filter((p) => p.state === "starting")) {
-      const wait = this.poolStarting.get(p.containerId);
-      if (!wait) continue;
-      if (await wait) {
-        const again = this.store
-          .allPool()
-          .find((x) => x.containerId === p.containerId && x.state === "hot");
-        if (again && this.store.takePool(again.containerId))
-          return bind(
-            again.containerId,
-            again.address,
-            again.controlToken,
-            "cold",
-          );
+    const takeHot = async (path: "hot" | "cold") => {
+      for (const p of this.store.allPool().filter((p) => p.state === "hot")) {
+        if (!this.store.takePool(p.containerId)) continue;
+        void this.refillPool();
+        const taken = bind(p.containerId, p.address, p.controlToken, path);
+        const info = await this.d.docker
+          .inspect(p.containerId)
+          .catch(() => null);
+        if (info?.running) return taken;
+        this.store.updateBinding(sessionId, {
+          containerId: null,
+          address: null,
+          controlToken: null,
+          startPath: null,
+        });
+        await this.d.docker.remove(p.containerId).catch(() => undefined);
       }
+      return null;
+    };
+    const hot = await takeHot("hot");
+    if (hot) return hot;
+
+    // None hot, some warming: take whichever is ready first, checking again after each one
+    // finishes (another start may have taken it, or a different one may be ready). Waiting on
+    // them one after another instead added up to 10 s under load. Bounded: past the bound a
+    // fresh container is no slower than continuing to wait.
+    const until = performance.now() + (this.c.warmWaitMs ?? WARM_WAIT_MS);
+    for (;;) {
+      const warming = [
+        ...this.makingPool,
+        ...this.store
+          .allPool()
+          .filter((p) => p.state === "starting")
+          .map((p) => this.poolStarting.get(p.containerId))
+          .filter((w): w is Promise<boolean> => w !== undefined),
+      ];
+      const left = until - performance.now();
+      if (warming.length === 0 || left <= 0) break;
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        ...warming,
+        new Promise((r) => (timer = setTimeout(r, left))),
+      ]);
+      clearTimeout(timer);
+      const got = await takeHot("cold");
+      if (got) return got;
     }
     // Cold. Free a slot's worth of pool first if the pool is using the room: sessions have priority.
     const spare =
@@ -571,13 +633,38 @@ export class NodeAgent {
     const pool = this.store.allPool();
     if (pool.length > Math.max(0, spare - 1)) {
       const victim = pool[pool.length - 1];
-      if (victim && this.store.takePool(victim.containerId))
+      if (victim && this.store.takePool(victim.containerId)) {
+        this.d.log.info(
+          {
+            container: victim.containerId.slice(0, 12),
+            pool: pool.length,
+            spare,
+          },
+          "pool: evicted to make room for a cold start",
+        );
         await this.d.docker.remove(victim.containerId).catch(() => undefined);
+      }
     }
+    const snap = this.store.allPool();
+    this.d.log.info(
+      {
+        session: sessionId,
+        hot: snap.filter((p) => p.state === "hot").length,
+        starting: snap.filter((p) => p.state === "starting").length,
+        withPromise: snap.filter((p) => this.poolStarting.has(p.containerId))
+          .length,
+        spawning: this.spawning,
+      },
+      "pool: going cold",
+    );
+    this.mark(sessionId, "cold:begin");
     const created = await this.createContainer("session");
+    this.mark(sessionId, "cold:created");
     const info = created.info;
     const bound = bind(info.id, info.address as string, created.token, "cold");
-    if (!(await this.waitReady(info.address as string, created.token))) {
+    const isReady = await this.waitReady(info.address as string, created.token);
+    this.mark(sessionId, "cold:ready");
+    if (!isReady) {
       this.store.updateBinding(sessionId, {
         containerId: null,
         address: null,
@@ -608,6 +695,7 @@ export class NodeAgent {
       await this.d.docker.remove(info.id).catch(() => undefined);
       throw new Error("the container has no address on the session network");
     }
+    if (volume) this.volumeOf.set(info.id, volume);
     return { info, token };
   }
 
@@ -657,14 +745,31 @@ export class NodeAgent {
       (this.c.poolHeadroom ?? 0) -
       this.sessionCount() -
       have;
-    const want = Math.min(this.poolWanted() - have, this.c.refillAtOnce, room);
+    // `refillAtOnce` caps how many are in flight at once (being created, or created and still
+    // warming), not how many each call may add: refills run every second and after every take, so
+    // a per-call cap let up to the whole pool be created together, which stalled Docker for
+    // seconds per container and slowed the very starts the pool exists to serve.
+    const inFlight =
+      this.spawning +
+      this.store.allPool().filter((p) => p.state === "starting").length;
+    const want = Math.min(
+      this.poolWanted() - have,
+      this.c.refillAtOnce - inFlight,
+      room,
+    );
     for (let i = 0; i < want; i++) {
       this.spawning++;
-      this.spawn(this.spawnPooled());
+      // Waitable from the moment it begins, not only once Docker has made the container: a start
+      // finding the pool empty waits for whichever of these is ready first.
+      const made = this.spawnPooled();
+      this.makingPool.add(made);
+      void made.finally(() => this.makingPool.delete(made));
+      this.spawn(made.then(() => undefined));
     }
   }
 
-  private async spawnPooled(): Promise<void> {
+  /** Resolves true once the new pooled browser is hot (and in the pool), false if it never is. */
+  private async spawnPooled(): Promise<boolean> {
     let created: { info: ContainerInfo; token: string };
     try {
       created = await this.createContainer("pool");
@@ -674,7 +779,7 @@ export class NodeAgent {
         { err: e instanceof Error ? e.message : String(e) },
         "could not create a pooled browser",
       );
-      return;
+      return false;
     }
     const { info, token } = created;
     this.store.upsertPool({
@@ -699,6 +804,10 @@ export class NodeAgent {
         }
         // Either it never became ready, or a session took it while it was starting.
         if (this.store.allPool().some((p) => p.containerId === info.id)) {
+          this.d.log.info(
+            { container: info.id.slice(0, 12), ok },
+            "pool: dropped a browser that did not become ready",
+          );
           this.store.deletePool(info.id);
           await this.d.docker.remove(info.id).catch(() => undefined);
         }
@@ -706,8 +815,89 @@ export class NodeAgent {
       },
     );
     this.poolStarting.set(info.id, ready);
-    await ready;
+    const ok = await ready;
     this.poolStarting.delete(info.id);
+    return ok;
+  }
+
+  /**
+   * Freeze a stopped session's container and queue it for removal (see `deferRemoval`). Its route
+   * and egress policy are already gone, so a frozen container is unreachable and has no way out;
+   * its address stays taken until it is removed. False when it must be removed now instead.
+   */
+  private async deferRemoval(id: string, volume?: string): Promise<boolean> {
+    if (
+      !(this.c.deferRemoval ?? true) ||
+      this.reapQueue.length >= (this.c.reapMaxQueue ?? REAP_MAX_QUEUE)
+    )
+      return false;
+    // A frozen container keeps its memory until it is removed: defer only while the host has room.
+    const free = this.d.memAvailableMb?.();
+    if (free !== undefined && free < REAP_MIN_FREE_MB) return false;
+    try {
+      await this.d.docker.pause(id);
+    } catch {
+      return false; // already dead, or the pause failed: remove it the ordinary way
+    }
+    this.reapQueue.push({
+      id,
+      ...(volume ? { volume } : {}),
+      at: performance.now(),
+    });
+    return true;
+  }
+
+  /** Remove frozen containers one at a time: when nothing is being made, or one has waited too long. */
+  async reap(): Promise<void> {
+    if (this.reaping) return;
+    this.reaping = true;
+    try {
+      for (;;) {
+        const oldest = this.reapQueue[0];
+        if (!oldest) return;
+        const quiet = this.makingPool.size === 0 && this.spawning === 0;
+        const overdue = performance.now() - oldest.at > REAP_MAX_DELAY_MS;
+        if (!quiet && !overdue) return;
+        await this.d.docker.remove(oldest.id).catch((e: unknown) =>
+          this.d.log.warn(
+            {
+              container: oldest.id.slice(0, 12),
+              err: e instanceof Error ? e.message : String(e),
+            },
+            "could not remove a retired container; reconciliation will",
+          ),
+        );
+        if (oldest.volume)
+          await this.d.volumes?.remove(oldest.volume).catch(() => undefined);
+        this.reapQueue.shift();
+      }
+    } finally {
+      this.reaping = false;
+    }
+  }
+
+  /** A start slower than 2 s is logged with the time each phase took, to find what the tail is made of. */
+  private logSlowStart(id: string): void {
+    const marks = this.startMarks.get(id);
+    this.startMarks.delete(id);
+    if (!marks || marks.length < 2) return;
+    const total = marks[marks.length - 1]![1] - marks[0]![1];
+    if (total < 2_000) return;
+    const phases: Record<string, number> = {};
+    for (let i = 1; i < marks.length; i++)
+      phases[marks[i]![0]] = Math.round(marks[i]![1] - marks[i - 1]![1]);
+    this.d.log.warn(
+      {
+        session: id,
+        totalMs: Math.round(total),
+        phases,
+        pool: this.store.allPool().length,
+        hot: this.store.allPool().filter((p) => p.state === "hot").length,
+        spawning: this.spawning,
+        sessions: this.sessionCount(),
+      },
+      "slow start",
+    );
   }
 
   // --- stop (G10, G14) ------------------------------------------------------------------------
@@ -796,12 +986,16 @@ export class NodeAgent {
     await this.d.failpoints.hit("node.stop.after_policy_cleared");
     const volume =
       b.containerId && !recorded
-        ? (await this.d.docker.inspect(b.containerId).catch(() => null))
-            ?.labels["kestrel.volume"]
+        ? (this.volumeOf.get(b.containerId) ??
+          (await this.d.docker.inspect(b.containerId).catch(() => null))
+            ?.labels["kestrel.volume"])
         : undefined;
-    if (b.containerId) await this.d.docker.remove(b.containerId);
-    // A volume nobody recorded to goes with its container; reconciliation catches any left behind.
-    if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
+    if (b.containerId) this.volumeOf.delete(b.containerId);
+    if (b.containerId && !(await this.deferRemoval(b.containerId, volume))) {
+      await this.d.docker.remove(b.containerId);
+      // A volume nobody recorded to goes with its container; reconciliation catches any left behind.
+      if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
+    }
     await this.d.failpoints.hit("node.stop.after_container_removed");
 
     const seconds = b.readyAt
@@ -963,6 +1157,9 @@ export class NodeAgent {
    */
   async reconcile(): Promise<void> {
     const containers = await this.d.docker.list();
+    const present = new Set(containers.map((c) => c.id));
+    for (const id of this.volumeOf.keys())
+      if (!present.has(id)) this.volumeOf.delete(id);
     const byId = new Map(containers.map((c) => [c.id, c]));
     const now = this.now();
 
@@ -1007,6 +1204,7 @@ export class NodeAgent {
     const known = new Set<string>();
     for (const b of this.store.allBindings())
       if (b.containerId) known.add(b.containerId);
+    for (const q of this.reapQueue) known.add(q.id);
     for (const p of this.store.allPool()) {
       // The container list is a snapshot from the start of this pass: a pooled browser made since
       // then has a record but is not in it. Look again before treating it as gone, or its record
@@ -1015,6 +1213,15 @@ export class NodeAgent {
         byId.get(p.containerId) ??
         (await this.d.docker.inspect(p.containerId).catch(() => null));
       if (!c || !c.running) {
+        this.d.log.info(
+          {
+            container: p.containerId.slice(0, 12),
+            found: Boolean(c),
+            running: c?.running ?? null,
+            state: p.state,
+          },
+          "pool: reconciliation dropped a record",
+        );
         this.store.deletePool(p.containerId);
         if (c) await this.d.docker.remove(c.id).catch(() => undefined);
       } else known.add(p.containerId);
@@ -1342,6 +1549,7 @@ export class NodeAgent {
     );
     every(1000, () => this.tick(), "deadlines");
     every(1000, () => this.refillPool(), "pool");
+    every(250, () => this.reap(), "reap");
     every(
       TIMINGS.dockerReconcileIntervalMs,
       async () => {

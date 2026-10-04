@@ -223,10 +223,11 @@ describe("the pool yields to sessions (G4, G5)", () => {
     await r.agent.refillPool();
     await r.agent.idle();
     expect(r.store.allPool()).toHaveLength(1); // refillAtOnce
-    await r.agent.refillPool();
-    await r.agent.refillPool();
-    await r.agent.refillPool();
-    await r.agent.idle();
+    // refillAtOnce caps how many are in flight, so each fill finishes before the next begins.
+    for (let i = 0; i < 3; i++) {
+      await r.agent.refillPool();
+      await r.agent.idle();
+    }
     expect(r.store.allPool()).toHaveLength(3); // every slot is spare, so all three fill
     const req = startReq();
     await r.agent.start(req);

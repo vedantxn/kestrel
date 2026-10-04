@@ -54,7 +54,7 @@ if [ "$TWO" = 1 ]; then
   SIZES="SLOTS_A=${SLOTS_A:-3}\nPOOL_A=${POOL_A:-1}\nSLOTS_B=${SLOTS_B:-2}\nPOOL_B=${POOL_B:-1}"
 fi
 # Pool tuning (optional): warm browsers beyond the slots, and how many to start at once.
-SIZES="$SIZES\nPOOL_HEADROOM=${POOL_HEADROOM:-0}\nREFILL_AT_ONCE=${REFILL_AT_ONCE:-}"
+SIZES="$SIZES\nPOOL_HEADROOM=${POOL_HEADROOM:-0}\nREFILL_AT_ONCE=${REFILL_AT_ONCE:-}\nRECORDING=${RECORDING:-on}\nREAP_MAX_QUEUE=${REAP_MAX_QUEUE:-4}"
 cat > /var/lib/kestrel/compose.env <<ENV
 PUBLIC_HOSTNAME=$HOSTNAME_PUBLIC
 PUBLIC_IP=$PUBLIC_IP

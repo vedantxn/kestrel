@@ -180,6 +180,7 @@ export async function collectSnapshot(
         containerId: string | null;
       }[];
       pool: { containerId: string; address: string }[];
+      retiring?: string[];
       pendingReports: number;
       slotsTotal: number;
       poolHeadroom?: number;
@@ -191,6 +192,7 @@ export async function collectSnapshot(
       poolHeadroom: st.poolHeadroom ?? 0,
       sessions: st.sessions,
       pool: st.pool,
+      retiring: st.retiring ?? [],
       pendingReports: st.pendingReports,
     });
     failpoints.push({ process: `node-${n.id}`, active: st.failpoints });

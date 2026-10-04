@@ -54,6 +54,8 @@ export interface AgentView {
     containerId: string | null;
   }[];
   pool: { containerId: string; address: string }[];
+  /** Stopped sessions' containers, frozen and queued for removal (agent deferRemoval); bounded in count and age. */
+  retiring?: string[];
   pendingReports: number;
 }
 
@@ -113,6 +115,7 @@ export function checkInvariants(s: Snapshot): Violation[] {
     [
       ...agentBindings.map((b) => b.containerId),
       ...s.agents.flatMap((a) => a.pool.map((p) => p.containerId)),
+      ...s.agents.flatMap((a) => a.retiring ?? []),
     ].filter(Boolean) as string[],
   );
 

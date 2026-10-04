@@ -75,6 +75,8 @@ services:
       POOL_TARGET: ${POOL_A:-2}
       REFILL_AT_ONCE: ${REFILL_AT_ONCE:-${POOL_A:-2}}
       POOL_HEADROOM: ${POOL_HEADROOM:-0}
+      RECORDING: ${RECORDING:-on}
+      REAP_MAX_QUEUE: ${REAP_MAX_QUEUE:-4}
       RUNTIME_IMAGE: kestrel-runtime:dev
       NETWORK: ksl-a
       IFACE: ksl-a
@@ -148,6 +150,8 @@ services:
       POOL_TARGET: ${POOL_B:-1}
       REFILL_AT_ONCE: ${REFILL_AT_ONCE:-${POOL_B:-1}}
       POOL_HEADROOM: ${POOL_HEADROOM:-0}
+      RECORDING: ${RECORDING:-on}
+      REAP_MAX_QUEUE: ${REAP_MAX_QUEUE:-4}
       RUNTIME_IMAGE: kestrel-runtime:dev
       NETWORK: ksl-b
       IFACE: ksl-b

@@ -114,4 +114,128 @@ describe("pool refill under demand", () => {
     expect(made).toHaveLength(1);
     expect(r.docker.containers.has(made[0]!.containerId)).toBe(true);
   });
+
+  it("waits for warming browsers up to its bound, then makes its own", async () => {
+    const r = makeRig({ slotsTotal: 6, poolTarget: 2, warmWaitMs: 1_500 });
+    await r.agent.boot();
+    // Two pooled browsers that will never become ready.
+    const runs = r.docker.runCalls;
+    const realRun = r.docker.run.bind(r.docker);
+    r.docker.run = async (spec) => {
+      const info = await realRun(spec);
+      if (r.docker.runCalls <= runs + 2)
+        r.runtime.neverReady.add(info.address as string);
+      return info;
+    };
+    await r.agent.refillPool();
+    await new Promise((res) => setTimeout(res, 20));
+    expect(
+      r.store.allPool().filter((p) => p.state === "starting"),
+    ).toHaveLength(2);
+    const t0 = performance.now();
+    const res = await r.agent.start(startReq());
+    const took = performance.now() - t0;
+    expect(res).toMatchObject({ result: "ready", startPath: "cold" });
+    // Bounded by the warm wait (1.5 s here), not by however long the warming ones take.
+    expect(took).toBeGreaterThan(1_400);
+    expect(took).toBeLessThan(3_500);
+  });
+
+  it("never has more than refillAtOnce browsers being made or warming at once", async () => {
+    const r = makeRig({ slotsTotal: 10, poolTarget: 10, refillAtOnce: 2 });
+    await r.agent.boot();
+    // Browsers that stay warming, so nothing finishes while refills keep being asked for.
+    const realRun = r.docker.run.bind(r.docker);
+    r.docker.run = async (spec) => {
+      const info = await realRun(spec);
+      r.runtime.neverReady.add(info.address as string);
+      return info;
+    };
+    for (let i = 0; i < 6; i++) {
+      await r.agent.refillPool();
+      await new Promise((res) => setTimeout(res, 5));
+    }
+    expect(r.store.allPool().length).toBeLessThanOrEqual(2);
+    expect(r.docker.runCalls).toBeLessThanOrEqual(2);
+  });
+
+  it("takes a pooled browser that is still being made rather than adding another", async () => {
+    const r = makeRig({ slotsTotal: 6, poolTarget: 1, refillAtOnce: 1 });
+    await r.agent.boot();
+    // Docker is slow: the one pooled browser on its way takes 300 ms to be made.
+    const realRun = r.docker.run.bind(r.docker);
+    r.docker.run = async (spec) => {
+      await new Promise((res) => setTimeout(res, 300));
+      return realRun(spec);
+    };
+    await r.agent.refillPool();
+    expect(r.store.allPool()).toHaveLength(0); // still inside Docker
+    const res = await r.agent.start(startReq());
+    expect(res.result).toBe("ready");
+    // It waited for the one on its way: only that container was made for this start.
+    expect(r.docker.runCalls).toBe(1);
+  });
+
+  it("freezes a stopped session's container and removes it once Docker is quiet", async () => {
+    const r = makeRig({ deferRemoval: true, reportOnRemoval: true });
+    await bootWithPool(r);
+    const req = startReq();
+    await r.agent.start(req);
+    const cid = r.store.getBinding(req.sessionId)!.containerId!;
+    await r.agent.idle(); // the refill after the take is done: nothing is being made
+    await r.agent.stop({
+      sessionId: req.sessionId,
+      reason: "client_stop",
+    } as never);
+    await new Promise((res) => setTimeout(res, 20));
+    // Frozen, its slot already free and reported, but still there...
+    expect(r.docker.paused.has(cid)).toBe(true);
+    expect(r.docker.containers.has(cid)).toBe(true);
+    expect(r.store.getBinding(req.sessionId)).toBeUndefined();
+    expect(r.egress.policies.size).toBe(0); // and with no way out
+    // ...until the reaper runs with no pooled browser being made.
+    await r.agent.reap();
+    expect(r.docker.containers.has(cid)).toBe(false);
+  });
+
+  it("removes at once when the freeze fails or too many already wait", async () => {
+    const r = makeRig({ slotsTotal: 8, deferRemoval: true });
+    await bootWithPool(r);
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const req = startReq();
+      await r.agent.start(req);
+      ids.push(r.store.getBinding(req.sessionId)!.containerId!);
+      await r.agent.stop({
+        sessionId: req.sessionId,
+        reason: "client_stop",
+      } as never);
+    }
+    await r.agent.idle();
+    // At most four wait frozen; the rest went the ordinary way.
+    expect(
+      ids.filter((id) => r.docker.containers.has(id)).length,
+    ).toBeLessThanOrEqual(4);
+    expect(
+      ids.filter((id) => r.docker.removed.includes(id)).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("removes at once instead of freezing when the host is short of memory", async () => {
+    const r = makeRig({ deferRemoval: true });
+    (
+      r.agent as unknown as { d: { memAvailableMb: () => number } }
+    ).d.memAvailableMb = () => 2_000;
+    await bootWithPool(r);
+    const req = startReq();
+    await r.agent.start(req);
+    const cid = r.store.getBinding(req.sessionId)!.containerId!;
+    await r.agent.stop({
+      sessionId: req.sessionId,
+      reason: "client_stop",
+    } as never);
+    await r.agent.idle();
+    expect(r.docker.paused.has(cid)).toBe(false);
+    expect(r.docker.containers.has(cid)).toBe(false);
+  });
 });

@@ -120,6 +120,8 @@ export interface DockerDriver {
   inspect(id: string): Promise<ContainerInfo | null>;
   /** Force-remove. Idempotent: a container that is already gone is not an error. */
   remove(id: string): Promise<void>;
+  /** Freeze every process in the container (cgroup freezer). Cheap: no network teardown. */
+  pause(id: string): Promise<void>;
   /** Containers carrying this node's label, and only those (G3). */
   list(): Promise<ContainerInfo[]>;
   onEvent(cb: (e: DockerEvent) => void): () => void;
@@ -197,6 +199,10 @@ export class DockerodeDriver implements DockerDriver {
     }
   }
 
+  async pause(id: string): Promise<void> {
+    await this.docker.getContainer(id).pause();
+  }
+
   async remove(id: string): Promise<void> {
     try {
       await this.docker.getContainer(id).remove({ force: true, v: true });
@@ -211,8 +217,26 @@ export class DockerodeDriver implements DockerDriver {
       all: true,
       filters: { label: [`kestrel.node=${this.nodeId}`] },
     });
+    // The list already carries what a running container needs (state, labels, address, age).
+    // Only a stopped one is inspected, for its exit code and whether it was OOM-killed. Inspecting
+    // every container every 5 s was ~16 Docker calls a second on a busy host, and the daemon
+    // serializes container work: it slowed the container starts that refill the pool.
     const out: ContainerInfo[] = [];
     for (const r of rows) {
+      if ((r.Labels ?? {})["kestrel.node"] !== this.nodeId) continue;
+      if (r.State === "running") {
+        out.push({
+          id: r.Id,
+          labels: r.Labels ?? {},
+          running: true,
+          address:
+            r.NetworkSettings?.Networks?.[this.network]?.IPAddress || null,
+          oomKilled: false,
+          exitCode: null,
+          createdAt: r.Created * 1000,
+        });
+        continue;
+      }
       const info = await this.inspect(r.Id);
       if (info && info.labels["kestrel.node"] === this.nodeId) out.push(info);
     }
