@@ -23,12 +23,19 @@ export const RUNTIME_PORTS = {
 } as const;
 
 export const RUNTIME_PATHS = {
+  /** `?wait=<ms>` (at most 10 s) holds the answer until the browser is ready or failed. */
   health: "/health",
   configure: "/configure",
   /** W4: one `/computer` action on the page live view shows. */
   computer: "/computer",
   /** W3: finish the recording so its last fragment is written; the agent calls it before removal. */
   recordingStop: "/recording/stop",
+  /**
+   * V7. A browser restored from a snapshot starts with the template's control token, the same in
+   * every clone: the agent replaces it with the container's own before anything else. Accepted
+   * once, authenticated by the template token; the template token is refused from then on.
+   */
+  rekey: "/rekey",
 } as const;
 
 /** `GET /health`. A pooled container is "hot" only when this says `ready`. */
@@ -61,6 +68,19 @@ export const ConfigureResponse = z.object({
   chromeVersion: z.string(),
 });
 export type ConfigureResponse = z.infer<typeof ConfigureResponse>;
+
+/**
+ * `POST /rekey` (V7, microVM clones only). After the token is replaced, runtimed also gives the
+ * session a page made after the restore, in a new renderer: a renderer copied from the snapshot
+ * would share its JavaScript random state with every other clone.
+ */
+export const RekeyRequest = z
+  .object({ token: z.string().regex(/^[0-9a-f]{32,128}$/) })
+  .strict();
+export type RekeyRequest = z.infer<typeof RekeyRequest>;
+
+export const RekeyResponse = z.object({ ok: z.literal(true) });
+export type RekeyResponse = z.infer<typeof RekeyResponse>;
 
 /**
  * The module interface (drafted). `runtimed` has a small core (launch and supervise Chrome and
