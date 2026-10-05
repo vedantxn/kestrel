@@ -4,7 +4,8 @@ import { LIVE_MODE_HEADER, PROOF_HEADER } from "@kestrel/contracts";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { CdpForward } from "./forward.js";
-import { LiveServer } from "./live.js";
+import type { Detection } from "./captcha-match.js";
+import { LiveServer, type CaptchaSource } from "./live.js";
 import { Tabs, runComputer } from "./page.js";
 
 /** A fake Chrome: discovery, two pages, and a screencast that sends a frame per acknowledgement. */
@@ -127,10 +128,10 @@ let live: LiveServer;
 let fport = 0;
 const sockets: WebSocket[] = [];
 
-async function setup(): Promise<void> {
+async function setup(captcha?: CaptchaSource): Promise<void> {
   chrome = new FakeChrome();
   const cport = await chrome.start();
-  live = new LiveServer(cport, new Tabs());
+  live = new LiveServer(cport, new Tabs(), undefined, captcha);
   forward = new CdpForward(cport, live);
   forward.setProof(PROOF);
   fport = await forward.listen(0, "127.0.0.1");
@@ -184,6 +185,42 @@ describe("live view in runtimed (W2)", () => {
     expect(
       chrome.calls.filter((c) => c.method === "Page.screencastFrameAck").length,
     ).toBeGreaterThanOrEqual(4);
+  });
+
+  it("tells the viewer which CAPTCHAs are showing, at once and on every change", async () => {
+    const listeners = new Set<(d: Detection[]) => void>();
+    let now: Detection[] = [
+      { provider: "recaptcha", host: "a.example" },
+      { provider: "recaptcha", host: "b.example" },
+    ];
+    await setup({
+      current: () => ({ detections: now }),
+      onChange: (l) => (listeners.add(l), () => listeners.delete(l)),
+    });
+    const ws = viewer("view");
+    const msgs = collect(ws);
+    await until(() => msgs.some((m) => m.type === "captcha"));
+    expect(msgs.find((m) => m.type === "captcha")).toEqual({
+      type: "captcha",
+      providers: ["recaptcha"],
+    });
+    now = [];
+    for (const l of listeners) l(now);
+    await until(() => msgs.filter((m) => m.type === "captcha").length === 2);
+    expect(msgs.filter((m) => m.type === "captcha")[1]).toEqual({
+      type: "captcha",
+      providers: [],
+    });
+    ws.close();
+    await until(() => listeners.size === 0);
+  });
+
+  it("sends no CAPTCHA messages without detection", async () => {
+    await setup();
+    const ws = viewer("view");
+    const msgs = collect(ws);
+    await until(() => msgs.some((m) => m.type === "tabs"));
+    expect(msgs.some((m) => m.type === "captcha")).toBe(false);
   });
 
   it("ignores input on a view-only socket", async () => {

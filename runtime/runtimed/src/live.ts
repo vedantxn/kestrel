@@ -3,6 +3,7 @@ import type { Socket } from "node:net";
 import { LIVE_MODE_HEADER, type LiveMode } from "@kestrel/contracts";
 import WebSocket, { WebSocketServer } from "ws";
 import { z } from "zod";
+import type { Detection } from "./captcha-match.js";
 import type { Cdp } from "./cdp.js";
 import { PageDriver, openPage, type Tabs } from "./page.js";
 
@@ -44,6 +45,12 @@ const ViewerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text"), text: z.string().min(1).max(1000) }),
 ]);
 
+/** What live view needs from CAPTCHA detection (`CaptchaWatcher`). */
+export interface CaptchaSource {
+  current(): { detections: Detection[] };
+  onChange(l: (d: Detection[]) => void): () => void;
+}
+
 export class LiveServer {
   private http: Server;
   private wss = new WebSocketServer({
@@ -59,6 +66,8 @@ export class LiveServer {
     private readonly tabs: Tabs,
     private readonly log: (msg: string, extra?: object) => void = () =>
       undefined,
+    /** Tells the person taking over that a CAPTCHA is showing (docs/lld/captcha.md). */
+    private readonly captcha?: CaptchaSource,
   ) {
     this.http = createServer((_req, res) => {
       res.writeHead(426).end();
@@ -97,10 +106,12 @@ export class LiveServer {
     }
     let closed = false;
     let waitTimer: NodeJS.Timeout | undefined;
+    let unsubscribe: (() => void) | undefined;
     const close = (): void => {
       if (closed) return;
       closed = true;
       clearInterval(waitTimer);
+      unsubscribe?.();
       cdp.close();
       if (ws.readyState === WebSocket.OPEN) ws.close(1000);
     };
@@ -220,6 +231,21 @@ export class LiveServer {
       };
       void run().catch(() => undefined);
     });
+
+    // Providers only: the viewer turns them into fixed labels (T-52).
+    const sendCaptcha = (d: Detection[]): void => {
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(
+          JSON.stringify({
+            type: "captcha",
+            providers: [...new Set(d.map((x) => x.provider))],
+          }),
+        );
+    };
+    if (this.captcha) {
+      unsubscribe = this.captcha.onChange(sendCaptcha);
+      sendCaptcha(this.captcha.current().detections);
+    }
 
     try {
       await cdp.send("Target.setDiscoverTargets", { discover: true });

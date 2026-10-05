@@ -48,7 +48,7 @@ const recorder = new Recorder(
   log,
 );
 const captcha = new CaptchaWatcher(cfg.CHROME_PORT, log);
-const live = new LiveServer(cfg.CHROME_PORT, tabs, log);
+const live = new LiveServer(cfg.CHROME_PORT, tabs, log, captcha);
 const forward = new CdpForward(cfg.CHROME_PORT, live);
 const control = new ControlServer(
   cfg.KESTREL_CONTROL_TOKEN,

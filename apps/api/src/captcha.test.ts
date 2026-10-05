@@ -1,10 +1,12 @@
 import {
+  CAPTCHA_PROVIDERS,
   ListEventsResponse,
   Session,
   type CaptchaProvider,
   type Report,
 } from "@kestrel/contracts";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { CAPTCHA_LABELS, LIVE_PAGE } from "./live-page.js";
 import { makeEnv, type Env } from "./test/harness.js";
 
 let env: Env;
@@ -163,5 +165,17 @@ describe("Session.captcha follows the node's captcha events", () => {
     expect(list.data.find((x) => x.id === s.id)?.captcha?.providers).toEqual([
       "datadome",
     ]);
+  });
+});
+
+describe("the live viewer's CAPTCHA banner", () => {
+  it("has a fixed label for every provider, and writes text only", () => {
+    expect(Object.keys(CAPTCHA_LABELS).sort()).toEqual(
+      [...CAPTCHA_PROVIDERS].sort(),
+    );
+    for (const label of Object.values(CAPTCHA_LABELS))
+      expect(LIVE_PAGE).toContain(JSON.stringify(label));
+    expect(LIVE_PAGE).toContain('id="captcha" role="status" hidden');
+    expect(LIVE_PAGE).not.toContain("innerHTML");
   });
 });
