@@ -394,6 +394,12 @@ function details(s: Session): string {
         : "-",
     ],
     ["browser seconds", String(s.usage.browserSeconds)],
+    [
+      "captcha",
+      s.captcha
+        ? `${s.captcha.providers.join(", ")} (since ${s.captcha.since})`
+        : "-",
+    ],
   ];
   const meta = Object.entries(s.options.metadata);
   if (meta.length)
