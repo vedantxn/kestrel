@@ -14,11 +14,21 @@ import {
   Sun,
   type LucideIcon,
 } from "lucide-react";
+import { motion } from "motion/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
 import type { ReactNode } from "react";
+import { CommandMenu } from "@kestrel/dashboard/components/command-menu";
 import { Logo } from "@kestrel/dashboard/components/logo";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@kestrel/dashboard/components/ui/breadcrumb";
 import { Button } from "@kestrel/dashboard/components/ui/button";
 import {
   DropdownMenu,
@@ -45,6 +55,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from "@kestrel/dashboard/components/ui/sidebar";
+import { shortId } from "@kestrel/dashboard/lib/format";
 
 export interface NavItem {
   href: string;
@@ -85,7 +96,7 @@ export function Shell({
   /** A server action. */
   signOut: () => Promise<void>;
   base?: string;
-  /** Items an app adds to the "Manage" group (the hosted app's members page). */
+  /** Items an app adds to the "Manage" group. */
   extraNav?: NavItem[];
 }) {
   const pathname = usePathname();
@@ -94,19 +105,27 @@ export function Shell({
     ["Platform", main!],
     ["Manage", [...manage!, ...extraNav]],
   ];
+  const all = groups.flatMap(([, items]) => items);
   const active = (item: NavItem) =>
     item.exact
       ? pathname === item.href
       : pathname === item.href || pathname.startsWith(`${item.href}/`);
-  const current = groups.flatMap(([, items]) => items).find((i) => active(i));
+  const current = all.find((i) => active(i));
+  // A third crumb for a page below a section: a session's id.
+  const rest =
+    current && !current.exact ? pathname.slice(current.href.length + 1) : "";
 
   return (
     <SidebarProvider>
       <Sidebar collapsible="icon" variant="inset">
-        <SidebarHeader>
+        <SidebarHeader className="pt-3">
           <SidebarMenu>
             <SidebarMenuItem>
-              <SidebarMenuButton size="lg" asChild>
+              <SidebarMenuButton
+                size="lg"
+                asChild
+                className="hover:bg-transparent"
+              >
                 <Link href={base}>
                   <Logo />
                 </Link>
@@ -126,8 +145,20 @@ export function Shell({
                         asChild
                         isActive={active(item)}
                         tooltip={item.label}
+                        className="relative data-[active=true]:font-medium"
                       >
                         <Link href={item.href}>
+                          {active(item) && (
+                            <motion.span
+                              layoutId="nav-active"
+                              className="absolute inset-y-1.5 -left-2 w-0.5 rounded-full bg-primary"
+                              transition={{
+                                type: "spring",
+                                stiffness: 500,
+                                damping: 40,
+                              }}
+                            />
+                          )}
                           <item.icon />
                           <span>{item.label}</span>
                         </Link>
@@ -144,27 +175,35 @@ export function Shell({
             <SidebarMenuItem>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <SidebarMenuButton size="lg">
-                    <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-sidebar-accent text-xs font-semibold uppercase">
+                  <SidebarMenuButton
+                    size="lg"
+                    className="border bg-sidebar-accent/40 data-[state=open]:bg-sidebar-accent"
+                  >
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-primary to-chart-3 text-xs font-semibold text-white uppercase">
                       {project.slice(0, 2)}
                     </span>
                     <span className="grid flex-1 text-left text-sm leading-tight">
                       <span className="truncate font-medium">{project}</span>
                       <span className="truncate text-xs text-muted-foreground">
                         {org}
-                        {admin ? " · admin" : ""}
                       </span>
                     </span>
-                    <ChevronsUpDown className="ml-auto size-4" />
+                    <ChevronsUpDown className="ml-auto size-4 opacity-60" />
                   </SidebarMenuButton>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start" className="w-56">
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Signed in to {project}
+                <DropdownMenuContent side="top" align="start" className="w-60">
+                  <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                    {project}
+                    {admin ? " · admin" : ""}
                   </DropdownMenuLabel>
                   <DropdownMenuItem asChild>
                     <Link href={`${base}/settings`}>
                       <Settings /> Settings
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <Link href={`${base}/api-keys`}>
+                      <KeyRound /> API keys
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
@@ -182,16 +221,59 @@ export function Shell({
         </SidebarFooter>
         <SidebarRail />
       </Sidebar>
-      <SidebarInset>
-        <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+      <SidebarInset className="min-w-0">
+        <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-3 rounded-t-xl border-b bg-background/80 px-4 backdrop-blur">
           <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-1 !h-4" />
-          <span className="text-sm font-medium">{current?.label ?? ""}</span>
-          <div className="ml-auto">
+          <Separator orientation="vertical" className="!h-4" />
+          <Breadcrumb className="min-w-0">
+            <BreadcrumbList>
+              <BreadcrumbItem className="hidden md:block">
+                <BreadcrumbLink asChild>
+                  <Link href={base}>{project}</Link>
+                </BreadcrumbLink>
+              </BreadcrumbItem>
+              {current && (
+                <>
+                  <BreadcrumbSeparator className="hidden md:block" />
+                  <BreadcrumbItem>
+                    {rest ? (
+                      <BreadcrumbLink asChild>
+                        <Link href={current.href}>{current.label}</Link>
+                      </BreadcrumbLink>
+                    ) : (
+                      <BreadcrumbPage>{current.label}</BreadcrumbPage>
+                    )}
+                  </BreadcrumbItem>
+                </>
+              )}
+              {rest && (
+                <>
+                  <BreadcrumbSeparator />
+                  <BreadcrumbItem>
+                    <BreadcrumbPage className="font-mono text-xs">
+                      {shortId(decodeURIComponent(rest))}
+                    </BreadcrumbPage>
+                  </BreadcrumbItem>
+                </>
+              )}
+            </BreadcrumbList>
+          </Breadcrumb>
+          <div className="ml-auto flex items-center gap-2">
+            <div className="hidden w-64 sm:block">
+              <CommandMenu items={all} base={base} />
+            </div>
             <ThemeToggle />
           </div>
         </header>
-        <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">{children}</div>
+        <motion.div
+          key={pathname}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, ease: "easeOut" }}
+          className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 md:p-8"
+        >
+          {children}
+        </motion.div>
       </SidebarInset>
     </SidebarProvider>
   );
@@ -202,7 +284,12 @@ export function ThemeToggle() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="Theme">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          aria-label="Theme"
+        >
           <Sun className="size-4 scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
           <Moon className="absolute size-4 scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
         </Button>

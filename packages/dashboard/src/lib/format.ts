@@ -82,3 +82,28 @@ export const isLive = (s: SessionStatus) => LIVE_STATUSES.includes(s);
 
 export const humanize = (s: string) =>
   s.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
+
+/** `ses_01m463e1yj…2xcr`: enough to recognise, short enough for a table. */
+export const shortId = (id: string) =>
+  id.length > 18 ? `${id.slice(0, 12)}…${id.slice(-4)}` : id;
+
+/** The p-th percentile (0-100) of the values, or null if there are none. */
+export function percentile(values: number[], p: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const i = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil((p / 100) * sorted.length) - 1),
+  );
+  return sorted[i]!;
+}
+
+/** Percent change from `before` to `now`, or null when there is nothing to compare with. */
+export function change(now: number, before: number): number | null {
+  if (before === 0) return null;
+  return ((now - before) / before) * 100;
+}
+
+export function formatMs(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+}

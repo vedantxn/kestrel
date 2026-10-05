@@ -5,7 +5,7 @@ import { PageHeader } from "@kestrel/dashboard/components/page-header";
 import { SessionsTable } from "@kestrel/dashboard/components/sessions-table";
 import { Button } from "@kestrel/dashboard/components/ui/button";
 import type { KestrelClient } from "@kestrel/dashboard/lib/client";
-import { cn } from "@kestrel/dashboard/lib/utils";
+import { Segmented } from "@kestrel/dashboard/components/segmented";
 
 const FILTERS: { label: string; status?: SessionStatus }[] = [
   { label: "All" },
@@ -49,20 +49,14 @@ export async function SessionsPage({
         title="Sessions"
         description="Every browser this project has started, newest first."
       />
-      <nav className="flex flex-wrap gap-1 rounded-lg bg-muted p-1 text-sm sm:w-fit">
-        {FILTERS.map((f) => (
-          <Link
-            key={f.label}
-            href={href({ status: f.status })}
-            className={cn(
-              "rounded-md px-3 py-1 text-muted-foreground transition-colors hover:text-foreground",
-              status === f.status && "bg-background text-foreground shadow-sm",
-            )}
-          >
-            {f.label}
-          </Link>
-        ))}
-      </nav>
+      <Segmented
+        options={FILTERS.map((f) => ({
+          label: f.label,
+          value: f.status ?? "",
+        }))}
+        value={status ?? ""}
+        href={(v) => href({ status: v || undefined })}
+      />
       <SessionsTable
         sessions={page.data}
         base={base}

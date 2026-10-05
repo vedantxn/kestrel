@@ -24,6 +24,7 @@
     "@kestrel/contracts": "*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
     "cn": "^0.4.0",
     "lucide-react": "^1.52.0",
     "motion": "^14.0.0",

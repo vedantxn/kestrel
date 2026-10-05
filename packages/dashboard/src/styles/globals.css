@@ -7,80 +7,83 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Kestrel's theme: neutral zinc surfaces with a rufous accent (the colour of a kestrel's back).
- * Dark is the default; light is supported. Colours are tokens so the app never names a hex.
+ * Kestrel's theme. Neutral surfaces in three steps (sidebar, page, card) so depth comes from
+ * tone rather than borders alone; one accent, rufous orange (a kestrel's back), used sparingly
+ * for the primary action, focus and the main data series. Dark is the default.
  */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(0.99 0.002 75);
-  --foreground: oklch(0.2 0.01 60);
+  --radius: 0.75rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.18 0.005 285);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.2 0.01 60);
+  --card-foreground: oklch(0.18 0.005 285);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.2 0.01 60);
-  --primary: oklch(0.62 0.17 45);
-  --primary-foreground: oklch(0.99 0.01 75);
-  --secondary: oklch(0.96 0.005 75);
-  --secondary-foreground: oklch(0.25 0.01 60);
-  --muted: oklch(0.96 0.005 75);
-  --muted-foreground: oklch(0.52 0.015 60);
-  --accent: oklch(0.95 0.02 60);
-  --accent-foreground: oklch(0.3 0.05 45);
+  --popover-foreground: oklch(0.18 0.005 285);
+  --primary: oklch(0.64 0.19 45);
+  --primary-foreground: oklch(0.99 0.005 75);
+  --secondary: oklch(0.965 0.002 285);
+  --secondary-foreground: oklch(0.25 0.005 285);
+  --muted: oklch(0.965 0.002 285);
+  --muted-foreground: oklch(0.52 0.01 285);
+  --accent: oklch(0.955 0.003 285);
+  --accent-foreground: oklch(0.2 0.005 285);
   --destructive: oklch(0.58 0.22 27);
-  --border: oklch(0.91 0.006 75);
-  --input: oklch(0.91 0.006 75);
-  --ring: oklch(0.62 0.17 45);
+  --border: oklch(0.92 0.003 285);
+  --input: oklch(0.92 0.003 285);
+  --ring: oklch(0.64 0.19 45);
   --success: oklch(0.6 0.15 155);
-  --warning: oklch(0.75 0.15 80);
-  --chart-1: oklch(0.62 0.17 45);
-  --chart-2: oklch(0.6 0.12 200);
-  --chart-3: oklch(0.55 0.15 280);
-  --chart-4: oklch(0.7 0.14 140);
-  --chart-5: oklch(0.65 0.2 15);
-  --sidebar: oklch(0.975 0.004 75);
-  --sidebar-foreground: oklch(0.25 0.01 60);
-  --sidebar-primary: oklch(0.62 0.17 45);
-  --sidebar-primary-foreground: oklch(0.99 0.01 75);
-  --sidebar-accent: oklch(0.94 0.008 75);
-  --sidebar-accent-foreground: oklch(0.2 0.01 60);
-  --sidebar-border: oklch(0.91 0.006 75);
-  --sidebar-ring: oklch(0.62 0.17 45);
+  --warning: oklch(0.72 0.16 70);
+  --info: oklch(0.6 0.13 245);
+  --chart-1: oklch(0.64 0.19 45);
+  --chart-2: oklch(0.6 0.13 245);
+  --chart-3: oklch(0.58 0.16 290);
+  --chart-4: oklch(0.65 0.14 160);
+  --chart-5: oklch(0.62 0.2 15);
+  --sidebar: oklch(0.975 0.002 285);
+  --sidebar-foreground: oklch(0.3 0.005 285);
+  --sidebar-primary: oklch(0.64 0.19 45);
+  --sidebar-primary-foreground: oklch(0.99 0.005 75);
+  --sidebar-accent: oklch(0.93 0.003 285);
+  --sidebar-accent-foreground: oklch(0.18 0.005 285);
+  --sidebar-border: oklch(0.92 0.003 285);
+  --sidebar-ring: oklch(0.64 0.19 45);
 }
 
 .dark {
-  --background: oklch(0.155 0.006 60);
-  --foreground: oklch(0.96 0.005 75);
-  --card: oklch(0.19 0.007 60);
-  --card-foreground: oklch(0.96 0.005 75);
-  --popover: oklch(0.2 0.007 60);
-  --popover-foreground: oklch(0.96 0.005 75);
-  --primary: oklch(0.7 0.16 48);
-  --primary-foreground: oklch(0.18 0.02 45);
-  --secondary: oklch(0.25 0.008 60);
-  --secondary-foreground: oklch(0.96 0.005 75);
-  --muted: oklch(0.24 0.008 60);
-  --muted-foreground: oklch(0.68 0.012 70);
-  --accent: oklch(0.27 0.025 50);
-  --accent-foreground: oklch(0.93 0.03 60);
+  --background: oklch(0.165 0.004 285);
+  --foreground: oklch(0.97 0.002 285);
+  --card: oklch(0.195 0.005 285);
+  --card-foreground: oklch(0.97 0.002 285);
+  --popover: oklch(0.2 0.005 285);
+  --popover-foreground: oklch(0.97 0.002 285);
+  --primary: oklch(0.72 0.17 50);
+  --primary-foreground: oklch(0.17 0.02 45);
+  --secondary: oklch(0.24 0.005 285);
+  --secondary-foreground: oklch(0.97 0.002 285);
+  --muted: oklch(0.235 0.005 285);
+  --muted-foreground: oklch(0.66 0.01 285);
+  --accent: oklch(0.25 0.006 285);
+  --accent-foreground: oklch(0.97 0.002 285);
   --destructive: oklch(0.66 0.2 25);
-  --border: oklch(1 0 0 / 9%);
-  --input: oklch(1 0 0 / 13%);
-  --ring: oklch(0.7 0.16 48);
-  --success: oklch(0.72 0.15 155);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 11%);
+  --ring: oklch(0.72 0.17 50);
+  --success: oklch(0.74 0.16 155);
   --warning: oklch(0.8 0.15 80);
-  --chart-1: oklch(0.7 0.16 48);
-  --chart-2: oklch(0.7 0.11 200);
-  --chart-3: oklch(0.66 0.14 285);
-  --chart-4: oklch(0.75 0.14 140);
+  --info: oklch(0.72 0.12 245);
+  --chart-1: oklch(0.72 0.17 50);
+  --chart-2: oklch(0.72 0.12 245);
+  --chart-3: oklch(0.68 0.15 295);
+  --chart-4: oklch(0.75 0.14 160);
   --chart-5: oklch(0.68 0.19 15);
-  --sidebar: oklch(0.17 0.006 60);
-  --sidebar-foreground: oklch(0.93 0.005 75);
-  --sidebar-primary: oklch(0.7 0.16 48);
-  --sidebar-primary-foreground: oklch(0.18 0.02 45);
-  --sidebar-accent: oklch(0.24 0.01 60);
-  --sidebar-accent-foreground: oklch(0.96 0.005 75);
-  --sidebar-border: oklch(1 0 0 / 8%);
-  --sidebar-ring: oklch(0.7 0.16 48);
+  --sidebar: oklch(0.13 0.003 285);
+  --sidebar-foreground: oklch(0.82 0.005 285);
+  --sidebar-primary: oklch(0.72 0.17 50);
+  --sidebar-primary-foreground: oklch(0.17 0.02 45);
+  --sidebar-accent: oklch(0.21 0.005 285);
+  --sidebar-accent-foreground: oklch(0.98 0.002 285);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-ring: oklch(0.72 0.17 50);
 }
 
 @theme inline {
@@ -106,6 +109,7 @@
   --color-ring: var(--ring);
   --color-success: var(--success);
   --color-warning: var(--warning);
+  --color-info: var(--info);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -143,5 +147,9 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--primary) 35%, transparent);
   }
 }

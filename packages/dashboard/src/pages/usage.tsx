@@ -1,19 +1,11 @@
-import { Activity, Clock, Layers, ShieldAlert } from "lucide-react";
-import Link from "next/link";
-import { DailyBars } from "@kestrel/dashboard/components/charts";
+import { Clock, Layers, ShieldAlert, TriangleAlert } from "lucide-react";
+import { DailyChart } from "@kestrel/dashboard/components/charts";
 import { PageHeader } from "@kestrel/dashboard/components/page-header";
+import { Panel } from "@kestrel/dashboard/components/panel";
 import { Stat } from "@kestrel/dashboard/components/stat";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@kestrel/dashboard/components/ui/card";
-import { Progress } from "@kestrel/dashboard/components/ui/progress";
 import type { KestrelClient } from "@kestrel/dashboard/lib/client";
 import { humanize } from "@kestrel/dashboard/lib/format";
-import { cn } from "@kestrel/dashboard/lib/utils";
+import { Segmented } from "@kestrel/dashboard/components/segmented";
 
 const RANGES = [7, 30, 90] as const;
 
@@ -34,8 +26,9 @@ export async function UsagePage({
     client.usage(days),
     client.project(),
   ]);
-  const maxReason = Math.max(1, ...usage.byEndReason.map((r) => r.sessions));
+  const ended = usage.byEndReason.reduce((n, r) => n + r.sessions, 0);
   const q = project.quotas;
+  const livePct = Math.min(100, (usage.live / q.maxConcurrentSessions) * 100);
 
   return (
     <>
@@ -43,34 +36,34 @@ export async function UsagePage({
         title="Usage"
         description="Whole UTC days, today included. Browser time counts on the day a session was created."
         actions={
-          <nav className="flex gap-1 rounded-lg bg-muted p-1 text-sm">
-            {RANGES.map((r) => (
-              <Link
-                key={r}
-                href={`${base}/usage?days=${r}`}
-                className={cn(
-                  "rounded-md px-3 py-1 text-muted-foreground hover:text-foreground",
-                  r === days && "bg-background text-foreground shadow-sm",
-                )}
-              >
-                {r} days
-              </Link>
-            ))}
-          </nav>
+          <Segmented
+            options={RANGES.map((r) => ({
+              label: `${r} days`,
+              value: String(r),
+            }))}
+            value={String(days)}
+            href={(v) => `${base}/usage?days=${v}`}
+          />
         }
       />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Stat label="Sessions" value={usage.totals.sessions} icon={Layers} />
+        <Stat
+          label="Sessions"
+          value={usage.totals.sessions}
+          icon={Layers}
+          trend={usage.days.map((d) => d.sessions)}
+        />
         <Stat
           label="Browser time"
           value={Math.round(usage.totals.browserSeconds / 60)}
           unit="min"
           icon={Clock}
+          trend={usage.days.map((d) => d.browserSeconds)}
         />
         <Stat
           label="Failed"
           value={usage.totals.failed}
-          icon={Activity}
+          icon={TriangleAlert}
           hint={
             usage.totals.sessions
               ? `${((usage.totals.failed / usage.totals.sessions) * 100).toFixed(1)}% of sessions`
@@ -81,83 +74,67 @@ export async function UsagePage({
           label="Met a CAPTCHA"
           value={usage.totals.captchaSessions}
           icon={ShieldAlert}
+          hint={
+            usage.totals.sessions
+              ? `${((usage.totals.captchaSessions / usage.totals.sessions) * 100).toFixed(1)}% of sessions`
+              : undefined
+          }
         />
       </div>
       <div className="grid gap-4 xl:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Sessions per day</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <DailyBars
-              label="Sessions"
-              data={usage.days.map((d) => ({
-                date: d.date,
-                value: d.sessions,
-              }))}
-            />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>Browser minutes per day</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <DailyBars
-              label="Browser time"
-              unit="min"
-              data={usage.days.map((d) => ({
-                date: d.date,
-                value: Math.round((d.browserSeconds / 60) * 10) / 10,
-              }))}
-            />
-          </CardContent>
-        </Card>
+        <Panel title="Sessions per day">
+          <DailyChart
+            label="Sessions"
+            data={usage.days.map((d) => ({ date: d.date, value: d.sessions }))}
+          />
+        </Panel>
+        <Panel title="Browser minutes per day">
+          <DailyChart
+            label="Browser time"
+            unit="min"
+            data={usage.days.map((d) => ({
+              date: d.date,
+              value: Math.round((d.browserSeconds / 60) * 10) / 10,
+            }))}
+          />
+        </Panel>
       </div>
       <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>Why sessions ended</CardTitle>
-            <CardDescription>
-              Sessions in the range that have ended
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {usage.byEndReason.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                Nothing has ended yet.
-              </p>
-            ) : (
-              <ul className="space-y-2.5">
-                {usage.byEndReason.map((r) => (
-                  <li
-                    key={r.endReason}
-                    className="grid grid-cols-[10rem_1fr_3rem] items-center gap-3 text-sm"
-                  >
-                    <span className="truncate text-muted-foreground">
-                      {humanize(r.endReason)}
-                    </span>
-                    <span className="h-2 overflow-hidden rounded-full bg-muted">
-                      <span
-                        className="block h-full rounded-full bg-chart-1"
-                        style={{ width: `${(r.sessions / maxReason) * 100}%` }}
-                      />
-                    </span>
-                    <span className="text-right tabular-nums">
+        <Panel
+          className="lg:col-span-2"
+          title="Why sessions ended"
+          description={`${ended.toLocaleString("en-US")} sessions ended in the range`}
+        >
+          {usage.byEndReason.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Nothing has ended yet.
+            </p>
+          ) : (
+            <ul className="space-y-3">
+              {usage.byEndReason.map((r) => (
+                <li key={r.endReason} className="space-y-1.5 text-sm">
+                  <div className="flex justify-between">
+                    <span>{humanize(r.endReason)}</span>
+                    <span className="text-muted-foreground tabular-nums">
                       {r.sessions}
+                      <span className="ml-2 inline-block w-12 text-right">
+                        {((r.sessions / ended) * 100).toFixed(1)}%
+                      </span>
                     </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>Quotas</CardTitle>
-            <CardDescription>Set per project by the operator</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-5 text-sm">
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-chart-1"
+                      style={{ width: `${(r.sessions / ended) * 100}%` }}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
+        <Panel title="Limits" description="Set per project by the operator">
+          <div className="space-y-5 text-sm">
             <div className="space-y-2">
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Live sessions</span>
@@ -165,14 +142,19 @@ export async function UsagePage({
                   {usage.live} / {q.maxConcurrentSessions}
                 </span>
               </div>
-              <Progress value={(usage.live / q.maxConcurrentSessions) * 100} />
+              <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-chart-1"
+                  style={{ width: `${livePct}%` }}
+                />
+              </div>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between border-t pt-4">
               <span className="text-muted-foreground">Creates per minute</span>
               <span className="tabular-nums">{q.createsPerMinute}</span>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </Panel>
       </div>
     </>
   );

@@ -41,10 +41,10 @@ export async function ApiKeysPage({
         description={`${active} active. A key has full access to this project's sessions; keep it out of browsers and repositories.`}
         actions={<CreateKeyDialog create={actions.createApiKey} />}
       />
-      <div className="overflow-hidden rounded-lg border">
+      <div className="overflow-hidden rounded-xl border bg-card">
         <Table>
           <TableHeader>
-            <TableRow className="bg-muted/40 hover:bg-muted/40">
+            <TableRow className="bg-muted/30 hover:bg-muted/30">
               <TableHead>Name</TableHead>
               <TableHead>Key</TableHead>
               <TableHead className="hidden md:table-cell">Created</TableHead>
