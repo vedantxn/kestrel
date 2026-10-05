@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CaptchaClearedData, CaptchaDetectedData } from "./captcha.js";
 import { EventId, NodeId, SessionId } from "./ids.js";
 import { EndReason, SessionStatus, StartPath } from "./session.js";
 
@@ -76,6 +77,16 @@ export const EventBody = z.discriminatedUnion("type", [
     type: z.literal("node.lost"),
     data: z.object({ nodeId: NodeId }),
   }),
+  /** A CAPTCHA from a known provider appeared in a page (docs/lld/captcha.md). */
+  z.object({
+    type: z.literal("captcha.detected"),
+    data: CaptchaDetectedData,
+  }),
+  /** It went away: removed, navigated from, or its tab closed. Not necessarily solved. */
+  z.object({
+    type: z.literal("captcha.cleared"),
+    data: CaptchaClearedData,
+  }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 export type EventType = EventBody["type"];
@@ -86,6 +97,8 @@ export const NODE_REPORTABLE_EVENT_TYPES = [
   "session.detached",
   "egress.denied",
   "runtime.crashed",
+  "captcha.detected",
+  "captcha.cleared",
 ] as const satisfies readonly EventType[];
 
 export const SessionEvent = z

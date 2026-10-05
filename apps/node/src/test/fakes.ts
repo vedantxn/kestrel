@@ -15,6 +15,7 @@ import {
   type RegisterResponse,
   type ReportsRequest,
   type ReportsResponse,
+  type RuntimeCaptcha,
   type RuntimeHealth,
   type StartRequest,
 } from "@kestrel/contracts";
@@ -184,6 +185,15 @@ export class FakeRuntime implements RuntimeClient {
     this.calls.push({ op: `computer:${req.action}`, address });
     if (!this.alive(address)) throw new Error("connection refused");
     return { ok: true, width: 1280, height: 720, url: "about:blank" };
+  }
+  /** What `GET /captcha` answers per address: default nothing showing; null is an older runtimed. */
+  captchaAnswers = new Map<string, RuntimeCaptcha | null | "fail">();
+  async captcha(address: string): Promise<RuntimeCaptcha | null> {
+    this.calls.push({ op: "captcha", address });
+    if (!this.alive(address)) throw new Error("connection refused");
+    const a = this.captchaAnswers.get(address);
+    if (a === "fail") throw new Error("runtime /captcha: timed out");
+    return a === undefined ? { watching: true, detections: [] } : a;
   }
   async stopRecording(address: string): Promise<void> {
     this.calls.push({ op: "stopRecording", address });

@@ -1,6 +1,7 @@
 import { chmodSync, closeSync, existsSync, openSync } from "node:fs";
 import Database from "better-sqlite3";
 import type {
+  CaptchaProvider,
   EndReason,
   Report,
   StartNetwork,
@@ -78,6 +79,7 @@ CREATE TABLE IF NOT EXISTS reports (
   body TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stops (session_id TEXT PRIMARY KEY, until INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS captcha (session_id TEXT PRIMARY KEY, providers TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recordings (
   session_id TEXT PRIMARY KEY,
   volume TEXT NOT NULL,
@@ -233,6 +235,49 @@ export class Store {
 
   deleteBinding(sessionId: string): void {
     this.db.prepare("DELETE FROM sessions WHERE session_id = ?").run(sessionId);
+    this.db.prepare("DELETE FROM captcha WHERE session_id = ?").run(sessionId);
+  }
+
+  // --- CAPTCHAs (docs/lld/captcha.md) --------------------------------------------------------
+
+  /** The providers last reported for a session. */
+  getCaptcha(sessionId: string): CaptchaProvider[] {
+    const r = this.db
+      .prepare("SELECT providers FROM captcha WHERE session_id = ?")
+      .get(sessionId) as { providers: string } | undefined;
+    return r ? (JSON.parse(r.providers) as CaptchaProvider[]) : [];
+  }
+
+  /**
+   * Record a session's new CAPTCHA state together with the events that report it, in one
+   * transaction, or nothing at all: when the session is no longer ready, or the report queue has
+   * no room for every event (the next poll tries again, T-50).
+   */
+  recordCaptcha(
+    sessionId: string,
+    providers: CaptchaProvider[],
+    events: ((id: string) => Report)[],
+  ): boolean {
+    return this.db.transaction(() => {
+      const b = this.db
+        .prepare("SELECT state FROM sessions WHERE session_id = ?")
+        .get(sessionId) as { state: string } | undefined;
+      if (b?.state !== "ready") return false;
+      if (this.pendingReportCount() + events.length > Store.MAX_PENDING_EVENTS)
+        return false;
+      if (providers.length)
+        this.db
+          .prepare(
+            "INSERT INTO captcha(session_id, providers) VALUES(?, ?) ON CONFLICT(session_id) DO UPDATE SET providers = excluded.providers",
+          )
+          .run(sessionId, JSON.stringify(providers));
+      else
+        this.db
+          .prepare("DELETE FROM captcha WHERE session_id = ?")
+          .run(sessionId);
+      for (const make of events) this.enqueueReport(make);
+      return true;
+    })();
   }
 
   // --- pool -----------------------------------------------------------------------------------

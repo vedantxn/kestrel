@@ -1,3 +1,5 @@
+import type { CaptchaProvider } from "@kestrel/contracts";
+
 /**
  * W2. The live-view page at `/live/<session id>`. Static: everything it needs (the gateway's
  * socket address and the token) is in the URL fragment, which the browser never sends to a
@@ -12,6 +14,16 @@ export const LIVE_PAGE_HEADERS = {
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; connect-src wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 } as const;
 
+/** What the viewer calls each CAPTCHA provider. Every provider has one (checked by a test). */
+export const CAPTCHA_LABELS: Record<CaptchaProvider, string> = {
+  recaptcha: "reCAPTCHA",
+  hcaptcha: "hCaptcha",
+  turnstile: "Cloudflare Turnstile",
+  cloudflare_challenge: "Cloudflare challenge page",
+  arkose: "Arkose",
+  datadome: "DataDome",
+};
+
 export const LIVE_PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kestrel live view</title>
@@ -21,10 +33,13 @@ export const LIVE_PAGE = `<!doctype html>
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
 header{display:flex;gap:12px;align-items:center;padding:8px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 #status{color:var(--muted)} select{max-width:50vw}
+#captcha{margin:0;padding:8px 16px;background:#fff4c2;color:#3d3200;border-bottom:1px solid #e6d27a}
+@media (prefers-color-scheme:dark){#captcha{background:#3d3200;color:#fff4c2;border-color:#6b5a10}}
 main{display:flex;justify-content:center;align-items:flex-start;padding:16px}
 canvas{max-width:100%;height:auto;border:1px solid var(--line);outline:none}
 </style></head><body>
 <header><strong>Kestrel live view</strong><span id="mode"></span><select id="tabs" aria-label="Tab"></select><span id="status">connecting…</span></header>
+<p id="captcha" role="status" hidden></p>
 <main><canvas id="screen" tabindex="0" width="1280" height="720"></canvas></main>
 <script>
 (function(){
@@ -38,6 +53,9 @@ canvas{max-width:100%;height:auto;border:1px solid var(--line);outline:none}
   try { scope = JSON.parse(atob(token.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))).scope; } catch (e) {}
   var control = scope === "control";
   modeEl.textContent = control ? "· control" : "· view only";
+  var captchaEl = document.getElementById("captcha");
+  // Fixed labels: anything else a page or the container sends is ignored (T-52).
+  var LABELS = ${JSON.stringify(CAPTCHA_LABELS)};
   var ws = new WebSocket(wsUrl + "?token=" + encodeURIComponent(token));
   var page = { w: 1280, h: 720 };
   ws.onopen = function(){ status.textContent = "live"; };
@@ -52,6 +70,12 @@ canvas{max-width:100%;height:auto;border:1px solid var(--line);outline:none}
       };
       img.src = "data:image/jpeg;base64," + m.data;
       page = { w: m.width, h: m.height };
+    } else if (m.type === "captcha") {
+      var names = (Array.isArray(m.providers) ? m.providers : []).filter(function(p){ return Object.prototype.hasOwnProperty.call(LABELS, p); }).map(function(p){ return LABELS[p]; });
+      captchaEl.hidden = names.length === 0;
+      captchaEl.textContent = names.length === 0 ? "" : control
+        ? "A CAPTCHA (" + names.join(", ") + ") is showing. Solve it here; the agent continues when you are done."
+        : "A CAPTCHA (" + names.join(", ") + ") is showing. This link is view only: ask for a control link to solve it.";
     } else if (m.type === "tabs") {
       tabs.textContent = "";
       m.tabs.forEach(function(t){ var o = document.createElement("option"); o.value = t.id; o.textContent = (t.title || t.url || t.id).slice(0, 80); o.selected = !!t.active; tabs.appendChild(o); });

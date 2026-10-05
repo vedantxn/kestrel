@@ -2,6 +2,7 @@ import { z } from "zod";
 import { LIMITS } from "./timings.js";
 import { HostPattern } from "./host-pattern.js";
 import { NodeId, SessionId } from "./ids.js";
+import { SessionCaptcha } from "./captcha.js";
 import { PlainText } from "./plain-text.js";
 import { ProxyConfig, SessionProxy } from "./proxy.js";
 
@@ -225,6 +226,7 @@ export const Session = z
     nodeId: NodeId.nullable(),
     startPath: StartPath.nullable(),
     usage: z.object({ browserSeconds: z.number().nonnegative() }),
+    captcha: SessionCaptcha.nullable(),
   })
   .meta({ id: "Session" });
 export type Session = z.infer<typeof Session>;

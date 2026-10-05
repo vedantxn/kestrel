@@ -137,6 +137,8 @@ model Session {
   readyAt           DateTime?      @map("ready_at") @db.Timestamptz(3)
   stoppingAt        DateTime?      @map("stopping_at") @db.Timestamptz(3)
   endedAt           DateTime?      @map("ended_at") @db.Timestamptz(3)
+  /// The CAPTCHAs present now ({providers, since}), set from the node's captcha.* events with them.
+  captcha           Json?
   project           Project        @relation(fields: [projectId], references: [id])
   apiKey            ApiKey         @relation(fields: [apiKeyId], references: [id])
   node              Node?          @relation(fields: [nodeId], references: [id])

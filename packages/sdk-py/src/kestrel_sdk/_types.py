@@ -56,6 +56,17 @@ EventType = Literal[
     "egress.denied",
     "runtime.crashed",
     "node.lost",
+    "captcha.detected",
+    "captcha.cleared",
+]
+
+CaptchaProvider = Literal[
+    "recaptcha",
+    "hcaptcha",
+    "turnstile",
+    "cloudflare_challenge",
+    "arkose",
+    "datadome",
 ]
 
 # `cdp` re-issues a connect URL; `view` opens live view; `control` opens it with input.
@@ -180,6 +191,19 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class SessionCaptcha:
+    """A CAPTCHA from a known provider is showing on a page. It may already be solved: a solved
+    checkbox stays until the page moves on. Hand a person a control live-view link."""
+
+    providers: list[str]
+    since: datetime
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> SessionCaptcha:
+        return cls(providers=list(d["providers"]), since=_time(d["since"]))  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
 class Session:
     id: str
     status: str
@@ -196,6 +220,7 @@ class Session:
     node_id: str | None
     start_path: str | None
     usage: Usage
+    captcha: SessionCaptcha | None
     raw: dict[str, Any] = field(repr=False, compare=False)
 
     @classmethod
@@ -214,6 +239,7 @@ class Session:
             node_id=d.get("nodeId"),
             start_path=d.get("startPath"),
             usage=Usage(browser_seconds=d["usage"]["browserSeconds"]),
+            captcha=SessionCaptcha.from_dict(d["captcha"]) if d.get("captcha") else None,
             raw=dict(d),
         )
 

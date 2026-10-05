@@ -1,6 +1,7 @@
 import {
   LIMITS,
   NodeId,
+  SessionCaptcha,
   SessionOptions,
   TIMINGS,
   COMPUTER_LIMITS,
@@ -99,7 +100,15 @@ export async function toApiSession(
         ? row.startPath
         : null,
     usage: { browserSeconds: row.browserSeconds },
+    captcha: liveCaptcha(row),
   };
+}
+
+/** The CAPTCHA field only means something while the session runs. */
+function liveCaptcha(row: SessionRow): Session["captcha"] {
+  if (row.status !== "ready" && row.status !== "active") return null;
+  const c = SessionCaptcha.safeParse(row.captcha);
+  return c.success ? c.data : null;
 }
 
 // --- Create -----------------------------------------------------------------------------

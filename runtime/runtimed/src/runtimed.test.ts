@@ -1,11 +1,12 @@
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { PROOF_HEADER } from "@kestrel/contracts";
+import { PROOF_HEADER, RuntimeCaptcha } from "@kestrel/contracts";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyViewport, ViewportSizer } from "./cdp.js";
 import { chromeArgs } from "./chrome-args.js";
 import { Tabs } from "./page.js";
+import { CaptchaWatcher } from "./captcha.js";
 import { ControlServer } from "./control.js";
 import { CdpForward } from "./forward.js";
 import { Supervisor, type Proc, type SpawnFn } from "./supervisor.js";
@@ -545,7 +546,7 @@ describe("the supervisor (R4-R6)", () => {
 });
 
 describe("the control API (C5)", () => {
-  async function rig(opts: { snapshot?: boolean } = {}) {
+  async function rig(opts: { snapshot?: boolean; captcha?: boolean } = {}) {
     chrome = new FakeChrome();
     const port = await chrome.start();
     const fwd = new CdpForward(port);
@@ -566,6 +567,7 @@ describe("the control API (C5)", () => {
       undefined,
       undefined,
       opts.snapshot ?? false,
+      opts.captcha ? new CaptchaWatcher(port) : undefined,
     );
     const cport = await control.listen(0, "127.0.0.1");
     closers.push(() => control.close());
@@ -610,6 +612,27 @@ describe("the control API (C5)", () => {
     expect(
       (await call("POST", "/rekey", { token: "d".repeat(48) }, fresh)).status,
     ).toBe(409);
+  });
+
+  it("answers GET /captcha only with the token and once configured; 404 without detection", async () => {
+    const { sup, call } = await rig({ captcha: true });
+    await sup.start();
+    expect((await call("GET", "/captcha", undefined, null)).status).toBe(401);
+    expect((await call("GET", "/captcha")).status).toBe(409);
+    expect(
+      (
+        await call("POST", "/configure", {
+          sessionProof: PROOF,
+          viewport: { width: 1280, height: 720 },
+        })
+      ).status,
+    ).toBe(200);
+    const res = await call("GET", "/captcha");
+    expect(res.status).toBe(200);
+    expect(RuntimeCaptcha.parse(res.json).detections).toEqual([]);
+    const old = await rig();
+    await old.sup.start();
+    expect((await old.call("GET", "/captcha")).status).toBe(404);
   });
 
   it("has nothing to rekey when it is not a snapshot clone", async () => {

@@ -31,6 +31,8 @@ ok<SameShape<C.Viewport, S.Viewport>>();
 ok<SameShape<C.NetworkPolicy, S.NetworkPolicy>>();
 ok<SameShape<C.SessionOptions, S.SessionOptions>>();
 ok<SameShape<C.SessionProxy, S.SessionProxy>>();
+ok<SameShape<C.CaptchaProvider, S.CaptchaProvider>>();
+ok<SameShape<C.SessionCaptcha, S.SessionCaptcha>>();
 ok<SameShape<z.input<typeof C.ProxyConfig>, S.ProxyConfig>>();
 ok<SameShape<z.input<typeof C.CreateSessionRequest>, S.CreateSessionRequest>>();
 ok<SameShape<C.Session, S.Session>>();
@@ -86,6 +88,7 @@ describe("SDK types", () => {
       nodeId: "a",
       startPath: "hot",
       usage: { browserSeconds: 0 },
+      captcha: null,
     });
     expect(parsed.options.timeout).toBe(C.LIMITS.defaultSessionTimeoutMs);
   });

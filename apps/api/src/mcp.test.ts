@@ -243,6 +243,25 @@ describe("session tools", () => {
     );
   });
 
+  it("get_session shows a CAPTCHA a node reported", async () => {
+    const c = await connect();
+    const created = session(await call(c, "create_session"));
+    const node = env.nodes[created.nodeId as string]!;
+    node.report(created.id, {
+      type: "captcha.detected",
+      data: {
+        provider: "turnstile",
+        host: "a.example",
+        present: ["turnstile"],
+      },
+    });
+    await node.flushReports(env.internal);
+    const got = session(
+      await call(c, "get_session", { sessionId: created.id }),
+    );
+    expect(got.captcha?.providers).toEqual(["turnstile"]);
+  });
+
   it("is scoped to the key's project", async () => {
     const mine = session(await call(await connect(), "create_session"));
     const other = await connect(env.project2.key);

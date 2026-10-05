@@ -32,6 +32,7 @@ function session(overrides: Partial<Session> = {}): Session {
     nodeId: "a",
     startPath: "hot",
     usage: { browserSeconds: 3 },
+    captcha: null,
     ...overrides,
   };
 }
@@ -166,6 +167,26 @@ describe("sessions", () => {
     );
     expect(noProxy.code).toBe(2);
     expect(noProxy.calls).toHaveLength(0);
+  });
+
+  it("get shows a CAPTCHA that is showing", async () => {
+    const r = await cli(["sessions", "get", ID], () => ({
+      status: 200,
+      body: session({
+        captcha: {
+          providers: ["recaptcha", "turnstile"],
+          since: "2026-10-05T10:00:00.000Z",
+        },
+      }),
+    }));
+    expect(r.stdout).toMatch(
+      /^captcha\s+recaptcha, turnstile \(since 2026-10-05T10:00:00.000Z\)$/m,
+    );
+    const none = await cli(["sessions", "get", ID], () => ({
+      status: 200,
+      body: session(),
+    }));
+    expect(none.stdout).toMatch(/^captcha\s+-$/m);
   });
 
   it("create --json prints the API's JSON", async () => {
