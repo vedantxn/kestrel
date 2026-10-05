@@ -15,10 +15,11 @@ import { createApiKey } from "./auth.js";
 import { newUuid } from "./ids.js";
 
 /**
- * Admin commands, run on the host (A9): there is no signup or dashboard in v1.
+ * Admin commands, run on the host (A9). The dashboard (P17) signs in with a key made here.
  *
  *   admin bootstrap                       create the organisation and project if absent
- *   admin create-key [--project NAME] [--name LABEL]   print a new key, once
+ *   admin create-key [--project NAME] [--name LABEL] [--admin]   print a new key, once;
+ *                                         --admin lets it call /v1/admin/* (threat model T-57)
  *   admin revoke-key KEY_ID_OR_PREFIX     stop a key authenticating at once (threat model G-02)
  *   admin list-keys
  *   admin keygen --dir DIR                make the token signing keypair
@@ -29,6 +30,7 @@ const { positionals, values } = parseArgs({
     project: { type: "string" },
     name: { type: "string" },
     dir: { type: "string" },
+    admin: { type: "boolean" },
   },
 });
 const [command, arg] = positionals;
@@ -82,9 +84,10 @@ try {
       project.id,
       values.name ?? "cli",
       new Date(),
+      { admin: values.admin ?? false },
     );
     console.log(
-      `Key ${id} for project "${project.name}". It is shown once and cannot be recovered:\n${key}`,
+      `${values.admin ? "Admin key" : "Key"} ${id} for project "${project.name}". It is shown once and cannot be recovered:\n${key}`,
     );
   } else if (command === "revoke-key") {
     if (!arg) throw new Error("revoke-key needs a key id or prefix");
@@ -105,7 +108,7 @@ try {
       orderBy: { createdAt: "asc" },
     })) {
       console.log(
-        `${k.id}  ${k.prefix}...  ${k.name}  ${k.revokedAt ? "REVOKED" : "active"}  last used ${k.lastUsedAt?.toISOString() ?? "never"}`,
+        `${k.id}  ${k.prefix}...  ${k.name}  ${k.revokedAt ? "REVOKED" : "active"}${k.admin ? "  ADMIN" : ""}  last used ${k.lastUsedAt?.toISOString() ?? "never"}`,
       );
     }
   } else {

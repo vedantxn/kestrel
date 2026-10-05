@@ -53,7 +53,7 @@ export async function authenticate(
       data: { lastUsedAt: new Date(now) },
     });
   }
-  return { projectId: row.projectId, apiKeyId: row.id };
+  return { projectId: row.projectId, apiKeyId: row.id, admin: row.admin };
 }
 
 /** For the admin command and tests: make a key and store its hash. The key is returned once. */
@@ -62,18 +62,20 @@ export async function createApiKey(
   projectId: string,
   name: string,
   now: Date,
+  opts: { admin?: boolean } = {},
 ) {
   const key = generateApiKey();
   const id = newUuid();
-  await db.apiKey.create({
+  const row = await db.apiKey.create({
     data: {
       id,
       projectId,
       name,
       prefix: key.slice(0, 8),
       keyHash: hashKey(key),
+      admin: opts.admin ?? false,
       createdAt: now,
     },
   });
-  return { key, id };
+  return { key, id, row };
 }

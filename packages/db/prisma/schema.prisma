@@ -85,6 +85,8 @@ model ApiKey {
   prefix     String
   /// A8: lowercase hex SHA-256 of the key. The key itself is never stored.
   keyHash    String    @unique @map("key_hash")
+  /// P17: may call /v1/admin/*. Made only by the host's admin command, never through the API.
+  admin      Boolean   @default(false)
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(3)
   /// Threat model G-02: a revoked key stops authenticating at once.

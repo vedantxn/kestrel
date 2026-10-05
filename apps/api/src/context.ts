@@ -34,4 +34,6 @@ export interface Ctx {
 export interface Auth {
   projectId: string;
   apiKeyId: string;
+  /** P17: the key may call /v1/admin/*. */
+  admin: boolean;
 }

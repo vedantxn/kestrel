@@ -1,6 +1,10 @@
 import { Readable } from "node:stream";
 import {
+  AdminCreateOrgRequest,
+  AdminCreateProjectRequest,
+  CreateApiKeyRequest,
   CreateSessionRequest,
+  UsageQuery,
   HeartbeatRequest,
   ListEventsQuery,
   ComputerRequest,
@@ -27,6 +31,18 @@ import { newRequestId } from "./ids.js";
 import { LIVE_PAGE, LIVE_PAGE_HEADERS } from "./live-page.js";
 import { registerMcp, type McpOptions } from "./mcp.js";
 import { heartbeat, ingestReports, registerNode } from "./nodes.js";
+import {
+  adminCreateApiKey,
+  adminCreateOrg,
+  adminCreateProject,
+  createProjectApiKey,
+  getProject,
+  getUsage,
+  listApiKeys,
+  listNodes,
+  requireAdmin,
+  revokeApiKey,
+} from "./project.js";
 import {
   createSession,
   getSession,
@@ -278,6 +294,89 @@ export function buildPublicApp(
         (req.params as { id: string }).id,
         req.query as z.infer<typeof ListEventsQuery>,
       );
+    },
+  );
+
+  // P17: the project, its keys and usage (the dashboard reads these).
+  app.get("/v1/project", async (req) => getProject(ctx, await authed(req)));
+
+  app.get("/v1/api-keys", async (req) => listApiKeys(ctx, await authed(req)));
+
+  app.post(
+    "/v1/api-keys",
+    { schema: { body: CreateApiKeyRequest } },
+    async (req, reply) => {
+      const created = await createProjectApiKey(
+        ctx,
+        await authed(req),
+        req.body as CreateApiKeyRequest,
+      );
+      return reply
+        .status(201)
+        .header("cache-control", "no-store")
+        .send(created);
+    },
+  );
+
+  app.post("/v1/api-keys/:id/revoke", async (req) =>
+    revokeApiKey(ctx, await authed(req), (req.params as { id: string }).id),
+  );
+
+  app.get("/v1/usage", { schema: { querystring: UsageQuery } }, async (req) =>
+    getUsage(ctx, await authed(req), req.query as z.infer<typeof UsageQuery>),
+  );
+
+  // P17: admin keys only; `not_found` to any other key (threat model T-57). The check runs
+  // before body validation, so a project key cannot tell these paths exist from a 400.
+  const adminOnly = {
+    preValidation: async (req: FastifyRequest) => {
+      requireAdmin(await authed(req));
+    },
+  };
+  const adminAuth = (req: FastifyRequest): Auth => req.auth as Auth;
+
+  app.get("/v1/admin/nodes", adminOnly, async () => listNodes(ctx));
+
+  app.post(
+    "/v1/admin/orgs",
+    { ...adminOnly, schema: { body: AdminCreateOrgRequest } },
+    async (req, reply) => {
+      const org = await adminCreateOrg(
+        ctx,
+        adminAuth(req),
+        req.body as AdminCreateOrgRequest,
+      );
+      return reply.status(201).send(org);
+    },
+  );
+
+  app.post(
+    "/v1/admin/projects",
+    { ...adminOnly, schema: { body: AdminCreateProjectRequest } },
+    async (req, reply) => {
+      const project = await adminCreateProject(
+        ctx,
+        adminAuth(req),
+        req.body as AdminCreateProjectRequest,
+      );
+      return reply.status(201).send(project);
+    },
+  );
+
+  app.post(
+    "/v1/admin/projects/:id/api-keys",
+    { ...adminOnly, schema: { body: CreateApiKeyRequest } },
+    async (req, reply) => {
+      const created = await adminCreateApiKey(
+        ctx,
+        adminAuth(req),
+        (req.params as { id: string }).id,
+        req.body as CreateApiKeyRequest,
+      );
+      return reply
+        .status(201)
+        .header("cache-control", "no-store")
+        .send(created);
     },
   );
 
