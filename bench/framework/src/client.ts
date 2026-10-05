@@ -92,6 +92,13 @@ export class KestrelClient {
     return r.data.map((s) => Session.parse(s));
   }
 
+  /** Every event with its data, oldest first. */
+  async eventList(id: string): Promise<ListEventsResponse["data"]> {
+    return ListEventsResponse.parse(
+      (await this.call("GET", `/v1/sessions/${id}/events?limit=1000`)).json,
+    ).data;
+  }
+
   async events(id: string): Promise<string[]> {
     return ListEventsResponse.parse(
       (await this.call("GET", `/v1/sessions/${id}/events?limit=1000`)).json,

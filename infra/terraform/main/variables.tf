@@ -53,6 +53,12 @@ variable "enable_runner" {
   default     = false
 }
 
+variable "runner_proxy_port" {
+  description = "When above 0, the runner accepts TCP on this port from the host's Elastic IP only, for the test proxy of the upstream-proxy check (bench proxy). 0 keeps the runner outbound-only."
+  type        = number
+  default     = 0
+}
+
 variable "runner_instance_type" {
   description = "Fixed-performance, so results repeat (HLD 13.3: no burstable CPU credits)."
   type        = string
