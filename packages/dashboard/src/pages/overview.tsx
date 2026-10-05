@@ -1,6 +1,6 @@
 import type { Session } from "@kestrel/contracts";
 import {
-  ArrowRight,
+  ChevronRight,
   Clock,
   Gauge,
   KeyRound,
@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { AutoRefresh } from "@kestrel/dashboard/components/auto-refresh";
+import { BlurFade } from "@kestrel/dashboard/components/ui/blur-fade";
+import { AnimatedList } from "@kestrel/dashboard/components/ui/animated-list";
 import { DailyChart } from "@kestrel/dashboard/components/charts";
 import { PageHeader } from "@kestrel/dashboard/components/page-header";
 import { Panel } from "@kestrel/dashboard/components/panel";
@@ -74,7 +76,7 @@ export async function OverviewPage({
             </Button>
             <Button asChild size="sm">
               <Link href={`${base}/sessions`}>
-                Sessions <ArrowRight />
+                Sessions <ChevronRight />
               </Link>
             </Button>
           </>
@@ -82,40 +84,51 @@ export async function OverviewPage({
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Stat
-          label="Live now"
-          live={fortnight.live > 0}
-          value={fortnight.live}
-          icon={Radio}
-          hint={`of ${project.quotas.maxConcurrentSessions} allowed at once`}
-        />
-        <Stat
-          label="Sessions"
-          value={sessions7}
-          icon={Layers}
-          delta={change(sessions7, sum(prev.map((d) => d.sessions)))}
-          trend={fortnight.days.map((d) => d.sessions)}
-          hint={`${failed7} failed`}
-        />
-        <Stat
-          label="Browser time"
-          value={Math.round(minutes7)}
-          unit="min"
-          icon={Clock}
-          delta={change(minutes7, sum(prev.map((d) => d.browserSeconds)) / 60)}
-          trend={fortnight.days.map((d) => d.browserSeconds)}
-        />
-        <Stat
-          label="Time to ready, p50"
-          value={p50 ?? 0}
-          unit="ms"
-          icon={Gauge}
-          hint={
-            p95 !== null && started
-              ? `p95 ${formatMs(p95)} · ${Math.round((hot / started) * 100)}% hot starts`
-              : "No sessions yet"
-          }
-        />
+        <BlurFade delay={0.0} inView className="h-full">
+          <Stat
+            label="Live now"
+            live={fortnight.live > 0}
+            value={fortnight.live}
+            icon={Radio}
+            hint={`of ${project.quotas.maxConcurrentSessions} allowed at once`}
+          />
+        </BlurFade>
+        <BlurFade delay={0.05} inView className="h-full">
+          <Stat
+            label="Sessions"
+            value={sessions7}
+            icon={Layers}
+            delta={change(sessions7, sum(prev.map((d) => d.sessions)))}
+            trend={fortnight.days.map((d) => d.sessions)}
+            hint={`${failed7} failed`}
+          />
+        </BlurFade>
+        <BlurFade delay={0.1} inView className="h-full">
+          <Stat
+            label="Browser time"
+            value={Math.round(minutes7)}
+            unit="min"
+            icon={Clock}
+            delta={change(
+              minutes7,
+              sum(prev.map((d) => d.browserSeconds)) / 60,
+            )}
+            trend={fortnight.days.map((d) => d.browserSeconds)}
+          />
+        </BlurFade>
+        <BlurFade delay={0.15} inView className="h-full">
+          <Stat
+            label="Time to ready, p50"
+            value={p50 ?? 0}
+            unit="ms"
+            icon={Gauge}
+            hint={
+              p95 !== null && started
+                ? `p95 ${formatMs(p95)} · ${Math.round((hot / started) * 100)}% hot starts`
+                : "No sessions yet"
+            }
+          />
+        </BlurFade>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
@@ -124,7 +137,7 @@ export async function OverviewPage({
           title="Sessions per day"
           description="Last 30 days, UTC"
           action={
-            <span className="text-2xl font-semibold tabular-nums">
+            <span className="text-2xl font-medium tracking-[-0.02em] tabular-nums">
               {month.totals.sessions.toLocaleString("en-US")}
             </span>
           }
@@ -139,12 +152,12 @@ export async function OverviewPage({
 
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Recent sessions</h2>
+          <h2 className="label-mono">Recent sessions</h2>
           <Link
             href={`${base}/sessions`}
-            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+            className="inline-flex items-center gap-1 font-mono text-[11px] tracking-[0.06em] text-muted-foreground uppercase hover:text-foreground"
           >
-            View all <ArrowRight className="size-3.5" />
+            View all <ChevronRight className="size-3.5" />
           </Link>
         </div>
         <SessionsTable
@@ -172,7 +185,7 @@ function LiveNow({ sessions, base }: { sessions: Session[]; base: string }) {
           <p className="text-sm text-muted-foreground">
             Start a browser and it appears here while it runs.
           </p>
-          <pre className="overflow-x-auto rounded-lg border bg-muted/40 p-3 font-mono text-[11.5px] leading-relaxed">
+          <pre className="overflow-x-auto border bg-muted/40 p-3 font-mono text-[11.5px] leading-relaxed">
             <span className="text-muted-foreground">
               {"// npm i @kestrel/sdk\n"}
             </span>
@@ -181,29 +194,32 @@ function LiveNow({ sessions, base }: { sessions: Session[]; base: string }) {
           </pre>
         </div>
       ) : (
-        <ul className="space-y-0.5">
-          {sessions.slice(0, 6).map((s) => (
-            <li key={s.id}>
-              <Link
-                href={`${base}/sessions/${s.id}`}
-                className="flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-muted/60"
-              >
-                <StatusDot status={s.status} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-mono text-[13px]">
-                    {shortId(s.id)}
+        <AnimatedList delay={250} className="items-stretch gap-0">
+          {sessions
+            .slice(0, 6)
+            .reverse()
+            .map((s) => (
+              <div key={s.id}>
+                <Link
+                  href={`${base}/sessions/${s.id}`}
+                  className="flex items-center gap-3 border-b border-dashed px-3 py-2.5 transition-colors last:border-0 hover:bg-muted/60"
+                >
+                  <StatusDot status={s.status} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-mono text-[13px]">
+                      {shortId(s.id)}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {String(s.options.metadata.agent ?? s.nodeId ?? "")}
+                    </span>
                   </span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {String(s.options.metadata.agent ?? s.nodeId ?? "")}
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {formatDuration(sessionDuration(s))}
                   </span>
-                </span>
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  {formatDuration(sessionDuration(s))}
-                </span>
-              </Link>
-            </li>
-          ))}
-        </ul>
+                </Link>
+              </div>
+            ))}
+        </AnimatedList>
       )}
     </Panel>
   );

@@ -14,7 +14,6 @@
   "dependencies": {
     "@kestrel/contracts": "*",
     "@kestrel/dashboard": "*",
-    "geist": "^1.7.2",
     "jose": "^6.2.12",
     "next": "^16.3.8",
     "next-themes": "^0.4.6",

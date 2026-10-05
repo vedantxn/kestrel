@@ -122,9 +122,9 @@ export async function UsagePage({
                       </span>
                     </span>
                   </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div className="h-1.5 overflow-hidden  bg-muted">
                     <div
-                      className="h-full rounded-full bg-chart-1"
+                      className="h-full  bg-chart-1"
                       style={{ width: `${(r.sessions / ended) * 100}%` }}
                     />
                   </div>
@@ -142,9 +142,9 @@ export async function UsagePage({
                   {usage.live} / {q.maxConcurrentSessions}
                 </span>
               </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div className="h-1.5 overflow-hidden  bg-muted">
                 <div
-                  className="h-full rounded-full bg-chart-1"
+                  className="h-full  bg-chart-1"
                   style={{ width: `${livePct}%` }}
                 />
               </div>

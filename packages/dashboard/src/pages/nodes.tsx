@@ -61,10 +61,10 @@ export async function NodesPage({ client }: { client: KestrelClient }) {
           hint="started and waiting"
         />
       </div>
-      <div className="overflow-hidden rounded-xl border bg-card">
+      <div className="overflow-hidden border bg-card">
         <Table>
           <TableHeader>
-            <TableRow className="bg-muted/30 hover:bg-muted/30">
+            <TableRow className="bg-muted/40 hover:bg-muted/40">
               <TableHead>Node</TableHead>
               <TableHead>State</TableHead>
               <TableHead className="w-56">Sessions / slots</TableHead>

@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "@fontsource-variable/chivo-mono";
 
 /* The package's own components, wherever the app that imports this file lives. */
 @source "..";
@@ -7,88 +8,115 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Kestrel's theme. Neutral surfaces in three steps (sidebar, page, card) so depth comes from
- * tone rather than borders alone; one accent, rufous orange (a kestrel's back), used sparingly
- * for the primary action, focus and the main data series. Dark is the default.
+ * Kestrel's theme: an engineering look. Square corners, hairline borders, a grotesk for text
+ * (BDO Grotesk, SIL OFL, src/fonts) and a mono for buttons, labels and data (Chivo Mono).
+ * Light by default: sage-white page, white cards, near-black ink; green is the accent and the
+ * main data series, pink the second. Dark mode uses the same ramps on near-black.
  */
+@font-face {
+  font-family: "BDO Grotesk";
+  src: url("../fonts/BDOGrotesk-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "BDO Grotesk";
+  src: url("../fonts/BDOGrotesk-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "BDO Grotesk";
+  src: url("../fonts/BDOGrotesk-DemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  --radius: 0.75rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.18 0.005 285);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.18 0.005 285);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.18 0.005 285);
-  --primary: oklch(0.64 0.19 45);
-  --primary-foreground: oklch(0.99 0.005 75);
-  --secondary: oklch(0.965 0.002 285);
-  --secondary-foreground: oklch(0.25 0.005 285);
-  --muted: oklch(0.965 0.002 285);
-  --muted-foreground: oklch(0.52 0.01 285);
-  --accent: oklch(0.955 0.003 285);
-  --accent-foreground: oklch(0.2 0.005 285);
-  --destructive: oklch(0.58 0.22 27);
-  --border: oklch(0.92 0.003 285);
-  --input: oklch(0.92 0.003 285);
-  --ring: oklch(0.64 0.19 45);
-  --success: oklch(0.6 0.15 155);
-  --warning: oklch(0.72 0.16 70);
-  --info: oklch(0.6 0.13 245);
-  --chart-1: oklch(0.64 0.19 45);
-  --chart-2: oklch(0.6 0.13 245);
-  --chart-3: oklch(0.58 0.16 290);
-  --chart-4: oklch(0.65 0.14 160);
-  --chart-5: oklch(0.62 0.2 15);
-  --sidebar: oklch(0.975 0.002 285);
-  --sidebar-foreground: oklch(0.3 0.005 285);
-  --sidebar-primary: oklch(0.64 0.19 45);
-  --sidebar-primary-foreground: oklch(0.99 0.005 75);
-  --sidebar-accent: oklch(0.93 0.003 285);
-  --sidebar-accent-foreground: oklch(0.18 0.005 285);
-  --sidebar-border: oklch(0.92 0.003 285);
-  --sidebar-ring: oklch(0.64 0.19 45);
+  --radius: 0px;
+  --background: #f5f8f4;
+  --foreground: #0e0e0e;
+  --card: #ffffff;
+  --card-foreground: #0e0e0e;
+  --popover: #ffffff;
+  --popover-foreground: #0e0e0e;
+  --primary: #0e0e0e;
+  --primary-foreground: #ffffff;
+  --secondary: #eef3ec;
+  --secondary-foreground: #0e0e0e;
+  --muted: #eef3ec;
+  --muted-foreground: #676e64;
+  --accent: #eef3ec;
+  --accent-foreground: #0e0e0e;
+  --destructive: #dd403a;
+  --border: #e1eadd;
+  --input: #d3ddcf;
+  --ring: #19e76e;
+  --brand: #19e76e;
+  --success: #00b86b;
+  --warning: #c98a12;
+  --info: #2176ff;
+  --pink: #e24ee0;
+  --chart-1: #00b86b;
+  --chart-2: #ff8afc;
+  --chart-3: #425366;
+  --chart-4: #8999ac;
+  --chart-5: #edb54b;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #0e0e0e;
+  --sidebar-primary: #0e0e0e;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f1f7ef;
+  --sidebar-accent-foreground: #0e0e0e;
+  --sidebar-border: #e1eadd;
+  --sidebar-ring: #19e76e;
 }
 
 .dark {
-  --background: oklch(0.165 0.004 285);
-  --foreground: oklch(0.97 0.002 285);
-  --card: oklch(0.195 0.005 285);
-  --card-foreground: oklch(0.97 0.002 285);
-  --popover: oklch(0.2 0.005 285);
-  --popover-foreground: oklch(0.97 0.002 285);
-  --primary: oklch(0.72 0.17 50);
-  --primary-foreground: oklch(0.17 0.02 45);
-  --secondary: oklch(0.24 0.005 285);
-  --secondary-foreground: oklch(0.97 0.002 285);
-  --muted: oklch(0.235 0.005 285);
-  --muted-foreground: oklch(0.66 0.01 285);
-  --accent: oklch(0.25 0.006 285);
-  --accent-foreground: oklch(0.97 0.002 285);
-  --destructive: oklch(0.66 0.2 25);
-  --border: oklch(1 0 0 / 8%);
-  --input: oklch(1 0 0 / 11%);
-  --ring: oklch(0.72 0.17 50);
-  --success: oklch(0.74 0.16 155);
-  --warning: oklch(0.8 0.15 80);
-  --info: oklch(0.72 0.12 245);
-  --chart-1: oklch(0.72 0.17 50);
-  --chart-2: oklch(0.72 0.12 245);
-  --chart-3: oklch(0.68 0.15 295);
-  --chart-4: oklch(0.75 0.14 160);
-  --chart-5: oklch(0.68 0.19 15);
-  --sidebar: oklch(0.13 0.003 285);
-  --sidebar-foreground: oklch(0.82 0.005 285);
-  --sidebar-primary: oklch(0.72 0.17 50);
-  --sidebar-primary-foreground: oklch(0.17 0.02 45);
-  --sidebar-accent: oklch(0.21 0.005 285);
-  --sidebar-accent-foreground: oklch(0.98 0.002 285);
-  --sidebar-border: oklch(1 0 0 / 7%);
-  --sidebar-ring: oklch(0.72 0.17 50);
+  --background: #0b0c0b;
+  --foreground: #f1f7ef;
+  --card: #121412;
+  --card-foreground: #f1f7ef;
+  --popover: #141614;
+  --popover-foreground: #f1f7ef;
+  --primary: #f1f7ef;
+  --primary-foreground: #0e0e0e;
+  --secondary: #1a1d19;
+  --secondary-foreground: #f1f7ef;
+  --muted: #1a1d19;
+  --muted-foreground: #8f998b;
+  --accent: #1c201b;
+  --accent-foreground: #f1f7ef;
+  --destructive: #f05a52;
+  --border: #252a24;
+  --input: #2e342d;
+  --ring: #19e76e;
+  --brand: #19e76e;
+  --success: #19e76e;
+  --warning: #edb54b;
+  --info: #5b9bff;
+  --pink: #ffa9fd;
+  --chart-1: #19e76e;
+  --chart-2: #ffa9fd;
+  --chart-3: #8999ac;
+  --chart-4: #5f758e;
+  --chart-5: #edb54b;
+  --sidebar: #0e0e0e;
+  --sidebar-foreground: #f1f7ef;
+  --sidebar-primary: #f1f7ef;
+  --sidebar-primary-foreground: #0e0e0e;
+  --sidebar-accent: #1a1d19;
+  --sidebar-accent-foreground: #f1f7ef;
+  --sidebar-border: #252a24;
+  --sidebar-ring: #19e76e;
 }
 
 @theme inline {
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-sans: "BDO Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Chivo Mono Variable", ui-monospace, monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -110,6 +138,8 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-info: var(--info);
+  --color-brand: var(--brand);
+  --color-pink: var(--pink);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -123,10 +153,14 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  /* Square everywhere; only dots and pulses stay round (rounded-full). */
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
   --animate-shiny-text: shiny-text 8s infinite;
   @keyframes shiny-text {
     0%,
@@ -147,9 +181,25 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
-    font-feature-settings: "cv11", "ss01";
+    letter-spacing: -0.005em;
   }
   ::selection {
-    background: color-mix(in oklch, var(--primary) 35%, transparent);
+    background: color-mix(in oklch, var(--brand) 40%, transparent);
+  }
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.02em;
+  }
+}
+
+@layer components {
+  /* The mono label: section titles, table headers, tags (Baseten-style engineering labels). */
+  .label-mono {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
 }

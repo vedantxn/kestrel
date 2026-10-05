@@ -11,9 +11,9 @@ export function LogoMark({ className }: { className?: string }) {
       aria-hidden="true"
       className={cn("size-8 shrink-0", className)}
     >
-      <rect width="32" height="32" rx="8" className="fill-primary" />
-      <path d={KESTREL_MARK_PATH} className="fill-primary-foreground" />
-      <circle cx="16" cy="11.6" r="2.4" className="fill-primary-foreground" />
+      <rect width="32" height="32" className="fill-foreground" />
+      <path d={KESTREL_MARK_PATH} className="fill-background" />
+      <circle cx="16" cy="11.6" r="2.4" className="fill-background" />
     </svg>
   );
 }
@@ -28,7 +28,7 @@ export function Logo({
   return (
     <span className={cn("inline-flex items-center gap-2", className)}>
       <LogoMark className={markClassName} />
-      <span className="text-[1.05rem] font-semibold tracking-tight">
+      <span className="text-[1.15rem] font-medium tracking-[-0.02em]">
         kestrel
       </span>
     </span>

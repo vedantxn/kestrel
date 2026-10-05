@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, Moon, Search, Sun } from "lucide-react";
+import { ChevronRight, Moon, Search, Sun } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
@@ -53,7 +53,7 @@ export function CommandMenu({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex h-8 w-full max-w-72 items-center gap-2 rounded-lg border bg-muted/40 px-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted"
+        className="flex h-8 w-full max-w-72 items-center gap-2 border bg-background px-2.5 text-sm text-muted-foreground transition-colors hover:border-foreground/30"
       >
         <Search className="size-3.5" />
         <span className="flex-1 text-left">Jump to…</span>
@@ -73,7 +73,7 @@ export function CommandMenu({
                 value={id}
                 onSelect={() => go(`${base}/sessions/${id}`)}
               >
-                <ArrowRight /> Open <span className="font-mono">{id}</span>
+                <ChevronRight /> Open <span className="font-mono">{id}</span>
               </CommandItem>
             </CommandGroup>
           )}

@@ -12,14 +12,15 @@ export function Segmented({
   href: (v: string) => string;
 }) {
   return (
-    <nav className="inline-flex w-fit self-start overflow-x-auto rounded-lg border bg-muted/40 p-0.5 text-sm">
+    <nav className="inline-flex w-fit self-start overflow-x-auto border bg-card">
       {options.map((o) => (
         <Link
           key={o.value}
           href={href(o.value)}
           className={cn(
-            "rounded-md px-3 py-1 text-muted-foreground transition-colors hover:text-foreground",
-            o.value === value && "bg-background text-foreground shadow-sm",
+            "border-r px-3.5 py-1.5 font-mono text-[11px] tracking-[0.06em] text-muted-foreground uppercase transition-colors last:border-r-0 hover:text-foreground",
+            o.value === value &&
+              "bg-foreground text-background hover:text-background",
           )}
         >
           {o.label}

@@ -21,6 +21,7 @@
     "react-dom": ">=19"
   },
   "dependencies": {
+    "@fontsource-variable/chivo-mono": "^5.3.0",
     "@kestrel/contracts": "*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

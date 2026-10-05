@@ -117,7 +117,7 @@ export function Shell({
 
   return (
     <SidebarProvider>
-      <Sidebar collapsible="icon" variant="inset">
+      <Sidebar collapsible="icon">
         <SidebarHeader className="pt-3">
           <SidebarMenu>
             <SidebarMenuItem>
@@ -151,7 +151,7 @@ export function Shell({
                           {active(item) && (
                             <motion.span
                               layoutId="nav-active"
-                              className="absolute inset-y-1.5 -left-2 w-0.5 rounded-full bg-primary"
+                              className="absolute inset-y-0 -left-2 w-[3px] bg-brand"
                               transition={{
                                 type: "spring",
                                 stiffness: 500,
@@ -177,9 +177,9 @@ export function Shell({
                 <DropdownMenuTrigger asChild>
                   <SidebarMenuButton
                     size="lg"
-                    className="border bg-sidebar-accent/40 data-[state=open]:bg-sidebar-accent"
+                    className="border data-[state=open]:bg-sidebar-accent"
                   >
-                    <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-primary to-chart-3 text-xs font-semibold text-white uppercase">
+                    <span className="flex size-8 shrink-0 items-center justify-center bg-foreground font-mono text-[11px] font-medium text-background uppercase">
                       {project.slice(0, 2)}
                     </span>
                     <span className="grid flex-1 text-left text-sm leading-tight">
@@ -222,7 +222,7 @@ export function Shell({
         <SidebarRail />
       </Sidebar>
       <SidebarInset className="min-w-0">
-        <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-3 rounded-t-xl border-b bg-background/80 px-4 backdrop-blur">
+        <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-3 border-b bg-card/90 px-4 backdrop-blur">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="!h-4" />
           <Breadcrumb className="min-w-0">
@@ -270,7 +270,7 @@ export function Shell({
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.25, ease: "easeOut" }}
-          className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 md:p-8"
+          className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 border-dashed p-4 md:p-8 xl:border-x"
         >
           {children}
         </motion.div>

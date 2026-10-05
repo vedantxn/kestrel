@@ -89,7 +89,7 @@ export async function SessionDetailPage({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="truncate font-mono text-xl font-semibold tracking-tight">
+            <h1 className="truncate font-mono text-xl font-medium">
               {session.id}
             </h1>
             <CopyButton value={session.id} label="Copy session id" />
@@ -139,7 +139,7 @@ export async function SessionDetailPage({
       </div>
 
       {session.captcha && (
-        <div className="flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/8 p-4 text-sm">
+        <div className="flex items-start gap-3 border border-warning/40 bg-warning/8 p-4 text-sm">
           <ShieldAlert className="mt-0.5 size-4 shrink-0 text-warning" />
           <div className="flex-1">
             <p className="font-medium">
@@ -156,7 +156,7 @@ export async function SessionDetailPage({
         </div>
       )}
 
-      <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border md:grid-cols-5">
+      <dl className="grid grid-cols-2 gap-px overflow-hidden border bg-border md:grid-cols-5">
         <Fact label={live ? "Running for" : "Ran for"}>
           {session.readyAt ? formatDuration(sessionDuration(session)) : "–"}
         </Fact>
@@ -165,10 +165,10 @@ export async function SessionDetailPage({
           {session.startPath && (
             <span
               className={cn(
-                "ml-2 rounded px-1.5 py-px align-middle text-[11px] font-medium",
+                "ml-2 border px-1.5 py-px align-middle font-mono text-[10px] font-medium tracking-[0.06em] uppercase",
                 session.startPath === "hot"
-                  ? "bg-primary/12 text-primary"
-                  : "bg-info/10 text-info",
+                  ? "border-success/60 bg-success/8 text-foreground"
+                  : "border-pink/60 bg-pink/10 text-foreground",
               )}
             >
               {session.startPath}
@@ -193,9 +193,19 @@ export async function SessionDetailPage({
       </dl>
 
       <Tabs defaultValue="timeline" className="gap-4">
-        <TabsList>
-          <TabsTrigger value="timeline">Timeline</TabsTrigger>
-          <TabsTrigger value="config">Configuration</TabsTrigger>
+        <TabsList className="h-auto border bg-card p-0">
+          <TabsTrigger
+            value="timeline"
+            className="border-0 border-r px-3.5 py-1.5 font-mono text-[11px] tracking-[0.06em] uppercase last:border-r-0 data-[state=active]:bg-foreground data-[state=active]:text-background data-[state=active]:shadow-none dark:data-[state=active]:bg-foreground dark:data-[state=active]:text-background"
+          >
+            Timeline
+          </TabsTrigger>
+          <TabsTrigger
+            value="config"
+            className="border-0 border-r px-3.5 py-1.5 font-mono text-[11px] tracking-[0.06em] uppercase last:border-r-0 data-[state=active]:bg-foreground data-[state=active]:text-background data-[state=active]:shadow-none dark:data-[state=active]:bg-foreground dark:data-[state=active]:text-background"
+          >
+            Configuration
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="timeline">
           <Panel bodyClassName="p-0">
@@ -264,8 +274,8 @@ export async function SessionDetailPage({
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="space-y-1 bg-card px-5 py-4 last:col-span-2 md:last:col-span-1">
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="text-lg font-semibold tracking-tight tabular-nums">
+      <dt className="label-mono text-muted-foreground">{label}</dt>
+      <dd className="text-xl font-medium tracking-[-0.02em] tabular-nums">
         {children}
       </dd>
     </div>
@@ -325,7 +335,7 @@ function Timeline({ events }: { events: SessionEvent[] }) {
           >
             <span
               className={cn(
-                "flex size-8 shrink-0 items-center justify-center rounded-lg",
+                "flex size-8 shrink-0 items-center justify-center border border-current/20",
                 TONE[d.tone],
               )}
             >

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { MonoLabel } from "@kestrel/dashboard/components/mono-label";
 import { cn } from "@kestrel/dashboard/lib/utils";
 
 /** A card with a title row: the page's basic building block. */
@@ -18,13 +19,15 @@ export function Panel({
   bodyClassName?: string;
 }) {
   return (
-    <section
-      className={cn("flex flex-col rounded-xl border bg-card", className)}
-    >
+    <section className={cn("flex flex-col border bg-card", className)}>
       {(title || action) && (
-        <header className="flex items-start justify-between gap-3 px-5 pt-4 pb-1">
+        <header className="flex items-start justify-between gap-3 border-b border-dashed px-5 py-3">
           <div className="min-w-0 space-y-0.5">
-            {title && <h2 className="text-sm font-semibold">{title}</h2>}
+            {typeof title === "string" ? (
+              <MonoLabel as="h2">{title}</MonoLabel>
+            ) : (
+              title
+            )}
             {description && (
               <p className="text-xs text-muted-foreground">{description}</p>
             )}
