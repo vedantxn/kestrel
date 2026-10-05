@@ -12,6 +12,7 @@ export * from "./mp4.js";
 export * from "./node-protocol.js";
 export * from "./openapi.js";
 export * from "./plain-text.js";
+export * from "./project.js";
 export * from "./proxy.js";
 export * from "./proxy-providers.js";
 export * from "./runtime-control.js";
@@ -20,5 +21,5 @@ export * from "./timings.js";
 export * from "./tokens.js";
 
 /** Bumped on any change to a frozen contract, with the affected consumers listed in the commit. */
-export const CONTRACTS_VERSION = "0.1.11";
+export const CONTRACTS_VERSION = "0.1.12";
 export * from "./computer.js";

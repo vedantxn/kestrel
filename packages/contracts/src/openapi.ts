@@ -4,6 +4,7 @@ import "./events.js"; // registers the event schemas
 import "./session.js"; // registers the session schemas
 import "./tokens.js"; // MintTokenRequest, SessionToken (W1)
 import "./computer.js"; // ComputerRequest, ComputerResponse (W4)
+import "./project.js"; // Project, ApiKey, UsageReport, admin schemas (P17)
 
 /**
  * The public API's OpenAPI document, generated from the same Zod schemas the API validates
@@ -46,6 +47,7 @@ function componentSchemas(): Record<string, Json> {
     ListEventsQuery: inp.ListEventsQuery!,
     MintTokenRequest: inp.MintTokenRequest!,
     ComputerRequest: inp.ComputerRequest!,
+    UsageQuery: inp.UsageQuery!,
   };
 }
 
@@ -73,6 +75,16 @@ const sessionIdParam: Json = {
   required: true,
   schema: { type: "string", pattern: "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$" },
 };
+
+const idParam = (prefix: string): Json => ({
+  name: "id",
+  in: "path",
+  required: true,
+  schema: {
+    type: "string",
+    pattern: `^${prefix}_[0-7][0-9a-hjkmnp-tv-z]{25}$`,
+  },
+});
 
 const errorRef = (description: string): Json => ({
   description,
@@ -244,6 +256,148 @@ export function buildOpenApiDocument(): Json {
             "200": {
               description: "A page of events, oldest first.",
               ...jsonBody("ListEventsResponse"),
+            },
+            ...errors(
+              "invalid_request",
+              "unauthorized",
+              "not_found",
+              "internal",
+            ),
+          },
+        },
+      },
+      "/v1/project": {
+        get: {
+          operationId: "getProject",
+          summary: "The caller's project",
+          description:
+            "The project the API key belongs to, its quotas, and whether the key is an admin key.",
+          responses: {
+            "200": { description: "The project.", ...jsonBody("Project") },
+            ...errors("unauthorized", "internal"),
+          },
+        },
+      },
+      "/v1/api-keys": {
+        get: {
+          operationId: "listApiKeys",
+          summary: "The project's API keys, newest first",
+          description:
+            "Revoked keys are included. The keys themselves are never returned.",
+          responses: {
+            "200": {
+              description: "The keys.",
+              ...jsonBody("ListApiKeysResponse"),
+            },
+            ...errors("unauthorized", "internal"),
+          },
+        },
+        post: {
+          operationId: "createApiKey",
+          summary: "Create an API key",
+          description:
+            "The response carries the key once; only a hash is stored. Keys made here are never admin keys.",
+          requestBody: { required: true, ...jsonBody("CreateApiKeyRequest") },
+          responses: {
+            "201": {
+              description: "The new key.",
+              ...jsonBody("CreatedApiKey"),
+            },
+            ...errors("invalid_request", "unauthorized", "internal"),
+          },
+        },
+      },
+      "/v1/api-keys/{id}/revoke": {
+        post: {
+          operationId: "revokeApiKey",
+          summary: "Revoke an API key",
+          description:
+            "It stops authenticating at once. Idempotent. A key cannot revoke itself (`conflict`).",
+          parameters: [idParam("key")],
+          responses: {
+            "200": { description: "The key.", ...jsonBody("ApiKey") },
+            ...errors("unauthorized", "not_found", "conflict", "internal"),
+          },
+        },
+      },
+      "/v1/usage": {
+        get: {
+          operationId: "getUsage",
+          summary: "Sessions and browser time per day",
+          description:
+            "Whole UTC days ending today. Browser time is counted on the day a session was created.",
+          parameters: queryParams(schemas, "UsageQuery"),
+          responses: {
+            "200": { description: "The report.", ...jsonBody("UsageReport") },
+            ...errors("invalid_request", "unauthorized", "internal"),
+          },
+        },
+      },
+      "/v1/admin/nodes": {
+        get: {
+          operationId: "adminListNodes",
+          summary: "Every node (admin keys)",
+          description: "`not_found` for a key that is not an admin key.",
+          responses: {
+            "200": {
+              description: "The nodes.",
+              ...jsonBody("ListAdminNodesResponse"),
+            },
+            ...errors("unauthorized", "not_found", "internal"),
+          },
+        },
+      },
+      "/v1/admin/orgs": {
+        post: {
+          operationId: "adminCreateOrg",
+          summary: "Create an organisation (admin keys)",
+          requestBody: { required: true, ...jsonBody("AdminCreateOrgRequest") },
+          responses: {
+            "201": {
+              description: "The organisation.",
+              ...jsonBody("AdminOrg"),
+            },
+            ...errors(
+              "invalid_request",
+              "unauthorized",
+              "not_found",
+              "internal",
+            ),
+          },
+        },
+      },
+      "/v1/admin/projects": {
+        post: {
+          operationId: "adminCreateProject",
+          summary: "Create a project in an organisation (admin keys)",
+          description: "Names are unique within an organisation (`conflict`).",
+          requestBody: {
+            required: true,
+            ...jsonBody("AdminCreateProjectRequest"),
+          },
+          responses: {
+            "201": { description: "The project.", ...jsonBody("Project") },
+            ...errors(
+              "invalid_request",
+              "unauthorized",
+              "not_found",
+              "conflict",
+              "internal",
+            ),
+          },
+        },
+      },
+      "/v1/admin/projects/{id}/api-keys": {
+        post: {
+          operationId: "adminCreateApiKey",
+          summary: "Create an API key in any project (admin keys)",
+          description: "The key is shown once and is never an admin key.",
+          parameters: [idParam("prj")],
+          requestBody: { required: true, ...jsonBody("CreateApiKeyRequest") },
+          responses: {
+            "201": {
+              description: "The new key.",
+              ...jsonBody("CreatedApiKey"),
             },
             ...errors(
               "invalid_request",
