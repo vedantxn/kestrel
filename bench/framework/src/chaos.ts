@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import Docker from "dockerode";
 import { chromium, type Browser, type Page } from "playwright-core";
 import WebSocket from "ws";
 import type { Session } from "@kestrel/contracts";
@@ -31,7 +30,6 @@ export interface ChaosCase {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const docker = new Docker({ socketPath: "/var/run/docker.sock" });
 const TERMINAL = ["stopped", "failed", "timed_out"] as const;
 
 // --- helpers ------------------------------------------------------------------------------------
@@ -64,7 +62,6 @@ const COMPOSE =
   "docker compose -p kestrel --env-file /var/lib/kestrel/compose.env -f /srv/kestrel/infra/compose/docker-compose.yml --profile b";
 const compose = (args: string, env: Record<string, string> = {}) =>
   sh(`cd /srv/kestrel && ${COMPOSE} ${args}`, env);
-const container = (name: string) => docker.getContainer(name);
 
 function expect(cond: unknown, message: string): asserts cond {
   if (!cond) throw new Error(message);
