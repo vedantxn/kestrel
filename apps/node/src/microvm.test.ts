@@ -175,6 +175,8 @@ describe("network namespaces for microVMs", () => {
     );
     expect(script).toContain("-A POSTROUTING -o eth0 -j MASQUERADE");
     expect(script).toContain(":FORWARD DROP [0:0]");
+    // The guest's gateway MAC is the template's, which the guest has cached.
+    expect(script).toContain("link set tap0 address 02:4b:ff:00:00:01");
     expect(script).toContain(":INPUT DROP [0:0]");
     // A second VM never shares the first's address.
     expect(await pool.take()).toBe(129);

@@ -94,6 +94,11 @@ export const GUEST = {
   ip: "172.16.0.2",
   gateway: "172.16.0.1",
   proxyPort: 3128,
+  /**
+   * The tap's MAC, the same as the template's: the guest's ARP cache is in the snapshot, and with a
+   * new tap's random MAC its first replies went to the template's and were lost (connections reset).
+   */
+  gatewayMac: "02:4b:ff:00:00:01",
 };
 
 interface Meta {
@@ -216,6 +221,7 @@ export class NetnsPool {
           `ip -n ${ns} link set eth0 up`,
           `ip -n ${ns} route add default via ${c.bridgeIp}`,
           `ip -n ${ns} tuntap add tap0 mode tap user ${c.vmUid} group ${c.vmGid}`,
+          `ip -n ${ns} link set tap0 address ${GUEST.gatewayMac}`,
           `ip -n ${ns} addr add ${GUEST.gateway}/24 dev tap0`,
           `ip -n ${ns} link set tap0 up`,
           `ip netns exec ${ns} sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"`,

@@ -40,6 +40,8 @@ ip addr add 10.200.255.1/30 dev kvtpl && ip link set kvtpl up
 ip -n $NS link set lo up
 ip -n $NS addr add 10.200.255.2/30 dev eth0 && ip -n $NS link set eth0 up
 ip -n $NS tuntap add tap0 mode tap user "$VMUID" group "$VMUID"
+# Every clone's tap has this MAC too: the guest's ARP cache for its gateway is in the snapshot.
+ip -n $NS link set tap0 address 02:4b:ff:00:00:01
 ip -n $NS addr add 172.16.0.1/24 dev tap0 && ip -n $NS link set tap0 up
 ip netns exec $NS sysctl -qw net.ipv4.ip_forward=1
 ip netns exec $NS iptables-restore <<R

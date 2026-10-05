@@ -483,7 +483,15 @@ export class Gateway {
 
       let upstream: WebSocket;
       try {
-        upstream = await this.openUpstream(a.entry, a.route, a.scope);
+        upstream = await this.openUpstream(a.entry, a.route, a.scope).catch(
+          (e: unknown) => {
+            // Addresses are reused (a microVM's soon after the last one's at it): a kept-alive
+            // connection to the browser that had this address is reset on first use. Nothing has
+            // been relayed yet, so trying once more is safe.
+            if (!/ECONNRESET|EPIPE|socket hang up/.test(String(e))) throw e;
+            return this.openUpstream(a.entry, a.route, a.scope);
+          },
+        );
       } catch (e) {
         this.o.log.warn(
           {
