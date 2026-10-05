@@ -30,7 +30,12 @@ WORK = "/data/kestrel-vm"
 ROOTFS = f"{WORK}/rootfs.ext4"
 SNAP = f"{WORK}/snap"
 RUN = "/run/kestrel-vm"
-TOKEN = "v7-template-token-0123456789abcdef"  # the template's; a clone is re-keyed by the agent
+TOKEN = "v7-template-token-0123456789abcdef"
+# How a clone's memory is served: "file" (the snapshot file mapped copy-on-write, 4 KiB pages),
+# "thp" (the same, asking for transparent huge pages), or "uffd" (2 MiB hugetlbfs pages filled
+# on demand by Firecracker's example userfaultfd handler, V7_UFFD_HANDLER).
+BACKEND = os.environ.get("V7_BACKEND", "file")
+UFFD_HANDLER = os.environ.get("V7_UFFD_HANDLER", "/opt/firecracker/uffd_on_demand_handler")  # the template's; a clone is re-keyed by the agent
 PROOF = "ab" * 32
 GUEST = "172.16.0.2"
 BOOT_ARGS = (
@@ -188,10 +193,22 @@ def restore(i: int, configure: bool = True) -> dict:
     while not os.path.exists(sock):
         time.sleep(0.001)
     t1 = time.perf_counter()
-    api(sock, "PUT", "/snapshot/load", {"snapshot_path": f"{SNAP}/vmstate",
-                                        "mem_backend": {"backend_type": "File",
-                                                        "backend_path": f"{SNAP}/mem"},
-                                        "resume_vm": True})
+    load = {"snapshot_path": f"{SNAP}/vmstate", "resume_vm": True,
+            "mem_backend": {"backend_type": "File", "backend_path": f"{SNAP}/mem"}}
+    if BACKEND == "thp":
+        load["huge_pages"] = "Transparent"
+    elif BACKEND == "uffd":
+        uds = f"{RUN}/{i}.uffd"
+        if os.path.exists(uds):
+            os.unlink(uds)
+        hlog = open(f"{RUN}/{i}.uffd.log", "w")
+        procs[f"h{i}"] = subprocess.Popen([UFFD_HANDLER, uds, f"{SNAP}/mem"],
+                                          stdout=hlog, stderr=hlog)
+        while not os.path.exists(uds):
+            time.sleep(0.001)
+        load["mem_backend"] = {"backend_type": "Uffd", "backend_path": uds}
+        load["huge_pages"] = "2M"
+    api(sock, "PUT", "/snapshot/load", load)
     t2 = time.perf_counter()
     addr = f"10.200.{i}.2"
     for _ in range(3000):
@@ -215,10 +232,11 @@ def restore(i: int, configure: bool = True) -> dict:
 
 def kill(i: int) -> float:
     t0 = time.perf_counter()
-    p = procs.pop(i, None)
-    if p:
-        p.kill()
-        p.wait()
+    for k in (i, f"h{i}"):
+        p = procs.pop(k, None)
+        if p:
+            p.kill()
+            p.wait()
     return (time.perf_counter() - t0) * 1000
 
 
@@ -279,12 +297,14 @@ def cmd_keep(k: int) -> None:
         netns(i)
         r = restore(i)
         print(json.dumps({"clone": i, "address": f"10.200.{i}.2", **{x: round(y) for x, y in r.items()}}))
-        # detach: the clone outlives this process
+        # detach: the clone (and its page-fault handler) outlives this process
         procs.pop(i)
+        procs.pop(f"h{i}", None)
 
 
 def cmd_clean() -> None:
     sh("pkill -f 'firecracker --api-sock' || true", check=False)
+    sh("pkill -f uffd_on_demand_handler || true", check=False)
     for i in range(0, 64):
         drop_netns(i)
 

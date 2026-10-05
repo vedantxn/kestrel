@@ -55,9 +55,16 @@ function fakeHost(dir: string) {
       pids.set(pid, id);
       writeFileSync(join(root, "firecracker.pid"), String(pid));
       const srv = createServer((req, res) => {
-        calls.push({ cmd: "firecracker-api", args: [req.method!, req.url!] });
-        req.resume();
-        req.on("end", () => res.writeHead(204).end());
+        let body = "";
+        req.on("data", (c: Buffer) => (body += c.toString()));
+        req.on("end", () => {
+          calls.push({
+            cmd: "firecracker-api",
+            args: [req.method!, req.url!],
+            input: body,
+          });
+          res.writeHead(204).end();
+        });
       });
       await new Promise<void>((r) =>
         srv.listen(join(root, "run", "firecracker.socket"), r),
@@ -73,6 +80,13 @@ function fakeHost(dir: string) {
     kill: (pid) => {
       killed.push(pid);
       pids.delete(pid);
+    },
+    start: async (cmd, args, uid, _gid, cgroup) => {
+      calls.push({ cmd, args: [...args, `uid=${uid}`, `cgroup=${cgroup}`] });
+      writeFileSync(args[0]!, ""); // the handler's socket
+      const pid = nextPid++;
+      pids.set(pid, "handler");
+      return pid;
     },
   };
   return { run, calls, servers, procs, pids, killed };
@@ -107,7 +121,7 @@ afterEach(() => {
   for (const c of cleanup.splice(0)) c();
 });
 
-async function rig() {
+async function rig(over: Partial<MicroVmConfig> = {}) {
   // Short: a unix socket path is limited to about 104 bytes (macOS).
   const dir = mkdtempSync("/tmp/mv-");
   mkdirSync(join(dir, "template"), { recursive: true });
@@ -116,7 +130,7 @@ async function rig() {
   writeFileSync(join(dir, "template", "token"), `${TEMPLATE_TOKEN}\n`);
   const host = fakeHost(dir);
   const rt = fakeRuntime();
-  const vm = new MicroVmDriver(config(dir), {
+  const vm = new MicroVmDriver(config(dir, over), {
     run: host.run,
     log,
     fetch: rt.f,
@@ -217,6 +231,30 @@ describe("the microVM driver", () => {
     expect(rekey.auth).toBe(`Bearer ${TEMPLATE_TOKEN}`);
     expect(JSON.parse(rekey.body!)).toEqual({ token: "c".repeat(48) });
     expect((await vm.list()).map((c) => c.id)).toEqual([info.id]);
+  });
+
+  it("with a page-fault handler, restores into 2 MiB pages filled from the snapshot, and removes the handler with the VM", async () => {
+    const { host, vm } = await rig({
+      uffdHandler: "/opt/firecracker/uffd_on_demand_handler",
+    });
+    const info = await vm.run(spec());
+    const handler = host.calls.find((c) =>
+      c.cmd.endsWith("uffd_on_demand_handler"),
+    )!;
+    // As the VM's user, in the VM's cgroup, so it outlives an agent restart and is charged to the VM.
+    expect(handler.args).toContain("uid=10002");
+    expect(handler.args.at(-1)).toBe(
+      `cgroup=/sys/fs/cgroup/kestrel-vm/${info.id}`,
+    );
+    const load = host.calls.find(
+      (c) => c.args.join(" ") === "PUT /snapshot/load",
+    )!;
+    expect(JSON.parse(load.input!)).toMatchObject({
+      mem_backend: { backend_type: "Uffd", backend_path: "/uffd.sock" },
+      huge_pages: "2M",
+    });
+    await vm.remove(info.id);
+    expect(host.killed).toHaveLength(2); // the VMM and its handler
   });
 
   it("removes a VM completely: process, jail, namespace and record", async () => {

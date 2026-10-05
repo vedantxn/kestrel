@@ -26,6 +26,16 @@ if [ ! -f "$DEST/vmlinux" ]; then
   if [ -n "$KERNEL_SHA256" ]; then echo "$KERNEL_SHA256  $DEST/vmlinux.tmp" | sha256sum -c - >/dev/null; fi
   mv "$DEST/vmlinux.tmp" "$DEST/vmlinux"
 fi
+# Firecracker's userfaultfd page-fault handler (its example, built from the same pinned release):
+# serves a clone's memory as 2 MiB pages from the snapshot (ADR 0017). Built once, in a container.
+if [ ! -x "$DEST/uffd_on_demand_handler" ]; then
+  src=$(mktemp -d /data/fc-src.XXXX)
+  git clone -q --depth 1 --branch "$FC_VERSION" https://github.com/firecracker-microvm/firecracker "$src"
+  docker run --rm -v "$src:/src" -w /src/src/firecracker -e CARGO_HOME=/src/.cargo rust:1.97 bash -c \
+    "apt-get update -qq >/dev/null && apt-get install -y -qq libclang-dev clang libseccomp-dev >/dev/null 2>&1 && cargo build -q --release --example uffd_on_demand_handler"
+  install -m 0755 "$src/build/cargo_target/release/examples/uffd_on_demand_handler" "$DEST/uffd_on_demand_handler"
+  rm -rf "$src"
+fi
 "$DEST/firecracker" --version | head -1
 sha256sum "$DEST/vmlinux"
 
@@ -37,4 +47,7 @@ mkdir -p "/sys/fs/cgroup/$CGROUP"
 echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
 echo "+cpu +memory +pids" > "/sys/fs/cgroup/$CGROUP/cgroup.subtree_control"
 ip netns add kestrel-init 2>/dev/null && ip netns del kestrel-init
+# The 2 MiB page pool for clones' memory (a clone uses about 800 MB of it); default half the host.
+pages=${MICROVM_HUGEPAGES:-$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 / 2 / 2 ))}
+echo "$pages" > /proc/sys/vm/nr_hugepages
 mkdir -p /data/kestrel-vm/jail /data/kestrel-vm/meta && chmod 0700 /data/kestrel-vm/meta

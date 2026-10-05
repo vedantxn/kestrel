@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   Failpoints,
   createLogger,
@@ -66,12 +66,19 @@ if (env.RUNTIME === "microvm") {
       netnsReady: env.MICROVM_NETNS_READY,
       vcpus: 1,
       memMib: 2048,
+      ...(env.MICROVM_PAGES === "2M" &&
+      existsSync(`${env.FIRECRACKER_DIR}/uffd_on_demand_handler`)
+        ? { uffdHandler: `${env.FIRECRACKER_DIR}/uffd_on_demand_handler` }
+        : {}),
     },
     { run: exec, log },
   );
   await microvm.start();
   driver = new RoutedDriver(microvm, docker);
-  log.info({ octets: env.MICROVM_OCTETS }, "browsers are microVMs");
+  log.info(
+    { octets: env.MICROVM_OCTETS, pages: microvm.pages },
+    "browsers are microVMs",
+  );
 }
 const firewall = new Firewall({
   nodeId: env.NODE_ID,

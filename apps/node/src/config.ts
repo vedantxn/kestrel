@@ -52,6 +52,8 @@ export const Env = z.object({
     .default("128-254"),
   MICROVM_UID: z.coerce.number().int().positive().default(10002),
   MICROVM_NETNS_READY: z.coerce.number().int().min(0).default(8),
+  /** "2M": clones' memory in hugetlbfs pages via the userfaultfd handler (when it is installed). */
+  MICROVM_PAGES: z.enum(["2M", "4K"]).default("2M"),
   /** Certificate copy for the gateway (G16): Caddy's data directory, the hostname, the destination. */
   CADDY_DATA: z.string().optional(),
   PUBLIC_HOSTNAME: z.string().optional(),

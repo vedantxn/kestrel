@@ -66,6 +66,14 @@ async function readLimited(
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** fetch says only "fetch failed": the reason (ECONNREFUSED, a reset, a timeout) is in its cause. */
+const detail = (path: string, e: unknown): Error => {
+  const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+  return new Error(
+    `runtime ${path}: ${cause?.code ?? cause?.message ?? (e instanceof Error ? e.message : String(e))}`,
+  );
+};
+
 export class HttpRuntimeClient implements RuntimeClient {
   constructor(private readonly port: number = RUNTIME_PORTS.control) {}
 
@@ -78,18 +86,32 @@ export class HttpRuntimeClient implements RuntimeClient {
     body: unknown,
     timeoutMs: number,
     maxBytes = MAX_RESPONSE_BYTES,
+    /** Safe to send twice (health, configure): retried once if the connection itself failed. */
+    idempotent = false,
   ): Promise<T> {
-    const res = await fetch(`http://${address}:${this.port}${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-      // A container must not be able to send this root process to another address with a redirect.
-      redirect: "error",
-    });
+    const send = () =>
+      fetch(`http://${address}:${this.port}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+        // A container must not be able to send this root process to another address with a redirect.
+        redirect: "error",
+      });
+    let res: Response;
+    try {
+      res = await send();
+    } catch (e) {
+      // Addresses are reused (a microVM's soon after the last one's): a kept-alive connection
+      // to the previous browser at this address is dead, and the first request on it fails.
+      if (!idempotent || !(e instanceof TypeError)) throw detail(path, e);
+      res = await send().catch((e2: unknown) => {
+        throw detail(path, e2);
+      });
+    }
     const text = await readLimited(res, maxBytes);
     if (!res.ok) throw new Error(`runtime ${path}: ${res.status}`);
     return schema.parse(JSON.parse(text));
@@ -113,6 +135,8 @@ export class HttpRuntimeClient implements RuntimeClient {
       RuntimeHealth,
       undefined,
       timeoutMs + waitMs,
+      MAX_RESPONSE_BYTES,
+      true,
     );
   }
 
@@ -130,6 +154,8 @@ export class HttpRuntimeClient implements RuntimeClient {
       ConfigureResponse,
       req,
       timeoutMs,
+      MAX_RESPONSE_BYTES,
+      true, // idempotent for the same proof (C5)
     );
   }
 

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   link,
@@ -7,6 +7,7 @@ import {
   readFile,
   rm,
   rmdir,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { request } from "node:http";
@@ -58,6 +59,14 @@ export interface MicroVmConfig {
   netnsReady: number;
   vcpus: number;
   memMib: number;
+  /**
+   * Firecracker's userfaultfd page-fault handler. When set, a clone's memory is 2 MiB hugetlbfs
+   * pages filled on demand from the snapshot, instead of the snapshot file mapped with 4 KiB pages:
+   * after a restore the guest touches memory one page at a time, and with nested virtualisation
+   * each 4 KiB fault is expensive (a new page's renderer took 728 ms against 112 ms with 2 MiB).
+   * Needs the host's hugetlbfs pool (firecracker-setup.sh).
+   */
+  uffdHandler?: string;
 }
 
 export type Exec = (
@@ -92,6 +101,8 @@ interface Meta {
   octet: number;
   labels: Record<string, string>;
   createdAt: number;
+  /** The VM's page-fault handler, started by the agent (so this pid is the agent's own record). */
+  handlerPid?: number;
 }
 
 /**
@@ -305,12 +316,25 @@ function unixCall(
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const exists = (path: string) =>
+  stat(path).then(
+    () => true,
+    () => false,
+  );
 /** The host's processes, as the driver sees them (replaceable in tests). */
 export interface Procs {
   /** Is `pid` the Firecracker of VM `id`? (The pid file is in the VM's chroot, so it is checked.) */
   isVmm(pid: number, id: string): Promise<boolean>;
   alive(pid: number): boolean;
   kill(pid: number): void;
+  /** Start a detached process as the VM's user and put it in the VM's cgroup; returns its pid. */
+  start(
+    cmd: string,
+    args: string[],
+    uid: number,
+    gid: number,
+    cgroup: string,
+  ): Promise<number>;
 }
 
 export const hostProcs: Procs = {
@@ -333,6 +357,15 @@ export const hostProcs: Procs = {
       /* already gone */
     }
   },
+  start: async (cmd, args, uid, gid, cgroup) => {
+    const p = spawn(cmd, args, { uid, gid, detached: true, stdio: "ignore" });
+    p.unref();
+    if (!p.pid) throw new Error(`could not start ${cmd}`);
+    // Out of the agent's own cgroup: it must outlive an agent restart, as the VM does, and its
+    // memory is the VM's.
+    await writeFile(join(cgroup, "cgroup.procs"), String(p.pid));
+    return p.pid;
+  },
 };
 
 export interface MicroVmDeps {
@@ -345,6 +378,9 @@ export interface MicroVmDeps {
 
 export class MicroVmDriver implements DockerDriver {
   readonly netns: NetnsPool;
+  get pages(): "2M" | "4K" {
+    return this.c.uffdHandler ? "2M" : "4K";
+  }
   private removing = new Set<string>();
   private dead = new Set<string>();
   private listeners = new Set<(e: DockerEvent) => void>();
@@ -412,6 +448,10 @@ export class MicroVmDriver implements DockerDriver {
     return out.filter((m) => m.labels["kestrel.node"] === this.c.nodeId);
   }
 
+  private writeMeta(m: Meta): Promise<void> {
+    return writeFile(this.metaPath(m.id), JSON.stringify(m), { mode: 0o600 });
+  }
+
   private async pid(id: string): Promise<number | null> {
     // Written by the jailer inside the chroot, which the VMM can write to: trusted only to name a
     // process that is this VM's Firecracker (its command line carries the VM's id).
@@ -458,8 +498,8 @@ export class MicroVmDriver implements DockerDriver {
       createdAt: Date.now(),
     };
     try {
-      await writeFile(this.metaPath(id), JSON.stringify(meta), { mode: 0o600 });
-      await this.restore(id, octet, mark);
+      await this.writeMeta(meta);
+      await this.restore(meta, mark);
       const address = this.netns.address(octet);
       await this.rekey(address, token, mark);
       if (performance.now() - t0 > 500)
@@ -472,10 +512,10 @@ export class MicroVmDriver implements DockerDriver {
   }
 
   private async restore(
-    id: string,
-    octet: number,
+    meta: Meta,
     mark: (k: string) => void = () => undefined,
   ): Promise<void> {
+    const { id, octet } = meta;
     const c = this.c;
     // The jailer: chroot, an unprivileged user, its own cgroup and network namespace, detached so
     // the VM outlives an agent restart (as a container outlives one with live-restore).
@@ -520,12 +560,30 @@ export class MicroVmDriver implements DockerDriver {
     mark("jailer");
     for (const f of ["vmstate", "mem", "rootfs.ext4"])
       await link(join(t, f), join(root, f));
+    let memBackend: object = { backend_type: "File", backend_path: "/mem" };
+    let pages: object = {};
+    if (c.uffdHandler) {
+      const uds = join(root, "uffd.sock");
+      const handlerPid = await this.procs.start(
+        c.uffdHandler,
+        [uds, join(root, "mem")],
+        c.vmUid,
+        c.vmGid,
+        join("/sys/fs/cgroup", c.cgroupParent, id),
+      );
+      await this.writeMeta({ ...meta, handlerPid });
+      for (let i = 0; i < 1000 && !(await exists(uds)); i++) await sleep(1);
+      memBackend = { backend_type: "Uffd", backend_path: "/uffd.sock" };
+      pages = { huge_pages: "2M" };
+      mark("handler");
+    }
     const sock = join(root, "run", "firecracker.socket");
     for (let i = 0; ; i++) {
       try {
         await unixCall(sock, "PUT", "/snapshot/load", {
           snapshot_path: "/vmstate",
-          mem_backend: { backend_type: "File", backend_path: "/mem" },
+          mem_backend: memBackend,
+          ...pages,
           resume_vm: true,
         });
         mark("load");
@@ -568,15 +626,32 @@ export class MicroVmDriver implements DockerDriver {
         throw new Error("microvm: the restored browser did not answer");
       await sleep(3);
     }
-    const res = await this.fetchFn(`${base}${RUNTIME_PATHS.rekey}`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${template}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ token }),
-      signal: AbortSignal.timeout(10_000),
-    });
+    const send = () =>
+      this.fetchFn(`${base}${RUNTIME_PATHS.rekey}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${template}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ token }),
+        signal: AbortSignal.timeout(10_000),
+      });
+    let res: Response;
+    try {
+      res = await send();
+    } catch (e) {
+      // The connection failed before the request was taken (the token is unchanged): once more.
+      const why = (e as { cause?: { code?: string } }).cause?.code ?? String(e);
+      this.d.log.warn(
+        { address, why },
+        "microvm: rekey connection failed; retrying",
+      );
+      res = await send().catch((e2: unknown) => {
+        throw new Error(
+          `microvm: rekey failed: ${(e2 as { cause?: { code?: string } }).cause?.code ?? String(e2)}`,
+        );
+      });
+    }
     if (!res.ok) throw new Error(`microvm: rekey refused (${res.status})`);
     RekeyResponse.parse(await res.json());
     mark("rekey");
@@ -605,6 +680,7 @@ export class MicroVmDriver implements DockerDriver {
         this.procs.kill(pid);
         for (let i = 0; i < 500 && this.procs.alive(pid); i++) await sleep(2);
       }
+      if (m?.handlerPid) this.procs.kill(m.handlerPid);
       await rm(join(this.jail, id), { recursive: true, force: true });
       await rmdir(join("/sys/fs/cgroup", this.c.cgroupParent, id)).catch(
         () => undefined,
