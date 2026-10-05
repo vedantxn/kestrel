@@ -7,7 +7,9 @@ import {
   TOKEN_TTL,
   buildConnectUrl,
   buildLiveViewUrl,
+  splitProxy,
   uuidToId,
+  type UpstreamProxy,
   type MintTokenRequest,
   type SessionToken,
   type ComputerRequest,
@@ -128,8 +130,14 @@ export async function createSession(
     );
   }
 
-  const { idempotencyKey, waitForCapacityMs = 0, ...rest } = body;
-  const options = SessionOptions.parse(rest);
+  const { idempotencyKey, waitForCapacityMs = 0, proxy, ...rest } = body;
+  // The proxy's password goes to the node in the start request and nowhere else: not into the
+  // stored options, the idempotency hash or any response (T-45).
+  const split = proxy ? splitProxy(proxy) : undefined;
+  const options = SessionOptions.parse({
+    ...rest,
+    ...(split ? { proxy: split.stored } : {}),
+  });
 
   let idemRow: string | undefined;
   if (idempotencyKey) {
@@ -225,7 +233,14 @@ export async function createSession(
   }
 
   await ctx.failpoints.hit("api.create.after_reserve");
-  const session = await startOnNode(ctx, auth, reservation, options, t0);
+  const session = await startOnNode(
+    ctx,
+    auth,
+    reservation,
+    options,
+    split?.upstream,
+    t0,
+  );
   return { session, created: true };
 }
 
@@ -260,6 +275,8 @@ async function startOnNode(
   auth: Auth,
   reservation: { sessionId: string; nodeId: string; epoch: number },
   options: SessionOptions,
+  /** With its password; held in memory only until this start is answered. */
+  upstream: UpstreamProxy | undefined,
   t0: number,
 ): Promise<Session> {
   const { sessionId } = reservation;
@@ -287,7 +304,8 @@ async function startOnNode(
       projectId: uuidToId("prj", auth.projectId) as StartRequest["projectId"],
       epoch,
       viewport: options.viewport,
-      network: options.network,
+      // Inside `network`, so a node that predates proxies refuses the start (T-47).
+      network: upstream ? { ...options.network, upstream } : options.network,
       timeoutMs: options.timeout,
       idleTimeoutMs: options.idleTimeout,
       stopOnDisconnect: options.stopOnDisconnect,

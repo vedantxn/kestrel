@@ -30,6 +30,8 @@ ok<SameShape<C.EgressDenyReason, S.EgressDenyReason>>();
 ok<SameShape<C.Viewport, S.Viewport>>();
 ok<SameShape<C.NetworkPolicy, S.NetworkPolicy>>();
 ok<SameShape<C.SessionOptions, S.SessionOptions>>();
+ok<SameShape<C.SessionProxy, S.SessionProxy>>();
+ok<SameShape<z.input<typeof C.ProxyConfig>, S.ProxyConfig>>();
 ok<SameShape<z.input<typeof C.CreateSessionRequest>, S.CreateSessionRequest>>();
 ok<SameShape<C.Session, S.Session>>();
 ok<SameShape<C.Session["usage"], S.Session["usage"]>>();

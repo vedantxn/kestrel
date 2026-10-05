@@ -7,13 +7,19 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import type { EgressDenyReason } from "@kestrel/contracts";
+import { PROXY_BLOCKED_PORTS, type EgressDenyReason } from "@kestrel/contracts";
 import type { Logger } from "@kestrel/shared";
 import { ipAllowed, parseHost } from "./addresses.js";
 import type { DenialLog } from "./denials.js";
 import type { EgressMetrics } from "./metrics.js";
-import { listDecision, type Entry, type PolicyStore } from "./policy.js";
+import {
+  listDecision,
+  type Entry,
+  type PolicyStore,
+  type UpstreamEntry,
+} from "./policy.js";
 import type { Resolver } from "./resolver.js";
+import { readConnectReply } from "./upstream.js";
 
 /** N9. The gateway must not be a general relay: web ports only. */
 const ALLOWED_PORTS = new Set([80, 443]);
@@ -37,12 +43,20 @@ export interface ProxyOptions {
   /** A client that has not finished its request this soon is dropped. */
   preRequestTimeoutMs?: number;
   maxConnections?: number;
+  /** The whole of an upstream proxy's reply to CONNECT must arrive within this. */
+  upstreamReplyTimeoutMs?: number;
 }
 
 type Decision =
   | {
       ok: true;
+      /**
+       * Checked addresses to connect to: the destination's, or with `via` the proxy's. There is
+       * no path from an upstream decision to the destination's own address (T-47).
+       */
       addresses: string[];
+      /** The session's upstream proxy, if it has one. */
+      via: UpstreamEntry | undefined;
       host: string;
       port: number;
       /** The policy this decision was made under, compared by identity after every wait. */
@@ -233,7 +247,48 @@ export class EgressProxy {
     let handedOver = false;
     try {
       let addresses: string[];
-      if (target.kind === "ip") {
+      const via = entry.upstream;
+      if (via) {
+        // Through a proxy the destination is not resolved here: the proxy resolves it from its
+        // own network. A literal address must still be public. The proxy's own address is
+        // what this process connects to, so it gets the full checks (T-44).
+        if (
+          target.kind === "ip" &&
+          (!ipAllowed(target.ip) || this.o.blockedAddresses?.has(target.ip))
+        )
+          return deny("blocked_address", 403, "address is not allowed", host);
+        if (PROXY_BLOCKED_PORTS.has(via.port))
+          return deny(
+            "upstream_blocked",
+            403,
+            "the proxy's port is not allowed",
+            host,
+          );
+        const proxyAddresses = await this.resolveProxy(via);
+        if (proxyAddresses === "busy")
+          return deny(
+            "upstream_unreachable",
+            503,
+            "the resolver is busy",
+            host,
+          );
+        if (proxyAddresses.length === 0)
+          return deny(
+            "upstream_unreachable",
+            502,
+            "the proxy's name did not resolve",
+            host,
+          );
+        for (const a of proxyAddresses)
+          if (!ipAllowed(a) || this.o.blockedAddresses?.has(a))
+            return deny(
+              "upstream_blocked",
+              403,
+              "the proxy's address is not allowed",
+              host,
+            );
+        addresses = proxyAddresses;
+      } else if (target.kind === "ip") {
         addresses = [target.ip];
       } else {
         if (this.resolving >= MAX_RESOLVES)
@@ -266,6 +321,7 @@ export class EgressProxy {
       return {
         ok: true,
         addresses,
+        via,
         host,
         port,
         entry,
@@ -279,6 +335,38 @@ export class EgressProxy {
     } finally {
       if (!handedOver) entry.active = Math.max(0, entry.active - 1);
     }
+  }
+
+  /** The proxy's addresses: its literal, or a resolution under the shared limit. */
+  private async resolveProxy(via: UpstreamEntry): Promise<string[] | "busy"> {
+    if (via.ip) return [via.ip];
+    if (this.resolving >= MAX_RESOLVES) return "busy";
+    this.resolving++;
+    try {
+      return await this.o.resolver.resolve4(via.host);
+    } finally {
+      this.resolving--;
+    }
+  }
+
+  /** A connection through the proxy failed after the decision: count it and report it. */
+  private upstreamFailed(
+    source: string,
+    d: Extract<Decision, { ok: true }>,
+    reason: EgressDenyReason,
+    status: number,
+    message: string,
+  ): Extract<Decision, { ok: false }> {
+    const denial = {
+      ok: false as const,
+      reason,
+      status,
+      message,
+      host: d.host,
+      port: d.port,
+    };
+    this.recordDenial(source, denial);
+    return denial;
   }
 
   private recordDenial(
@@ -325,6 +413,7 @@ export class EgressProxy {
       this.recordDenial(source, d);
       return this.refuse(client, d.status, d.message, d.reason);
     }
+    if (d.via) return this.connectVia(source, client, head, d, d.via);
     this.o.metrics.requests.inc({ result: "allowed" });
     const { entry } = d;
 
@@ -342,7 +431,112 @@ export class EgressProxy {
       client.destroy();
       return;
     }
+    this.splice(client, upstream, head, Buffer.alloc(0), d);
+  }
 
+  /**
+   * CONNECT through the session's proxy: connect to a checked address of the proxy, ask it for
+   * a tunnel to the destination by name, and read its answer as hostile input. Only a 2xx opens
+   * the tunnel, and nothing of the proxy's answer reaches Chrome (T-46). Every failure path
+   * gives back the slot and never connects anywhere else (T-47).
+   */
+  private async connectVia(
+    source: string,
+    client: Socket,
+    head: Buffer,
+    d: Extract<Decision, { ok: true }>,
+    via: UpstreamEntry,
+  ): Promise<void> {
+    const fail = (
+      reason: EgressDenyReason,
+      status: number,
+      message: string,
+    ): void => {
+      d.release();
+      this.upstreamFailed(source, d, reason, status, message);
+      if (!client.destroyed) this.refuse(client, status, message, reason);
+    };
+
+    let proxy: Socket | null = null;
+    try {
+      proxy = await this.dial(d.addresses, via.port);
+    } catch {
+      proxy = null;
+    }
+    if (!proxy)
+      return fail(
+        "upstream_unreachable",
+        502,
+        "could not connect to the proxy",
+      );
+    proxy.on("error", () => undefined);
+    // Leaving mid-handshake, or the policy being cleared, ends the handshake at once.
+    const abandon = (): void => {
+      proxy.destroy();
+    };
+    client.once("close", abandon);
+    d.entry.sockets.add(client);
+
+    const target = `${d.host}:${d.port}`;
+    proxy.write(
+      `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n` +
+        (via.authorization
+          ? `Proxy-Authorization: ${via.authorization}\r\n`
+          : "") +
+        "\r\n",
+    );
+    const reply = await readConnectReply(
+      proxy,
+      this.o.upstreamReplyTimeoutMs ?? 10_000,
+    );
+    client.off("close", abandon);
+    d.entry.sockets.delete(client);
+
+    if (client.destroyed || this.o.policies.get(source) !== d.entry) {
+      d.release();
+      proxy.destroy();
+      client.destroy();
+      return;
+    }
+    if (reply.kind !== "ok") {
+      proxy.destroy();
+      if (reply.kind === "auth")
+        return fail(
+          "upstream_auth_failed",
+          502,
+          "the proxy refused the credentials",
+        );
+      if (reply.kind === "refused")
+        return fail(
+          "upstream_refused",
+          502,
+          "the proxy refused the connection",
+        );
+      if (reply.kind === "timeout")
+        return fail(
+          "upstream_unreachable",
+          504,
+          "the proxy did not answer in time",
+        );
+      return fail(
+        "upstream_unreachable",
+        502,
+        "the proxy closed the connection",
+      );
+    }
+    this.o.metrics.requests.inc({ result: "allowed" });
+    this.splice(client, proxy, head, reply.rest, d);
+  }
+
+  /** Relay both ways until either side closes, the idle timeout passes or the policy is cleared. */
+  private splice(
+    client: Socket,
+    upstream: Socket,
+    head: Buffer,
+    early: Buffer,
+    d: Extract<Decision, { ok: true }>,
+  ): void {
+    const { entry } = d;
     entry.sockets.add(client);
     this.o.metrics.open.inc();
     let finished = false;
@@ -362,6 +556,7 @@ export class EgressProxy {
     client.setTimeout(idle, done);
     upstream.setTimeout(idle, done);
     client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    if (early.length) client.write(early);
     if (head.length) upstream.write(head);
     client.on("data", (c) =>
       this.o.metrics.bytes.inc({ direction: "out" }, c.length),
@@ -371,6 +566,8 @@ export class EgressProxy {
     );
     client.pipe(upstream);
     upstream.pipe(client);
+    // A socket paused while its reply was read starts flowing again through the pipe.
+    upstream.resume();
   }
 
   /** Connect to the first checked address that answers. */
@@ -508,8 +705,8 @@ export class EgressProxy {
       this.recordDenial(source, d);
       return this.deny(res, d.status, d.message, d.reason);
     }
-    this.o.metrics.requests.inc({ result: "allowed" });
-    const { entry } = d;
+    const { entry, via } = d;
+    if (!via) this.o.metrics.requests.inc({ result: "allowed" });
 
     entry.sockets.add(req.socket);
     this.o.metrics.open.inc();
@@ -531,16 +728,36 @@ export class EgressProxy {
     }
     headers.host = url.host;
     headers.connection = "close";
+    // Through a proxy: the absolute URI, by name, and our credentials. Chrome's own
+    // Proxy-Authorization, if any, was stripped above as hop-by-hop.
+    if (via?.authorization) headers["proxy-authorization"] = via.authorization;
+    const dialPort = via ? via.port : d.port;
+    let failed = false;
+    const upstreamFailed = (
+      reason: EgressDenyReason,
+      message: string,
+    ): void => {
+      if (failed) return;
+      failed = true;
+      if (via) {
+        this.upstreamFailed(source, d, reason, 502, message);
+        this.fail(res, message, reason);
+      } else {
+        this.fail(res, message);
+      }
+    };
 
     const upstream = httpRequest(
       {
         host: d.addresses[0],
-        port: d.port,
+        port: dialPort,
         method,
-        path: url.pathname + url.search,
+        path: via
+          ? `http://${url.host}${url.pathname}${url.search}`
+          : url.pathname + url.search,
         headers,
         agent: new PinnedAgent(() =>
-          this.connectFn(d.addresses[0] as string, d.port),
+          this.connectFn(d.addresses[0] as string, dialPort),
         ),
         setHost: false,
         timeout: this.o.connectTimeoutMs ?? 10_000,
@@ -551,8 +768,19 @@ export class EgressProxy {
           const code = up.statusCode ?? 0;
           if (code < 200 || code > 599) {
             up.destroy();
-            return this.fail(res, "upstream sent an invalid status");
+            return upstreamFailed(
+              "upstream_refused",
+              "upstream sent an invalid status",
+            );
           }
+          if (via && code === 407) {
+            up.destroy();
+            return upstreamFailed(
+              "upstream_auth_failed",
+              "the proxy refused the credentials",
+            );
+          }
+          if (via) this.o.metrics.requests.inc({ result: "allowed" });
           const out: Record<string, string | string[]> = {};
           for (const [k, v] of Object.entries(up.headers))
             if (v !== undefined && !HOP_BY_HOP.has(k)) out[k] = v;
@@ -570,21 +798,30 @@ export class EgressProxy {
     // The destination answered 101: we never asked to upgrade, so this is not something to relay.
     upstream.on("upgrade", (_up, socket) => {
       socket.destroy();
-      this.fail(res, "upstream attempted a protocol upgrade");
+      upstreamFailed(
+        "upstream_refused",
+        "upstream attempted a protocol upgrade",
+      );
     });
     upstream.on("timeout", () => upstream.destroy(new Error("timed out")));
     upstream.on("error", (e) => {
       this.o.log.debug({ err: e.message }, "upstream request failed");
-      this.fail(res, "upstream error");
+      if (failed) return;
+      if (res.headersSent || res.writableEnded) return this.fail(res, "");
+      upstreamFailed("upstream_unreachable", "upstream error");
     });
     req.on("error", () => upstream.destroy());
     req.pipe(upstream);
   }
 
   /** Answer 502 if nothing has been sent yet; otherwise the response is already half out, so drop it. */
-  private fail(res: ServerResponse, message: string): void {
+  private fail(
+    res: ServerResponse,
+    message: string,
+    reason: EgressDenyReason = "resolve_failed",
+  ): void {
     if (!res.headersSent && !res.writableEnded)
-      this.deny(res, 502, message, "resolve_failed");
+      this.deny(res, 502, message, reason);
     else res.destroy();
   }
 }

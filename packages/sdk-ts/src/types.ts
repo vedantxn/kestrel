@@ -49,6 +49,25 @@ export interface NetworkPolicy {
   deny?: string[] | undefined;
 }
 
+/** A session's upstream proxy as stored and returned. The password is never returned. */
+export interface SessionProxy {
+  /** `http://host:port`. */
+  server: string;
+  username?: string | undefined;
+}
+
+/**
+ * Send a session's traffic through your own HTTP proxy. `http://` proxies only; the proxy
+ * resolves hostnames. The password is write-only: the API never stores or returns it.
+ */
+export interface ProxyConfig {
+  /** `http://host:port`, with an explicit port and no credentials, path or query. */
+  server: string;
+  /** For HTTP Basic authentication to the proxy. */
+  username?: string | undefined;
+  password?: string | undefined;
+}
+
 /** A session's options as the API applied them, defaults filled in. */
 export interface SessionOptions {
   /** Maximum lifetime. */
@@ -62,6 +81,8 @@ export interface SessionOptions {
   /** Record the browser's display to video, fetched with `sessions.recording`. */
   recording: boolean;
   metadata: Record<string, string>;
+  /** The session's upstream proxy, if it has one. */
+  proxy?: SessionProxy | undefined;
 }
 
 /** What `sessions.create` accepts. Every field is optional. */
@@ -74,6 +95,8 @@ export interface CreateSessionRequest {
   /** Record the browser's display to video. Default false. */
   recording?: boolean | undefined;
   metadata?: Record<string, string> | undefined;
+  /** Send the session's traffic through your own HTTP proxy. */
+  proxy?: ProxyConfig | undefined;
   /**
    * Repeating a create with the same key returns the original session. The SDK makes one
    * up for every call that does not pass one, so its own retries never create two sessions.
@@ -124,7 +147,11 @@ export type EgressDenyReason =
   | "in_deny_list"
   | "resolve_failed"
   | "connection_cap"
-  | "no_policy";
+  | "no_policy"
+  | "upstream_blocked"
+  | "upstream_unreachable"
+  | "upstream_auth_failed"
+  | "upstream_refused";
 
 /** An event's type and payload. */
 export type EventBody =

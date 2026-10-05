@@ -6,6 +6,7 @@ import {
   TokenVerifier,
   createLogger,
   generateTokenKeys,
+  type Logger,
 } from "@kestrel/shared";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { createApiKey } from "../auth.js";
@@ -58,6 +59,7 @@ export interface EnvOptions {
   createsPerMinute?: number;
   nodeCallTimeoutMs?: number;
   failpoints?: string;
+  log?: Logger;
 }
 
 const TABLES = [
@@ -135,7 +137,7 @@ export async function makeEnv(opts: EnvOptions = {}): Promise<Env> {
   const ctx: Ctx = {
     db,
     clock,
-    log: createLogger("test", "silent"),
+    log: opts.log ?? createLogger("test", "silent"),
     failpoints,
     signer,
     nodeClient,

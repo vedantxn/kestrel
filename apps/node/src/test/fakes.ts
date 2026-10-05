@@ -18,7 +18,12 @@ import {
   type RuntimeHealth,
   type StartRequest,
 } from "@kestrel/contracts";
-import { FakeClock, Failpoints, createLogger } from "@kestrel/shared";
+import {
+  FakeClock,
+  Failpoints,
+  createLogger,
+  type Logger,
+} from "@kestrel/shared";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -196,10 +201,19 @@ export class FakeEgress implements EgressClient {
   private check() {
     if (this.down) throw new Error("egress: connection refused");
   }
+  /** Behave as a gateway from before upstream proxies: drop `upstream` and acknowledge nothing. */
+  legacy = false;
   async setPolicy(ip: string, p: EgressPolicy) {
     this.check();
     this.log.push(`set ${ip}`);
+    if (this.legacy) {
+      const dropped = { ...p };
+      delete dropped.upstream;
+      this.policies.set(ip, dropped);
+      return null;
+    }
     this.policies.set(ip, p);
+    return { sessionId: p.sessionId, upstream: p.upstream !== undefined };
   }
   async clearPolicy(ip: string) {
     this.check();
@@ -215,6 +229,17 @@ export class FakeEgress implements EgressClient {
         ...(p.allow ? { allow: p.allow } : {}),
         deny: p.deny ?? [],
         connectionCap: p.connectionCap,
+        ...(p.upstream
+          ? {
+              upstream: {
+                host: p.upstream.host,
+                port: p.upstream.port,
+                ...(p.upstream.username !== undefined
+                  ? { username: p.upstream.username }
+                  : {}),
+              },
+            }
+          : {}),
         openConnections: 0,
       })),
     };
@@ -367,6 +392,7 @@ export function makeRig(
     dbPath?: string;
     skipBoot?: boolean;
     volumes?: boolean;
+    log?: Logger;
   } = {},
 ): Rig {
   const clock = new FakeClock();
@@ -413,7 +439,7 @@ export function makeRig(
       hub,
       api,
       clock,
-      log: createLogger("agent-test", "silent"),
+      log: opts.log ?? createLogger("agent-test", "silent"),
       failpoints,
       dockerSpec: SPEC,
       ...(volumes ? { volumes } : {}),

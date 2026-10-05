@@ -2,6 +2,7 @@ import { mkdtempSync, statSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import {
   DenialsResponse,
   EGRESS_PATHS,
@@ -24,11 +25,21 @@ async function rig() {
   const path = join(dir, "egress.sock");
   const policies = new PolicyStore();
   const denials = new DenialLog();
+  const lines: string[] = [];
   server = new ControlServer(
     policies,
     denials,
     createEgressMetrics(),
-    createLogger("t", "silent"),
+    createLogger(
+      "t",
+      "info",
+      new Writable({
+        write(chunk, _enc, cb) {
+          lines.push(String(chunk));
+          cb();
+        },
+      }),
+    ),
   );
   await server.listen(path);
   const call = (
@@ -58,7 +69,7 @@ async function rig() {
       r.on("error", reject);
       r.end(body === undefined ? undefined : JSON.stringify(body));
     });
-  return { path, policies, denials, call };
+  return { path, policies, denials, call, logged: () => lines.join("") };
 }
 
 const ses = newId("ses");
@@ -93,12 +104,14 @@ describe("the control API (C7)", () => {
       deny: ["*.ads.test"],
       connectionCap: 10,
     };
+    const first = await call("PUT", EGRESS_PATHS.policy("172.30.1.5"), body);
+    expect(first).toEqual({
+      status: 200,
+      json: { sessionId: ses, upstream: false },
+    });
     expect(
       (await call("PUT", EGRESS_PATHS.policy("172.30.1.5"), body)).status,
-    ).toBe(204);
-    expect(
-      (await call("PUT", EGRESS_PATHS.policy("172.30.1.5"), body)).status,
-    ).toBe(204);
+    ).toBe(200);
     const list = ListPoliciesResponse.parse(
       (await call("GET", EGRESS_PATHS.policies)).json,
     );
@@ -123,6 +136,76 @@ describe("the control API (C7)", () => {
         (await call("GET", EGRESS_PATHS.policies)).json,
       ).policies,
     ).toEqual([]);
+  });
+
+  it("acknowledges an upstream proxy and never lists its password (T-45, T-47)", async () => {
+    const { call, policies } = await rig();
+    const password = "pr0xy-s3cret";
+    const put = await call("PUT", EGRESS_PATHS.policy("172.30.1.7"), {
+      sessionId: ses,
+      upstream: {
+        host: "proxy.example.com",
+        port: 3128,
+        username: "u",
+        password,
+      },
+    });
+    expect(put).toEqual({
+      status: 200,
+      json: { sessionId: ses, upstream: true },
+    });
+    const listed = await call("GET", EGRESS_PATHS.policies);
+    expect(JSON.stringify(listed.json)).not.toContain(password);
+    const auth = policies.get("172.30.1.7")!.upstream!.authorization!;
+    expect(JSON.stringify(listed.json)).not.toContain(auth.slice(6));
+    expect(
+      ListPoliciesResponse.parse(listed.json).policies[0]?.upstream,
+    ).toEqual({ host: "proxy.example.com", port: 3128, username: "u" });
+    expect(Buffer.from(auth.slice(6), "base64").toString()).toBe(
+      `u:${password}`,
+    );
+  });
+
+  it("refuses a malformed upstream, and never echoes the body it could not parse", async () => {
+    const { call, policies, path, logged } = await rig();
+    for (const upstream of [
+      { host: "Proxy.Example.com", port: 3128 },
+      { host: "::1", port: 3128 },
+      { host: "proxy.example.com", port: 0 },
+      { host: "proxy.example.com", port: 3128, username: "a:b" },
+      { host: "proxy.example.com", port: 3128, extra: 1 },
+    ])
+      expect(
+        (
+          await call("PUT", EGRESS_PATHS.policy("172.30.1.8"), {
+            sessionId: ses,
+            upstream,
+          })
+        ).status,
+      ).toBe(400);
+    expect(policies.size).toBe(0);
+    const truncated = await new Promise<{ status: number; text: string }>(
+      (resolve, reject) => {
+        const r = request(
+          {
+            socketPath: path,
+            method: "PUT",
+            path: EGRESS_PATHS.policy("172.30.1.8"),
+          },
+          (res) => {
+            let text = "";
+            res.on("data", (d) => (text += d));
+            res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+          },
+        );
+        r.on("error", reject);
+        r.end('{"sessionId":"x","upstream":{"password":"leak-me');
+      },
+    );
+    expect(truncated.status).toBe(400);
+    expect(truncated.text).not.toContain("leak-me");
+    expect(logged()).not.toContain("leak-me");
+    expect(logged()).toContain("invalid JSON");
   });
 
   it("applies the default connection cap", async () => {
@@ -158,7 +241,15 @@ describe("the control API (C7)", () => {
           unknown: 1,
         })
       ).status,
-    ).toBe(204); // unknown fields are ignored, not an error;
+    ).toBe(400); // unknown fields are refused, never dropped (T-47)
+    expect(
+      (
+        await call("PUT", EGRESS_PATHS.policy("172.30.1.5"), {
+          sessionId: ses,
+          upstream: { host: "proxy.example.com", port: 3128, extra: 1 },
+        })
+      ).status,
+    ).toBe(400);
     expect(
       (await call("PUT", "/v1/policies/not-an-ip", { sessionId: ses })).status,
     ).toBe(404);

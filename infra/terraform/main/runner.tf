@@ -3,8 +3,8 @@
 # vendors), as a customer in us-east-1 would. Off by default; create it for a run and destroy it
 # after:  bin/tf main apply -var enable_runner=true  ...  bin/tf main apply
 #
-# It has no inbound rules at all, and the host's role (Systems Manager only), so `bin/host`
-# reaches it the same way: KESTREL_TARGET=runner bin/host run -- ...
+# It has no inbound rules (unless runner_proxy_port is set, below), and the host's role (Systems
+# Manager only), so `bin/host` reaches it the same way: KESTREL_TARGET=runner bin/host run -- ...
 
 resource "aws_security_group" "runner" {
   count       = var.enable_runner ? 1 : 0
@@ -19,6 +19,18 @@ resource "aws_vpc_security_group_egress_rule" "runner_all" {
   security_group_id = aws_security_group.runner[0].id
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
+}
+
+# The upstream-proxy check (docs/lld/upstream-proxy.md) runs a test proxy here: a separate
+# machine with its own public address, which the egress gateway's block list allows and which
+# is clearly not the host's. Only the host's Elastic IP may reach it, on that one port.
+resource "aws_vpc_security_group_ingress_rule" "runner_proxy" {
+  count             = var.enable_runner && var.runner_proxy_port > 0 ? 1 : 0
+  security_group_id = aws_security_group.runner[0].id
+  ip_protocol       = "tcp"
+  from_port         = var.runner_proxy_port
+  to_port           = var.runner_proxy_port
+  cidr_ipv4         = "${data.aws_eip.host.public_ip}/32"
 }
 
 resource "aws_instance" "runner" {

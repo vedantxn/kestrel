@@ -20,6 +20,7 @@ from ._types import (
     ComputerResponse,
     NetworkPolicy,
     Page,
+    ProxyConfig,
     Session,
     SessionEvent,
     SessionToken,
@@ -95,6 +96,7 @@ class AsyncSessions:
         network: NetworkPolicy | Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         recording: bool | None = None,
+        proxy: ProxyConfig | Mapping[str, Any] | None = None,
         wait_for_capacity_ms: int | None = None,
         idempotency_key: str | None = None,
     ) -> Session:
@@ -106,6 +108,7 @@ class AsyncSessions:
             network=network,
             metadata=metadata,
             recording=recording,
+            proxy=proxy,
             wait_for_capacity_ms=wait_for_capacity_ms,
             idempotency_key=idempotency_key,
         )

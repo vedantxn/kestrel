@@ -117,6 +117,37 @@ class NetworkPolicy:
 
 
 @dataclass(frozen=True)
+class SessionProxy:
+    """A session's upstream proxy as stored and returned. The password is never returned."""
+
+    server: str
+    username: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> SessionProxy:
+        return cls(server=d["server"], username=d.get("username"))
+
+
+@dataclass(frozen=True)
+class ProxyConfig:
+    """Send a session's traffic through your own HTTP proxy: ``server`` is
+    ``http://host:port``. The password is write-only (the API never stores or returns it) and
+    is kept out of ``repr()``, so it stays out of logs."""
+
+    server: str
+    username: str | None = None
+    password: str | None = field(default=None, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"server": self.server}
+        if self.username is not None:
+            out["username"] = self.username
+        if self.password is not None:
+            out["password"] = self.password
+        return out
+
+
+@dataclass(frozen=True)
 class SessionOptions:
     """A session's options as the API applied them, defaults filled in."""
 
@@ -127,6 +158,7 @@ class SessionOptions:
     network: NetworkPolicy
     recording: bool
     metadata: dict[str, str]
+    proxy: SessionProxy | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> SessionOptions:
@@ -138,6 +170,7 @@ class SessionOptions:
             network=NetworkPolicy.from_dict(d.get("network") or {}),
             recording=bool(d.get("recording", False)),
             metadata=dict(d.get("metadata") or {}),
+            proxy=SessionProxy.from_dict(d["proxy"]) if d.get("proxy") else None,
         )
 
 

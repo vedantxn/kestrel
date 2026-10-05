@@ -13,7 +13,9 @@ from kestrel_sdk import (
     KestrelConnectionError,
     KestrelError,
     NetworkPolicy,
+    ProxyConfig,
     SessionEndedError,
+    SessionProxy,
     Viewport,
 )
 
@@ -105,6 +107,22 @@ class TestSessions:
         s = Kestrel().sessions.get(SESSION_ID)
         assert s.status == "paused"
         assert s.raw["newField"] == 1
+
+    def test_create_sends_a_proxy_and_keeps_its_password_out_of_repr(self, api):
+        options = dict(session_json()["options"])
+        options["proxy"] = {"server": "http://proxy.example.com:3128", "username": "u"}
+        route = api.post("/v1/sessions").respond(201, json=session_json(options=options))
+        config = ProxyConfig("http://proxy.example.com:3128", "u", "pr0xy-py")
+        assert "pr0xy-py" not in repr(config)
+        s = Kestrel().sessions.create(proxy=config)
+        assert body(route.calls.last)["proxy"] == {
+            "server": "http://proxy.example.com:3128",
+            "username": "u",
+            "password": "pr0xy-py",
+        }
+        assert s.options.proxy == SessionProxy("http://proxy.example.com:3128", "u")
+        Kestrel().sessions.create(proxy={"server": "http://p.example.com:8080"})
+        assert body(route.calls.last)["proxy"] == {"server": "http://p.example.com:8080"}
 
     def test_repr_hides_the_connect_url(self, api):
         api.get(f"/v1/sessions/{SESSION_ID}").respond(200, json=session_json())

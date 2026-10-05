@@ -40,6 +40,24 @@ describe("log redaction", () => {
     expect(out).toContain("[redacted]");
   });
 
+  it("never writes an upstream proxy's password or Proxy-Authorization", () => {
+    const { text, stream } = capture();
+    const log = createLogger("t", "info", stream);
+    const password = "pr0xy-pa55";
+    const basic = "Basic " + Buffer.from(`user:${password}`).toString("base64");
+    log.info({ password }, "depth 0");
+    log.info({ proxy: { server: "http://p.example:3128", password } }, "1");
+    log.info({ req: { network: { upstream: { password } } } }, "depth 3");
+    log.info({ start: { network: { upstream: { password } } } }, "depth 3");
+    log.info({ headers: { "proxy-authorization": basic } }, "headers");
+    log.info({ upstream: { authorization: basic } }, "entry");
+    log.info({ policy: { upstream: { authorization: basic } } }, "entry");
+    const out = text();
+    expect(out).not.toContain(password);
+    expect(out).not.toContain(basic);
+    expect(out).toContain("http://p.example:3128");
+  });
+
   it("logs the path without any query string", () => {
     const { text, stream } = capture();
     createLogger("t", "info", stream).info(

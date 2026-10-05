@@ -11,6 +11,7 @@ import {
   EGRESS_PATHS,
   EgressHealth,
   EgressPolicy,
+  EgressPolicyAck,
   ListPoliciesResponse,
 } from "@kestrel/contracts";
 import type { Logger } from "@kestrel/shared";
@@ -68,9 +69,13 @@ export class ControlServer {
       if (size > 256 * 1024) throw new Error("body too large");
       chunks.push(c as Buffer);
     }
-    return chunks.length
-      ? JSON.parse(Buffer.concat(chunks).toString("utf8"))
-      : undefined;
+    if (!chunks.length) return undefined;
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      // Not the parser's message: it can quote the input, which may hold a proxy password (T-45).
+      throw new Error("invalid JSON");
+    }
   }
 
   private async handle(
@@ -107,6 +112,18 @@ export class ControlServer {
           ...(entry.allow ? { allow: entry.allow } : {}),
           deny: entry.deny,
           connectionCap: entry.connectionCap,
+          // Never the password or the header made from it (T-45).
+          ...(entry.upstream
+            ? {
+                upstream: {
+                  host: entry.upstream.host,
+                  port: entry.upstream.port,
+                  ...(entry.upstream.username !== undefined
+                    ? { username: entry.upstream.username }
+                    : {}),
+                },
+              }
+            : {}),
           openConnections: entry.active,
         }));
         return this.send(res, 200, ListPoliciesResponse.parse({ policies }));
@@ -141,7 +158,15 @@ export class ControlServer {
             });
           this.policies.set(ip, parsed.data);
           this.metrics.policies.set(this.policies.size);
-          return this.send(res, 204);
+          // The acknowledgement tells the agent this gateway applied the upstream (T-47).
+          return this.send(
+            res,
+            200,
+            EgressPolicyAck.parse({
+              sessionId: parsed.data.sessionId,
+              upstream: this.policies.get(ip)?.upstream !== undefined,
+            }),
+          );
         }
         if (req.method === "DELETE") {
           this.policies.delete(ip);

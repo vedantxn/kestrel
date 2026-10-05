@@ -16,7 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from ._errors import ApiError, KestrelError
-from ._types import NetworkPolicy, Viewport
+from ._types import NetworkPolicy, ProxyConfig, Viewport
 
 SDK_VERSION = "0.1.0"
 DEFAULT_BASE_URL = "http://localhost:8080"
@@ -75,6 +75,7 @@ def create_body(
     network: NetworkPolicy | Mapping[str, Any] | None,
     metadata: Mapping[str, str] | None,
     recording: bool | None,
+    proxy: ProxyConfig | Mapping[str, Any] | None,
     wait_for_capacity_ms: int | None,
     idempotency_key: str | None,
 ) -> dict[str, Any]:
@@ -89,6 +90,7 @@ def create_body(
         "network": network.to_dict() if isinstance(network, NetworkPolicy) else network,
         "metadata": dict(metadata) if metadata is not None else None,
         "recording": recording,
+        "proxy": proxy.to_dict() if isinstance(proxy, ProxyConfig) else proxy,
         "waitForCapacityMs": wait_for_capacity_ms,
         "idempotencyKey": idempotency_key or str(uuid.uuid4()),
     }

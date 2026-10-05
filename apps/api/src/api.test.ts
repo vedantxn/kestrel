@@ -82,14 +82,14 @@ describe("authentication", () => {
 
 describe("validation (A4)", () => {
   it("names an unknown option", async () => {
-    const res = await env.create({ proxy: "http://x" });
+    const res = await env.create({ stealth: true });
     expect(res.statusCode).toBe(400);
     expect(error(res)).toMatchObject({
       code: "invalid_request",
-      param: "proxy",
+      param: "stealth",
       retryable: false,
     });
-    expect(error(res).message).toContain('"proxy"');
+    expect(error(res).message).toContain('"stealth"');
   });
 
   it("names a nested unknown option and a bad value", async () => {

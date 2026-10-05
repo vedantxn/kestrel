@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EventBody, NODE_REPORTABLE_EVENT_TYPES } from "./events.js";
 import { NodeId, ProjectId, SessionId } from "./ids.js";
+import { UpstreamProxy } from "./proxy.js";
 import { EndReason, NetworkPolicy, Viewport } from "./session.js";
 
 /**
@@ -33,13 +34,25 @@ export const NODE_PATHS = {
 
 // --- start / stop ----------------------------------------------------------------------
 
-export const StartRequest = z.object({
+/**
+ * The session's egress settings as the node needs them. The upstream proxy, password
+ * included, travels inside `network` on purpose: a node from before upstream proxies parses
+ * `network` with the strict `NetworkPolicy` and refuses the start, rather than dropping the
+ * field and letting the session exit from the host's address (T-47).
+ */
+export const StartNetwork = NetworkPolicy.extend({
+  upstream: UpstreamProxy.optional(),
+});
+export type StartNetwork = z.infer<typeof StartNetwork>;
+
+/** Strict: a field this node does not know is refused, never silently dropped. */
+export const StartRequest = z.strictObject({
   sessionId: SessionId,
   projectId: ProjectId,
   /** The node's epoch as the API knows it; the node refuses a start from a stale view. */
   epoch: z.number().int().nonnegative(),
   viewport: Viewport,
-  network: NetworkPolicy,
+  network: StartNetwork,
   /** Lifetime limits as durations; the agent turns them into absolute deadlines on its own clock (G11). */
   timeoutMs: z.number().int().positive(),
   idleTimeoutMs: z.number().int().positive(),

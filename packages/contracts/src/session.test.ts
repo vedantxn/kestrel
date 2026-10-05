@@ -77,7 +77,9 @@ describe("session options", () => {
   });
 
   it("rejects an unknown option, in a request and nested", () => {
-    expect(CreateSessionRequest.safeParse({ proxy: "x" }).success).toBe(false);
+    expect(CreateSessionRequest.safeParse({ stealth: true }).success).toBe(
+      false,
+    );
     expect(
       CreateSessionRequest.safeParse({
         viewport: { width: 800, height: 600, scale: 2 },
