@@ -4,7 +4,8 @@ import { pino, type DestinationStream, type Logger } from "pino";
 /**
  * G-01. Secrets never reach a log: the `token` query parameter is stripped from any URL,
  * and the headers that carry credentials are redacted wherever they appear. Request bodies
- * are never logged.
+ * are never logged. An upstream proxy's password, and the `Proxy-Authorization` value made from
+ * it, are redacted at any depth a log call is likely to nest them.
  */
 export function createLogger(
   name: string,
@@ -26,6 +27,15 @@ export function createLogger(
           "*.apiKey",
           "*.proof",
           "*.secret",
+          'req.headers["proxy-authorization"]',
+          'headers["proxy-authorization"]',
+          "password",
+          "*.password",
+          "*.*.password",
+          "*.*.*.password",
+          "authorization",
+          "*.authorization",
+          "*.*.authorization",
         ],
         censor: "[redacted]",
       },
