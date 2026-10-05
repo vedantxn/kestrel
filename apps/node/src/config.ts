@@ -17,6 +17,8 @@ export const Env = z.object({
   POOL_MAX: z.coerce.number().int().min(0).optional(),
   /** Warm browsers the pool may hold beyond the slots (idle ones use little memory). Default 0. */
   POOL_HEADROOM: z.coerce.number().int().min(0).default(0),
+  /** Pooled browsers that carry a recording volume (W3); default 1. */
+  RECORDING_POOL: z.coerce.number().int().min(0).optional(),
   /** Stopped containers that may wait frozen for removal at once (deferred removal). */
   REAP_MAX_QUEUE: z.coerce.number().int().min(0).optional(),
   DOCKER_SOCKET: z.string().default("/var/run/docker.sock"),
@@ -35,6 +37,23 @@ export const Env = z.object({
   /** Seccomp profile JSON; omit to use Docker's default (decided by experiment V1). */
   SECCOMP_FILE: z.string().optional(),
   RUNTIME_VERSION: z.string().default("dev"),
+  /**
+   * What a browser is (ADR 0017): a Docker container, or a Firecracker microVM restored from a
+   * snapshot of a running browser. A microVM node still uses Docker for sessions that record.
+   */
+  RUNTIME: z.enum(["docker", "microvm"]).default("docker"),
+  MICROVM_DIR: z.string().default("/data/kestrel-vm"),
+  FIRECRACKER_DIR: z.string().default("/opt/firecracker"),
+  MICROVM_CGROUP: z.string().default("kestrel-vm"),
+  /** The last octets of the session subnet VMs use; Docker's range is kept below them. */
+  MICROVM_OCTETS: z
+    .string()
+    .regex(/^\d{1,3}-\d{1,3}$/)
+    .default("128-254"),
+  MICROVM_UID: z.coerce.number().int().positive().default(10002),
+  MICROVM_NETNS_READY: z.coerce.number().int().min(0).default(8),
+  /** "2M": clones' memory in hugetlbfs pages via the userfaultfd handler (when it is installed). */
+  MICROVM_PAGES: z.enum(["2M", "4K"]).default("2M"),
   /** Certificate copy for the gateway (G16): Caddy's data directory, the hostname, the destination. */
   CADDY_DATA: z.string().optional(),
   PUBLIC_HOSTNAME: z.string().optional(),

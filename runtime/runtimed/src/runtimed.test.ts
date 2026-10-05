@@ -3,7 +3,7 @@ import { connect, type AddressInfo } from "node:net";
 import { PROOF_HEADER } from "@kestrel/contracts";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
-import { applyViewport } from "./cdp.js";
+import { applyViewport, ViewportSizer } from "./cdp.js";
 import { chromeArgs } from "./chrome-args.js";
 import { Tabs } from "./page.js";
 import { ControlServer } from "./control.js";
@@ -28,6 +28,11 @@ class FakeChrome {
   requests: string[] = [];
   noPage = false;
   garbage = false;
+  /** CDP websocket connections opened. */
+  connections = 0;
+  /** Pages: the snapshot's first, then any made by createTarget. */
+  pages = ["T1"];
+  closed: string[] = [];
 
   constructor() {
     this.server = createServer((req, res) => {
@@ -54,6 +59,7 @@ class FakeChrome {
   }
 
   private onSocket(ws: WebSocket): void {
+    this.connections++;
     ws.on("message", (d) => {
       const m = JSON.parse(d.toString()) as {
         id: number;
@@ -65,10 +71,23 @@ class FakeChrome {
       switch (m.method) {
         case "Target.getTargets":
           return reply({
-            targetInfos: this.noPage ? [] : [{ targetId: "T1", type: "page" }],
+            targetInfos: this.noPage
+              ? []
+              : this.pages.map((targetId) => ({ targetId, type: "page" })),
           });
         case "Target.attachToTarget":
           return reply({ sessionId: "S1" });
+        case "Target.createTarget": {
+          const id = `T${this.pages.length + this.closed.length + 1}`;
+          this.pages.push(id);
+          return reply({ targetId: id });
+        }
+        case "Target.closeTarget": {
+          const id = (m.params as { targetId?: string } | undefined)?.targetId;
+          this.pages = this.pages.filter((p) => p !== id);
+          if (id) this.closed.push(id);
+          return reply({ success: true });
+        }
         case "Browser.getWindowForTarget":
           return reply({ windowId: 7 });
         case "Browser.setWindowBounds":
@@ -129,6 +148,7 @@ const baseCfg: Env = {
   SCREEN: "1920x1080x24",
   PROFILE_DIR: "/profile",
   CHROME_SANDBOX: "on",
+  SNAPSHOT: "off",
   CONTROL_PORT: 9000,
   FORWARD_PORT: 9223,
   CHROME_PORT: 9222,
@@ -183,6 +203,17 @@ describe("Chrome's command line (R3, R8, R9, R12)", () => {
           a !== "--proxy-bypass-list=<-loopback>",
       ),
     ).toBe(false);
+  });
+
+  it("starts no spare renderer in a snapshot, so no page process is shared by its clones (V7)", () => {
+    const off = chromeArgs(baseCfg).find((a) =>
+      a.startsWith("--disable-features="),
+    );
+    expect(off).not.toMatch(/SpareRenderer/);
+    const on = chromeArgs({ ...baseCfg, SNAPSHOT: "on" }).find((a) =>
+      a.startsWith("--disable-features="),
+    );
+    expect(on).toMatch(/,SpareRendererForSitePerProcess$/);
   });
 
   it("puts the window at the top-left of the display and opens a blank page", () => {
@@ -312,6 +343,23 @@ describe("the CDP forward (R7, C10)", () => {
 });
 
 describe("sizing the page to the viewport (A6)", () => {
+  it("sized once while warming, a start that asks for the same viewport only measures it", async () => {
+    chrome = new FakeChrome();
+    const port = await chrome.start();
+    const sizer = new ViewportSizer(port);
+    closers.push(async () => sizer.close());
+    await sizer.apply({ width: 1280, height: 720 });
+    expect(chrome.bounds).toHaveLength(1);
+    const r = await sizer.apply({ width: 1280, height: 720 });
+    expect(r.viewport).toEqual({ width: 1280, height: 720 });
+    expect(chrome.bounds).toHaveLength(1); // no second resize
+    expect(chrome.connections).toBe(1); // and no second connection
+    // A different viewport is still sized, on the same connection.
+    await sizer.apply({ width: 800, height: 500 });
+    expect(chrome.bounds).toHaveLength(2);
+    expect(chrome.connections).toBe(1);
+  });
+
   it("makes innerWidth and innerHeight exactly what was asked, by allowing for the toolbar and borders", async () => {
     chrome = new FakeChrome();
     const port = await chrome.start();
@@ -455,6 +503,24 @@ describe("the supervisor (R4-R6)", () => {
     expect(s.chromeReady).toBe(false);
   });
 
+  it("runs its preparation after Chrome answers and before it counts as ready", async () => {
+    const { s } = await sup();
+    const seen: string[] = [];
+    s.prepare = async () => {
+      seen.push(s.state);
+    };
+    await s.start();
+    expect(seen).toEqual(["starting"]);
+    expect(s.state).toBe("ready");
+  });
+
+  it("is ready even if its preparation fails", async () => {
+    const { s } = await sup();
+    s.prepare = () => Promise.reject(new Error("no page"));
+    await s.start();
+    expect(s.state).toBe("ready");
+  });
+
   it("fails if Chrome never answers", async () => {
     const { s, fatal } = await sup({ chromeUp: false });
     await s.start();
@@ -479,7 +545,7 @@ describe("the supervisor (R4-R6)", () => {
 });
 
 describe("the control API (C5)", () => {
-  async function rig() {
+  async function rig(opts: { snapshot?: boolean } = {}) {
     chrome = new FakeChrome();
     const port = await chrome.start();
     const fwd = new CdpForward(port);
@@ -491,7 +557,16 @@ describe("the control API (C5)", () => {
       "/dev/null",
       { displayMs: 200, chromeMs: 2000, pollMs: 20 },
     );
-    const control = new ControlServer(TOKEN, sup, fwd, port, new Tabs());
+    const control = new ControlServer(
+      TOKEN,
+      sup,
+      fwd,
+      port,
+      new Tabs(),
+      undefined,
+      undefined,
+      opts.snapshot ?? false,
+    );
     const cport = await control.listen(0, "127.0.0.1");
     closers.push(() => control.close());
     const call = async (
@@ -516,6 +591,35 @@ describe("the control API (C5)", () => {
     return { sup, fwd, call };
   }
 
+  it("lets a snapshot clone replace its token once, then refuses the template's, and gives it a fresh page", async () => {
+    const { sup, call } = await rig({ snapshot: true });
+    await sup.start();
+    const fresh = "c".repeat(48);
+    expect(
+      (await call("POST", "/rekey", { token: fresh }, "wrong")).status,
+    ).toBe(401);
+    expect((await call("POST", "/rekey", { token: "short" })).status).toBe(400);
+    expect((await call("POST", "/rekey", { token: fresh })).json).toEqual({
+      ok: true,
+    });
+    // The snapshot's page is gone; the session's page was made after the restore.
+    expect(chrome!.closed).toEqual(["T1"]);
+    expect(chrome!.pages).toEqual(["T2"]);
+    expect((await call("GET", "/health")).status).toBe(401);
+    expect((await call("GET", "/health", undefined, fresh)).status).toBe(200);
+    expect(
+      (await call("POST", "/rekey", { token: "d".repeat(48) }, fresh)).status,
+    ).toBe(409);
+  });
+
+  it("has nothing to rekey when it is not a snapshot clone", async () => {
+    const { sup, call } = await rig();
+    await sup.start();
+    expect(
+      (await call("POST", "/rekey", { token: "c".repeat(48) })).status,
+    ).toBe(409);
+  });
+
   it("needs the token", async () => {
     const { call } = await rig();
     expect((await call("GET", "/health", undefined, null)).status).toBe(401);
@@ -536,6 +640,26 @@ describe("the control API (C5)", () => {
       chromeReady: true,
       chromeVersion: "Chrome/154.0.8037.92",
     });
+  });
+
+  it("holds a health call with wait until the browser is ready", async () => {
+    const { sup, call } = await rig();
+    const pending = call("GET", "/health?wait=5000");
+    await new Promise((r) => setTimeout(r, 100));
+    void sup.start();
+    const t0 = Date.now();
+    expect((await pending).json).toMatchObject({
+      status: "ready",
+      chromeReady: true,
+    });
+    expect(Date.now() - t0).toBeLessThan(2000);
+    // and gives up after the wait if it never is
+    const { call: call2 } = await rig();
+    const t1 = Date.now();
+    expect((await call2("GET", "/health?wait=150")).json).toMatchObject({
+      status: "starting",
+    });
+    expect(Date.now() - t1).toBeGreaterThanOrEqual(140);
   });
 
   it("will not configure a browser that is not ready", async () => {

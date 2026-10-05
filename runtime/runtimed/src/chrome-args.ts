@@ -8,7 +8,8 @@ export function chromeArgs(
   cfg: Pick<
     Env,
     "KESTREL_PROXY" | "PROFILE_DIR" | "CHROME_PORT" | "CHROME_SANDBOX"
-  >,
+  > &
+    Partial<Pick<Env, "SNAPSHOT">>,
   size = { width: 1280, height: 800 },
 ): string[] {
   return [
@@ -38,7 +39,8 @@ export function chromeArgs(
     "--no-default-browser-check",
     "--password-store=basic",
     "--use-mock-keychain",
-    "--disable-features=Translate,MediaRouter,OptimizationHints",
+    // In a snapshot, also no spare renderer: one made before the snapshot is shared by every clone (V7).
+    `--disable-features=Translate,MediaRouter,OptimizationHints${cfg.SNAPSHOT === "on" ? ",SpareRendererForSitePerProcess" : ""}`,
     // The window at the top-left of the virtual display (R3). Configure resizes it to the requested viewport.
     "--window-position=0,0",
     `--window-size=${size.width},${size.height}`,

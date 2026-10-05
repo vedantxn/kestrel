@@ -1,0 +1,22 @@
+# Node a's browsers as Firecracker microVMs (ADR 0017), added to docker-compose.yml by deploy.sh
+# when RUNTIME_A=microvm. The agent already holds the Docker socket (root on the host); this adds
+# what the jailer needs: /dev/kvm and the tap device, mount and cgroup rights (privileged), the
+# host's process and cgroup namespaces so a VM outlives an agent restart, the jail and template directories,
+# and /run/netns shared with the host so namespaces do too.
+services:
+  node-a:
+    privileged: true
+    pid: host
+    cgroup: host
+    environment:
+      RUNTIME: microvm
+      MICROVM_NETNS_READY: ${MICROVM_NETNS_READY:-8}
+    volumes:
+      - /data/kestrel-vm:/data/kestrel-vm
+      - /opt/firecracker:/opt/firecracker:ro
+      - type: bind
+        source: /run/netns
+        target: /run/netns
+        bind:
+          propagation: rshared
+      - /sys/fs/cgroup:/sys/fs/cgroup

@@ -83,6 +83,12 @@ export interface AgentConfig {
   warmWaitMs?: number;
   /** How many frozen containers may wait for removal at once (default REAP_MAX_QUEUE). */
   reapMaxQueue?: number;
+  /**
+   * How many pooled browsers carry a recording volume (W3). Only a session that records needs
+   * one, and making and removing a volume for every browser added two Docker calls to each cycle;
+   * a session that records and finds none hot starts cold with a fresh volume. Default 1.
+   */
+  recordingPool?: number;
   /** Send a session's `removed` report as soon as it is queued, not with the next heartbeat. Default on. */
   reportOnRemoval?: boolean;
   /** Where the API reaches this agent, sent at registration. */
@@ -160,6 +166,11 @@ export class NodeAgent {
   private tasks = new Set<Promise<unknown>>();
   /** Pooled browsers being created, not yet in the store: counted so a second refill cannot over-fill the pool. */
   private spawning = 0;
+  /** Of `spawning`, how many are being made with a recording volume. */
+  private spawningWithVolume = 0;
+  /** A reconcile asked for by a container event while one was running: run once more after it. */
+  private reconcileAgain = false;
+  private reconciling: Promise<void> | null = null;
   /** When recent starts arrived, for the demand-sized pool. */
   private recentStarts: number[] = [];
   /** Pooled browsers being made, from the first Docker call until they are hot (or failed). */
@@ -316,6 +327,18 @@ export class NodeAgent {
     }
     await this.idle();
     await this.reconcile();
+    // A deploy may have lowered the pool's size: hot browsers past it are left over, not wanted.
+    const keep = Math.max(
+      this.c.poolTarget,
+      this.c.recordingPool ?? (this.d.volumes ? 1 : 0),
+    );
+    const hot = this.store.allPool().filter((p) => p.state === "hot");
+    for (const p of this.c.poolTarget === 0 ? hot : hot.slice(keep)) {
+      if (!this.store.takePool(p.containerId)) continue;
+      const vol = this.volumeOf.get(p.containerId);
+      this.volumeOf.delete(p.containerId);
+      await this.removeWithVolume(p.containerId, vol);
+    }
     await this.syncEgress();
     this.booted = true;
   }
@@ -434,15 +457,10 @@ export class NodeAgent {
       let held: { containerId: string; address: string } | null = null;
       try {
         this.startMarks.set(id, [["begin", performance.now()]]);
-        const got = await this.acquire(id);
+        // `acquire` has already recorded the container against the binding.
+        const got = await this.acquire(id, Boolean(req.recording));
         this.mark(id, `acquired:${got.path}`);
         held = { containerId: got.containerId, address: got.address };
-        this.store.updateBinding(id, {
-          containerId: got.containerId,
-          address: got.address,
-          controlToken: got.token,
-          startPath: got.path,
-        });
         await this.d.failpoints.hit("node.start.after_acquire");
         if (this.aborted(id)) throw new StartAborted();
 
@@ -459,9 +477,11 @@ export class NodeAgent {
         // start that fails later leaves nothing unaccounted for: retention removes it.
         let recording = false;
         if (req.recording) {
-          const volume = (await this.d.docker.inspect(got.containerId))?.labels[
-            "kestrel.volume"
-          ];
+          const volume =
+            this.volumeOf.get(got.containerId) ??
+            (await this.d.docker.inspect(got.containerId))?.labels[
+              "kestrel.volume"
+            ];
           if (volume) {
             this.store.addRecording(id, volume, this.now());
             recording = true;
@@ -555,7 +575,10 @@ export class NodeAgent {
    * An admitted start is never refused for lack of a pooled browser (G6): take a hot one; else
    * wait for one that is still starting; else make one. The last two are the cold path.
    */
-  private async acquire(sessionId: string): Promise<{
+  private async acquire(
+    sessionId: string,
+    recording = false,
+  ): Promise<{
     containerId: string;
     address: string;
     token: string;
@@ -580,15 +603,30 @@ export class NodeAgent {
     };
 
     // A hot one. `takePool` succeeds for exactly one caller, so two starts can never share a container.
+    // A session that records needs a browser with a volume; one that does not leaves those for it.
     const takeHot = async (path: "hot" | "cold") => {
-      for (const p of this.store.allPool().filter((p) => p.state === "hot")) {
+      const hot = this.store
+        .allPool()
+        .filter((p) => p.state === "hot")
+        .filter((p) => !recording || this.volumeOf.has(p.containerId))
+        .sort(
+          (a, b) =>
+            Number(this.volumeOf.has(a.containerId)) -
+            Number(this.volumeOf.has(b.containerId)),
+        );
+      for (const p of hot) {
         if (!this.store.takePool(p.containerId)) continue;
         void this.refillPool();
         const taken = bind(p.containerId, p.address, p.controlToken, path);
-        const info = await this.d.docker
-          .inspect(p.containerId)
-          .catch(() => null);
-        if (info?.running) return taken;
+        // Still alive? Asked of the browser itself, not the Docker daemon, which serializes
+        // container work: an inspect here queued behind the pool's creations under load.
+        const alive = await this.d.runtime
+          .health(p.address, p.controlToken)
+          .then(
+            (h) => h.status === "ready" && h.chromeReady,
+            () => false,
+          );
+        if (alive) return taken;
         this.store.updateBinding(sessionId, {
           containerId: null,
           address: null,
@@ -606,7 +644,10 @@ export class NodeAgent {
     // finishes (another start may have taken it, or a different one may be ready). Waiting on
     // them one after another instead added up to 10 s under load. Bounded: past the bound a
     // fresh container is no slower than continuing to wait.
-    const until = performance.now() + (this.c.warmWaitMs ?? WARM_WAIT_MS);
+    // A session that records takes only a browser with a volume, and the pool keeps few of those:
+    // it starts cold with its own rather than wait on browsers it could not take.
+    const until =
+      performance.now() + (recording ? 0 : (this.c.warmWaitMs ?? WARM_WAIT_MS));
     for (;;) {
       const warming = [
         ...this.makingPool,
@@ -642,7 +683,11 @@ export class NodeAgent {
           },
           "pool: evicted to make room for a cold start",
         );
-        await this.d.docker.remove(victim.containerId).catch(() => undefined);
+        // Off the start's path: freeze it for the reaper, or remove it in the background.
+        const vol = this.volumeOf.get(victim.containerId);
+        this.volumeOf.delete(victim.containerId);
+        if (!(await this.deferRemoval(victim.containerId, vol)))
+          this.spawn(this.removeWithVolume(victim.containerId, vol));
       }
     }
     const snap = this.store.allPool();
@@ -658,7 +703,7 @@ export class NodeAgent {
       "pool: going cold",
     );
     this.mark(sessionId, "cold:begin");
-    const created = await this.createContainer("session");
+    const created = await this.createContainer("session", recording);
     this.mark(sessionId, "cold:created");
     const info = created.info;
     const bound = bind(info.id, info.address as string, created.token, "cold");
@@ -679,9 +724,10 @@ export class NodeAgent {
 
   private async createContainer(
     role: Role,
+    withVolume: boolean,
   ): Promise<{ info: ContainerInfo; token: string }> {
     const token = hex(24);
-    const volume = await this.makeRecordingVolume();
+    const volume = withVolume ? await this.makeRecordingVolume() : undefined;
     let info: ContainerInfo;
     try {
       info = await this.d.docker.run(
@@ -699,19 +745,29 @@ export class NodeAgent {
     return { info, token };
   }
 
-  /** Poll the container until its browser answers; "hot" must mean truly ready (R5). */
+  /**
+   * Wait until the container's browser answers; "hot" must mean truly ready (R5). Once runtimed
+   * listens, its health call is held until the browser is ready, so the agent learns it at once;
+   * until then (and with an older runtimed) it polls briefly.
+   */
   private async waitReady(address: string, token: string): Promise<boolean> {
     const until = this.now() + this.c.readyTimeoutMs;
     for (;;) {
+      const left = until - this.now();
       try {
-        const h = await this.d.runtime.health(address, token);
+        const h = await this.d.runtime.health(
+          address,
+          token,
+          2000,
+          Math.max(0, Math.min(5_000, left)),
+        );
         if (h.status === "ready" && h.chromeReady) return true;
         if (h.status === "failed") return false;
       } catch {
         /* not up yet */
       }
       if (this.now() > until) return false;
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 10));
     }
   }
 
@@ -759,9 +815,16 @@ export class NodeAgent {
     );
     for (let i = 0; i < want; i++) {
       this.spawning++;
+      const withVolume =
+        this.d.volumes !== undefined &&
+        this.store.allPool().filter((p) => this.volumeOf.has(p.containerId))
+          .length +
+          this.spawningWithVolume <
+          (this.c.recordingPool ?? 1);
+      if (withVolume) this.spawningWithVolume++;
       // Waitable from the moment it begins, not only once Docker has made the container: a start
       // finding the pool empty waits for whichever of these is ready first.
-      const made = this.spawnPooled();
+      const made = this.spawnPooled(withVolume);
       this.makingPool.add(made);
       void made.finally(() => this.makingPool.delete(made));
       this.spawn(made.then(() => undefined));
@@ -769,12 +832,13 @@ export class NodeAgent {
   }
 
   /** Resolves true once the new pooled browser is hot (and in the pool), false if it never is. */
-  private async spawnPooled(): Promise<boolean> {
+  private async spawnPooled(withVolume: boolean): Promise<boolean> {
     let created: { info: ContainerInfo; token: string };
     try {
-      created = await this.createContainer("pool");
+      created = await this.createContainer("pool", withVolume);
     } catch (e) {
       this.spawning--;
+      if (withVolume) this.spawningWithVolume--;
       this.d.log.warn(
         { err: e instanceof Error ? e.message : String(e) },
         "could not create a pooled browser",
@@ -790,6 +854,7 @@ export class NodeAgent {
       createdAt: this.now(),
     });
     this.spawning--;
+    if (withVolume) this.spawningWithVolume--;
     const ready = this.waitReady(info.address as string, token).then(
       async (ok) => {
         if (ok && this.store.allPool().some((p) => p.containerId === info.id)) {
@@ -845,6 +910,11 @@ export class NodeAgent {
       at: performance.now(),
     });
     return true;
+  }
+
+  private async removeWithVolume(id: string, volume?: string): Promise<void> {
+    await this.d.docker.remove(id).catch(() => undefined);
+    if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
   }
 
   /** Remove frozen containers one at a time: when nothing is being made, or one has waited too long. */
@@ -984,12 +1054,10 @@ export class NodeAgent {
         .catch(() => undefined);
     if (b.address) await this.clearPolicyBeforeRemoval(id, b.address);
     await this.d.failpoints.hit("node.stop.after_policy_cleared");
+    // Known from creation, or from the container's label after a restart (reconcile); a volume
+    // missed here (a teardown during boot) is an orphan that volume reaping removes.
     const volume =
-      b.containerId && !recorded
-        ? (this.volumeOf.get(b.containerId) ??
-          (await this.d.docker.inspect(b.containerId).catch(() => null))
-            ?.labels["kestrel.volume"])
-        : undefined;
+      b.containerId && !recorded ? this.volumeOf.get(b.containerId) : undefined;
     if (b.containerId) this.volumeOf.delete(b.containerId);
     if (b.containerId && !(await this.deferRemoval(b.containerId, volume))) {
       await this.d.docker.remove(b.containerId);
@@ -1155,11 +1223,50 @@ export class NodeAgent {
    * reported (it crashed, or was OOM-killed); a container nothing refers to is removed; dead
    * pooled browsers are dropped. Runs every 5 s and on Docker `die` and `oom` events.
    */
-  async reconcile(): Promise<void> {
+  /**
+   * A container died or was OOM-killed. Only one the agent still counts on (a live session's, or
+   * a pooled browser) can change anything, so only those trigger a reconcile; the agent's own
+   * removals, one per session under churn, used to trigger a full pass each, and every pass is a
+   * listing plus inspects through a Docker daemon that serializes container work.
+   */
+  containerDied(id: string): void {
+    const ours =
+      this.store.allPool().some((p) => p.containerId === id) ||
+      this.store
+        .allBindings()
+        .some((b) => b.containerId === id && b.state !== "stopping");
+    if (ours) void this.reconcile().catch(() => undefined);
+  }
+
+  /** One pass at a time: a call during a pass runs one more pass after it, however many calls arrive. */
+  reconcile(): Promise<void> {
+    if (this.reconciling) {
+      this.reconcileAgain = true;
+      return this.reconciling;
+    }
+    const run = (async () => {
+      try {
+        do {
+          this.reconcileAgain = false;
+          await this.doReconcile();
+        } while (this.reconcileAgain);
+      } finally {
+        this.reconciling = null;
+      }
+    })();
+    this.reconciling = run;
+    return run;
+  }
+
+  private async doReconcile(): Promise<void> {
     const containers = await this.d.docker.list();
     const present = new Set(containers.map((c) => c.id));
     for (const id of this.volumeOf.keys())
       if (!present.has(id)) this.volumeOf.delete(id);
+    // After a restart the map is empty: the volume is also on the container's label.
+    for (const c of containers)
+      if (c.labels["kestrel.volume"] && !this.volumeOf.has(c.id))
+        this.volumeOf.set(c.id, c.labels["kestrel.volume"]);
     const byId = new Map(containers.map((c) => [c.id, c]));
     const now = this.now();
 
@@ -1229,6 +1336,9 @@ export class NodeAgent {
     for (const c of containers) {
       if (known.has(c.id) || now - c.createdAt < this.c.newContainerGraceMs)
         continue;
+      // The listing is a snapshot: the reaper may have removed this one since (and taken it off
+      // its queue, so it is no longer known). Only one that still exists is a real leftover.
+      if (!(await this.d.docker.inspect(c.id).catch(() => null))) continue;
       this.d.log.warn(
         { container: c.id.slice(0, 12) },
         "removing a container nothing refers to",

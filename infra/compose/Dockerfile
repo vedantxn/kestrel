@@ -3,9 +3,10 @@
 #   docker build -f infra/compose/Dockerfile -t kestrel-platform:dev .
 FROM node:24-bookworm-slim@sha256:5cbc7caba8c2c0f0bca675d1b61b9f2857e1cf1853c6164ee9dd409501a936e7
 
-# iptables for the node agent (Debian 12's default backend is nf_tables, like the host's: experiment V6).
+# iptables for the node agent (Debian 12's default backend is nf_tables, like the host's: experiment V6), and
+# iproute2 for the network namespaces of microVM nodes (ADR 0017).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends iptables ca-certificates \
+ && apt-get install -y --no-install-recommends iptables iproute2 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

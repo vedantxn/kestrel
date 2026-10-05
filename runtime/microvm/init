@@ -1,0 +1,24 @@
+#!/bin/sh
+# PID 1 of a Kestrel microVM (experiment V7): the same browser runtime as the container image,
+# with the mounts Docker would have made. The kernel passes KESTREL_* from its command line as
+# environment. Root is read-only; everything writable is memory-backed and no-exec, as in a container.
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+mkdir -p /dev/shm /dev/pts
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o size=1024m,mode=1777,nosuid,nodev shm /dev/shm
+mount -t tmpfs -o size=512m,uid=10001,gid=10001,mode=0700,noexec,nosuid,nodev tmpfs /profile
+mount -t tmpfs -o size=64m,mode=1777,noexec,nosuid,nodev tmpfs /tmp
+mount -t tmpfs -o size=64m,uid=10001,gid=10001,mode=0700,noexec,nosuid,nodev tmpfs /home/kestrel
+mount -t tmpfs -o size=8m,mode=0755 tmpfs /run
+ip link set lo up 2>/dev/null || true
+# The browser runs unprivileged, with no way to gain privileges, as in the container (R10).
+setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs \
+  env -i HOME=/home/kestrel NODE_ENV=production PATH=/usr/local/bin:/usr/bin:/bin \
+  KESTREL_CONTROL_TOKEN="$KESTREL_CONTROL_TOKEN" KESTREL_PROXY="$KESTREL_PROXY" KESTREL_NODE="${KESTREL_NODE:-a}" SNAPSHOT=on \
+  /usr/local/bin/node /opt/runtimed/runtimed.mjs &
+# Reap orphans; when the runtime exits, the VM ends (panic=1 reboots, and Firecracker exits).
+while kill -0 $! 2>/dev/null; do wait; done
+echo o > /proc/sysrq-trigger 2>/dev/null
+exit 1

@@ -38,6 +38,15 @@ resource "aws_instance" "host" {
   iam_instance_profile        = aws_iam_instance_profile.host.name
   associate_public_ip_address = true
 
+  # KVM inside the instance, for the microVM runtime (experiment V7, HLD 16 item 5). AWS offers
+  # nested virtualisation on the M7i, C7i and M8i families since 2026.
+  dynamic "cpu_options" {
+    for_each = var.nested_virtualization ? [1] : []
+    content {
+      nested_virtualization = "enabled"
+    }
+  }
+
   # I11: tokens required, hop limit 1. A container on a bridge is one hop further away and
   # cannot obtain instance credentials.
   metadata_options {

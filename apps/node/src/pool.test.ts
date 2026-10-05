@@ -238,4 +238,51 @@ describe("pool refill under demand", () => {
     expect(r.docker.paused.has(cid)).toBe(false);
     expect(r.docker.containers.has(cid)).toBe(false);
   });
+
+  it("reconciles on the death of a container it counts on, not on its own removals", async () => {
+    const r = makeRig({ deferRemoval: true });
+    await bootWithPool(r);
+    const req = startReq();
+    await r.agent.start(req);
+    const cid = r.store.getBinding(req.sessionId)!.containerId!;
+    await r.agent.stop({
+      sessionId: req.sessionId,
+      reason: "client_stop",
+    } as never);
+    await r.agent.idle();
+    const before = r.docker.listCalls;
+    r.agent.containerDied(cid); // a retired container the agent removed itself
+    await r.agent.idle();
+    expect(r.docker.listCalls).toBe(before);
+
+    const pooled = r.store.allPool()[0]!.containerId;
+    r.docker.kill(pooled);
+    r.agent.containerDied(pooled);
+    await r.agent.reconcile();
+    expect(r.docker.listCalls).toBeGreaterThan(before);
+    expect(r.store.allPool().some((p) => p.containerId === pooled)).toBe(false);
+  });
+
+  it("runs one reconcile pass at a time, and one more for calls made during it", async () => {
+    const r = makeRig();
+    await bootWithPool(r);
+    const before = r.docker.listCalls;
+    await Promise.all([
+      r.agent.reconcile(),
+      r.agent.reconcile(),
+      r.agent.reconcile(),
+      r.agent.reconcile(),
+    ]);
+    expect(r.docker.listCalls - before).toBe(2);
+  });
+
+  it("removes hot browsers left over from a larger pool when it boots with a smaller one", async () => {
+    const r = makeRig({ slotsTotal: 6, poolTarget: 4, refillAtOnce: 4 });
+    await bootWithPool(r);
+    expect(r.store.allPool()).toHaveLength(4);
+    r.config.poolTarget = 0;
+    await r.restart().boot();
+    expect(r.store.allPool()).toHaveLength(0);
+    expect(r.docker.containers.size).toBe(0);
+  });
 });

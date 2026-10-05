@@ -171,6 +171,8 @@ export class DockerodeDriver implements DockerDriver {
     iface: string;
     subnet: string;
     gateway: string;
+    /** The part of the subnet Docker may allocate from (the rest is the microVMs'). */
+    ipRange?: string;
   }): Promise<void> {
     const existing = await this.docker.listNetworks({
       filters: { name: [o.name] },
@@ -181,7 +183,15 @@ export class DockerodeDriver implements DockerDriver {
       Driver: "bridge",
       Internal: true,
       EnableIPv6: false,
-      IPAM: { Config: [{ Subnet: o.subnet, Gateway: o.gateway }] },
+      IPAM: {
+        Config: [
+          {
+            Subnet: o.subnet,
+            Gateway: o.gateway,
+            ...(o.ipRange ? { IPRange: o.ipRange } : {}),
+          },
+        ],
+      },
       Options: {
         "com.docker.network.bridge.name": o.iface,
         "com.docker.network.bridge.enable_icc": "false",
@@ -224,7 +234,9 @@ export class DockerodeDriver implements DockerDriver {
     const out: ContainerInfo[] = [];
     for (const r of rows) {
       if ((r.Labels ?? {})["kestrel.node"] !== this.nodeId) continue;
-      if (r.State === "running") {
+      // A paused container is a frozen, retired one waiting for the reaper: Docker reports it as
+      // running, and the listing has all it needs, so it is not inspected either.
+      if (r.State === "running" || r.State === "paused") {
         out.push({
           id: r.Id,
           labels: r.Labels ?? {},

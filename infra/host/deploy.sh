@@ -2,6 +2,7 @@
 # Deploy the platform on this host from the tree in /srv/kestrel (v1 plan I15, I16). Idempotent.
 # Run as root (bin/host deploy and bin/host run do):
 #   sudo infra/host/deploy.sh [--no-build] [--two-nodes]
+#   RUNTIME_A=microvm: node a's browsers are Firecracker microVMs (ADR 0017); node b stays Docker.
 #
 # Builds the images, makes the secrets the first time, starts Postgres, applies migrations,
 # creates the first project and API key, then starts the platform services.
@@ -11,10 +12,27 @@ for a in "$@"; do case "$a" in --no-build) NO_BUILD=1;; --two-nodes) TWO=1;; *) 
 cd "$(dirname "$0")/../.."
 SECRETS=/var/lib/kestrel/secrets
 COMPOSE=(docker compose --env-file /var/lib/kestrel/compose.env -f infra/compose/docker-compose.yml)
+RUNTIME_A=${RUNTIME_A:-docker}
 log() { printf '\n== %s\n' "$*"; }
 
 log "host prerequisites"
 /usr/local/bin/kestrel-host-check
+if [ "$RUNTIME_A" = microvm ]; then
+  # Firecracker, the guest kernel, the jailer's cgroup and shared /run/netns, at every boot too.
+  infra/host/firecracker-setup.sh
+  cat > /etc/systemd/system/kestrel-microvm-host.service <<UNIT
+[Unit]
+Description=Kestrel microVM host prerequisites (ADR 0017)
+Before=docker.service
+[Service]
+Type=oneshot
+ExecStart=$PWD/infra/host/firecracker-setup.sh
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload && systemctl enable kestrel-microvm-host.service >/dev/null 2>&1
+  COMPOSE+=(-f infra/compose/docker-compose.microvm.yml)
+fi
 
 # The hostname and public address come from the instance's own metadata (token required).
 TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
@@ -47,21 +65,21 @@ mkdir -p /var/lib/kestrel/postgres && chown 999:999 /var/lib/kestrel/postgres 2>
 ACCOUNT=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | sed -n 's/.*"accountId" *: *"\([0-9]*\)".*/\1/p')
 TEST_PAGE_URL="https://kestrel-testpage-$ACCOUNT.s3.us-east-1.amazonaws.com/test/index.html"
 NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443}]'
-SIZES="SLOTS_A=5\nPOOL_A=2"
+SIZES="SLOTS_A=${SLOTS_A:-5}\nPOOL_A=${POOL_A:-2}"
 if [ "$TWO" = 1 ]; then
   # Two nodes on one host, to exercise the multi-node paths (sizes: v1 plan 4.12).
   NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443},{"id":"b","address":"http://127.0.0.1:7002","secretFile":"/secrets/node-b.secret","connectPort":8444}]'
   SIZES="SLOTS_A=${SLOTS_A:-3}\nPOOL_A=${POOL_A:-1}\nSLOTS_B=${SLOTS_B:-2}\nPOOL_B=${POOL_B:-1}"
 fi
 # Pool tuning (optional): warm browsers beyond the slots, and how many to start at once.
-SIZES="$SIZES\nPOOL_HEADROOM=${POOL_HEADROOM:-0}\nREFILL_AT_ONCE=${REFILL_AT_ONCE:-}\nRECORDING=${RECORDING:-on}\nREAP_MAX_QUEUE=${REAP_MAX_QUEUE:-4}"
+SIZES="$SIZES\nPOOL_HEADROOM=${POOL_HEADROOM:-0}\nREFILL_AT_ONCE=${REFILL_AT_ONCE:-}\nRECORDING=${RECORDING:-on}\nREAP_MAX_QUEUE=${REAP_MAX_QUEUE:-4}\nRECORDING_POOL=${RECORDING_POOL:-1}"
 cat > /var/lib/kestrel/compose.env <<ENV
 PUBLIC_HOSTNAME=$HOSTNAME_PUBLIC
 PUBLIC_IP=$PUBLIC_IP
 TEST_PAGE_URL=$TEST_PAGE_URL
 KESTREL_NODES=$NODES
 ENV
-printf "$SIZES\n" >> /var/lib/kestrel/compose.env
+printf "$SIZES\nRUNTIME_A=$RUNTIME_A\nMICROVM_NETNS_READY=${MICROVM_NETNS_READY:-8}\n" >> /var/lib/kestrel/compose.env
 chmod 0600 /var/lib/kestrel/compose.env
 
 if [ "$NO_BUILD" != 1 ]; then
@@ -71,6 +89,11 @@ if [ "$NO_BUILD" != 1 ]; then
     echo "kestrel-runtime:dev is missing; build it with runtime/build.sh" >&2; exit 1
   fi
 fi
+if [ "$RUNTIME_A" = microvm ] && { [ "$NO_BUILD" != 1 ] || [ ! -f /data/kestrel-vm/template/mem ]; }; then
+  log "microVM template (the runtime image, booted once and snapshotted)"
+  runtime/microvm/build-rootfs.sh
+  runtime/microvm/build-template.sh
+fi
 
 if [ ! -f "$SECRETS/token-private.pem" ]; then
   log "token signing keys"
@@ -79,15 +102,25 @@ fi
 chown 1001:1001 "$SECRETS/token-private.pem"; chmod 0400 "$SECRETS/token-private.pem"; chmod 0644 "$SECRETS/token-public.pem"
 
 # The session network and its address must exist before the egress gateway can listen on it.
-if ! docker network inspect ksl-a >/dev/null 2>&1; then
-  docker network create --internal --driver bridge --opt com.docker.network.bridge.name=ksl-a \
-    --opt com.docker.network.bridge.enable_icc=false --subnet 172.30.1.0/24 --gateway 172.30.1.1 --label kestrel.node=a ksl-a >/dev/null
-fi
-
-if [ "$TWO" = 1 ] && ! docker network inspect ksl-b >/dev/null 2>&1; then
-  docker network create --internal --driver bridge --opt com.docker.network.bridge.name=ksl-b \
-    --opt com.docker.network.bridge.enable_icc=false --subnet 172.30.2.0/24 --gateway 172.30.2.1 --label kestrel.node=b ksl-b >/dev/null
-fi
+# Docker allocates containers' addresses from the lower half; microVMs use the upper (ADR 0017).
+session_net() { # NAME OCTET
+  local range
+  range=$(docker network inspect -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}' "$1" 2>/dev/null || echo missing)
+  if [ "$range" != "172.30.$2.0/25" ] && [ "$range" != missing ]; then
+    if [ -z "$(docker network inspect -f '{{range .Containers}}x{{end}}' "$1")" ]; then
+      docker network rm "$1" >/dev/null; range=missing
+    else
+      echo "$1 has no IP range and still has containers; stop them to move it" >&2
+    fi
+  fi
+  if [ "$range" = missing ]; then
+    docker network create --internal --driver bridge --opt com.docker.network.bridge.name="$1" \
+      --opt com.docker.network.bridge.enable_icc=false --subnet "172.30.$2.0/24" --ip-range "172.30.$2.0/25" \
+      --gateway "172.30.$2.1" --label kestrel.node="${1#ksl-}" "$1" >/dev/null
+  fi
+}
+session_net ksl-a 1
+if [ "$TWO" = 1 ]; then session_net ksl-b 2; fi
 
 log "database"
 "${COMPOSE[@]}" up -d postgres

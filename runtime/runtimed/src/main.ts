@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { LIMITS } from "@kestrel/contracts";
+import { ViewportSizer } from "./cdp.js";
 import { ControlServer } from "./control.js";
 import { Env } from "./config.js";
 import { CdpForward } from "./forward.js";
@@ -32,6 +34,11 @@ const supervisor = new Supervisor(
   },
 );
 
+// Size the window to the default viewport while the browser warms (A6), on the connection
+// configure will use: a session asking for that viewport then only has it measured.
+const sizer = new ViewportSizer(cfg.CHROME_PORT);
+supervisor.prepare = () => sizer.apply(LIMITS.defaultViewport);
+
 const tabs = new Tabs();
 const recorder = new Recorder(
   cfg.RECORDING_DIR,
@@ -48,6 +55,8 @@ const control = new ControlServer(
   cfg.CHROME_PORT,
   tabs,
   recorder,
+  sizer,
+  cfg.SNAPSHOT === "on",
 );
 
 await forward.listen(cfg.FORWARD_PORT);

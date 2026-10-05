@@ -58,3 +58,9 @@ variable "runner_instance_type" {
   type        = string
   default     = "c7i.large"
 }
+
+variable "nested_virtualization" {
+  description = "Expose KVM inside the host (needed by the microVM runtime, experiment V7)."
+  type        = bool
+  default     = true
+}

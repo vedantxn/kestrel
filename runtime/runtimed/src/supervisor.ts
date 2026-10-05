@@ -26,7 +26,14 @@ export type State = "starting" | "ready" | "failed";
 export class Supervisor {
   state: State = "starting";
   chromeVersion: string | null = null;
+  /**
+   * Work to finish once Chrome answers and before the browser counts as ready: sizing the window
+   * to the default viewport, so a session start does not pay for it. Its failure does not fail the
+   * browser; configure sizes the window anyway.
+   */
+  prepare: (() => Promise<unknown>) | undefined;
   private procs: Proc[] = [];
+  private settled = new Set<() => void>();
 
   constructor(
     private readonly cfg: Env,
@@ -36,7 +43,9 @@ export class Supervisor {
     private readonly timeouts = {
       displayMs: 10_000,
       chromeMs: 30_000,
-      pollMs: 100,
+      // Both checks are local and cheap (a stat, a refused connection); a coarse poll only added
+      // up to its period to every cold start, twice.
+      pollMs: 10,
     },
   ) {}
 
@@ -94,7 +103,25 @@ export class Supervisor {
     }, this.timeouts.chromeMs);
     if (!ready) return this.fail("Chrome did not become ready");
     this.chromeVersion = version;
+    if (this.prepare) await this.prepare().catch(() => undefined);
     if (this.state === "starting") this.state = "ready";
+    this.wake();
+  }
+
+  /** Resolves once the browser is ready or failed, or after `ms`, whichever is first. */
+  async settle(ms: number): Promise<void> {
+    if (this.state !== "starting" || ms <= 0) return;
+    let done!: () => void;
+    const p = new Promise<void>((r) => (done = r));
+    this.settled.add(done);
+    const t = setTimeout(done, ms);
+    await p;
+    clearTimeout(t);
+    this.settled.delete(done);
+  }
+
+  private wake(): void {
+    for (const w of this.settled) w();
   }
 
   private async until(
@@ -113,6 +140,7 @@ export class Supervisor {
   private fail(why: string): void {
     if (this.state === "failed") return;
     this.state = "failed";
+    this.wake();
     for (const p of this.procs) {
       try {
         p.kill("SIGKILL");
