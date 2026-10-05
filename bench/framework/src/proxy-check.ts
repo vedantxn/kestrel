@@ -5,6 +5,7 @@ import type { ProxyConfig, Session } from "@kestrel/contracts";
 import { KestrelClient } from "./client.js";
 import { m1ConfigFromEnv } from "./m1.js";
 import { makeReport, type Report } from "./report.js";
+import { SELF_HOST } from "./test-proxy.js";
 
 /**
  * The upstream-proxy check (docs/lld/upstream-proxy.md), run on the host: sessions created with
@@ -56,9 +57,16 @@ async function open(
     waitForCapacityMs: 30_000,
     ...(proxy ? { proxy } : {}),
   });
-  const browser = await chromium.connectOverCDP(session.connectUrl as string, {
-    timeout: 30_000,
-  });
+  let browser: Browser;
+  try {
+    browser = await chromium.connectOverCDP(session.connectUrl as string, {
+      timeout: 30_000,
+    });
+  } catch (e) {
+    // Not handed back to a caller who would stop it: stop it here, so it does not run on.
+    await client.stop(session.id).catch(() => undefined);
+    throw e;
+  }
   const ctx = browser.contexts()[0] ?? (await browser.newContext());
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   return { session, browser, page };
@@ -335,6 +343,32 @@ export async function runProxyCheck(c: ProxyCheckConfig): Promise<Report> {
               `no answer through the proxy after the restart: ${seen.join(", ")}`,
             );
           return `node ${node}: after the restart ${seen.join(", ")}`;
+        } finally {
+          await close(client, h);
+        }
+      },
+    );
+
+  if (want(8))
+    await check(
+      "8",
+      "a plain-HTTP page loads through the proxy (absolute-URI forwarding)",
+      async () => {
+        // Chrome upgrades http:// navigations to HTTPS where it can, so this uses a name only
+        // the test proxy knows and answers over plain HTTP (SELF_HOST in test-proxy.ts).
+        const h = await open(client, proxy);
+        try {
+          const res = await h.page.goto(`http://${SELF_HOST}/check?x=1`, {
+            timeout: 30_000,
+          });
+          const text = ((await h.page.textContent("body")) ?? "").trim();
+          if (
+            !res ||
+            res.status() !== 200 ||
+            !text.startsWith("plain http via")
+          )
+            throw new Error(`status ${res?.status()}: ${text.slice(0, 120)}`);
+          return text;
         } finally {
           await close(client, h);
         }

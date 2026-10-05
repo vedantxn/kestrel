@@ -24,6 +24,14 @@ export interface TestProxyOptions {
   log?: (line: string) => void;
 }
 
+/**
+ * A name only this proxy knows. It answers plain-HTTP requests for it itself, and refuses
+ * CONNECT to it, so a page there loads only through absolute-URI forwarding, and only if the
+ * egress gateway left the name for the proxy to resolve. (Chrome upgrades ordinary http://
+ * navigations to HTTPS where it can, so a real site does not exercise plain HTTP.)
+ */
+export const SELF_HOST = "proxy-check.kestrel.test";
+
 export function createTestProxy(o: TestProxyOptions): Server {
   const expected =
     "Basic " + Buffer.from(`${o.user}:${o.password}`).toString("base64");
@@ -62,6 +70,15 @@ export function createTestProxy(o: TestProxyOptions): Server {
       return res.end();
     }
     const port = Number(url.port || 80);
+    if (url.hostname === SELF_HOST) {
+      record(req, auth, "200");
+      const body = `plain http via the test proxy: ${req.method} ${req.url}`;
+      res.writeHead(200, {
+        "content-type": "text/plain",
+        "content-length": Buffer.byteLength(body),
+      });
+      return res.end(body);
+    }
     if (url.protocol !== "http:" || !allow.has(port)) {
       record(req, auth, "403");
       res.writeHead(403);
@@ -103,7 +120,7 @@ export function createTestProxy(o: TestProxyOptions): Server {
       return;
     }
     const m = /^([^:]+):(\d+)$/.exec(req.url ?? "");
-    if (!m || !allow.has(Number(m[2]))) {
+    if (!m || !allow.has(Number(m[2])) || m[1] === SELF_HOST) {
       record(req, auth, "403");
       client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
       return;

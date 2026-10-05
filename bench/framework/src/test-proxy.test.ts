@@ -6,7 +6,7 @@ import {
   type Server,
 } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { createTestProxy } from "./test-proxy.js";
+import { SELF_HOST, createTestProxy } from "./test-proxy.js";
 
 const servers: { close(cb: () => void): unknown }[] = [];
 afterEach(async () => {
@@ -90,6 +90,38 @@ describe("the test proxy for bench proxy", () => {
     expect(JSON.parse(lines[2]!).target).toBe(target);
     expect(lines.join("")).not.toContain("pw-secret");
     expect(lines.join("")).not.toContain(basic("u", "pw-secret").slice(6));
+  });
+
+  it("answers plain HTTP for its own name, and refuses to tunnel to it", async () => {
+    const proxy = createTestProxy({
+      user: "u",
+      password: "pw",
+      log: () => undefined,
+    });
+    const port = await listen(proxy);
+    const body = await new Promise<string>((resolve, reject) => {
+      const r = request(
+        {
+          host: "127.0.0.1",
+          port,
+          path: `http://${SELF_HOST}/check`,
+          headers: { "proxy-authorization": basic("u", "pw") },
+        },
+        (res) => {
+          let t = "";
+          res.on("data", (d) => (t += d));
+          res.on("end", () => resolve(t));
+        },
+      );
+      r.on("error", reject);
+      r.end();
+    });
+    expect(body).toBe(
+      `plain http via the test proxy: GET http://${SELF_HOST}/check`,
+    );
+    const tunnel = await rawConnect(port, `${SELF_HOST}:443`, basic("u", "pw"));
+    expect(tunnel.head).toMatch(/^HTTP\/1\.1 403/);
+    tunnel.socket.destroy();
   });
 
   it("forwards an absolute-URI request without passing on its credentials", async () => {
