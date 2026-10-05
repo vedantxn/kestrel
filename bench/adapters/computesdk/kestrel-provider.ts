@@ -19,6 +19,7 @@ export function kestrel(o: KestrelOptions) {
     method: string,
     path: string,
     body?: unknown,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the API's JSON, read field by field below
   ): Promise<any> => {
     const res = await fetch(new URL(path, o.baseUrl), {
       method,

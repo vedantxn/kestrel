@@ -252,7 +252,7 @@ export async function settledInvariants(
   opts: { timeoutMs?: number; failpointsExpected?: boolean } = {},
 ): Promise<{ ok: boolean; violations: { rule: string; detail: string }[] }> {
   const until = Date.now() + (opts.timeoutMs ?? 30_000);
-  let v: { rule: string; detail: string }[] = [];
+  let v: { rule: string; detail: string }[];
   for (;;) {
     try {
       v = check(
