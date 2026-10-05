@@ -49,9 +49,14 @@ export function createNodeServer(
       if (size > 64 * 1024) throw new Error("body too large");
       chunks.push(c as Buffer);
     }
-    return chunks.length
-      ? JSON.parse(Buffer.concat(chunks).toString("utf8"))
-      : undefined;
+    if (!chunks.length) return undefined;
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      // Not the parser's message, which is logged: it can quote the input, and a start
+      // request holds a proxy password (T-45).
+      throw new Error("invalid JSON");
+    }
   };
 
   const server = createServer(async (req, res) => {

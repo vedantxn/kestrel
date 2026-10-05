@@ -10,6 +10,9 @@ import {
   RUNTIME_PORTS,
   TIMINGS,
   type Attachment,
+  type EgressPolicy,
+  type StartNetwork,
+  type UpstreamProxyView,
   type ComputerRequest,
   type ComputerResponse,
   type EndReason,
@@ -465,12 +468,7 @@ export class NodeAgent {
         if (this.aborted(id)) throw new StartAborted();
 
         // The policy exists before the browser is usable (G7).
-        await this.d.egress.setPolicy(got.address, {
-          sessionId: id as never,
-          ...(req.network.allow ? { allow: req.network.allow } : {}),
-          ...(req.network.deny ? { deny: req.network.deny } : {}),
-          connectionCap: LIMITS.egressConnectionCapPerSession,
-        });
+        await this.applyPolicy(got.address, id, req.network);
         await this.d.failpoints.hit("node.start.after_policy");
 
         // W3. Recorded only if the container has a volume. The volume is kept from now on, so even a
@@ -562,6 +560,8 @@ export class NodeAgent {
         }
         if (this.aborted(id))
           return { result: "failed", reason: "stopped while starting" };
+        // Another browser would meet the same gateway: do not spend the pool on it.
+        if (e instanceof EgressUnsupported) break;
       }
     }
     this.startMarks.delete(id);
@@ -1053,6 +1053,19 @@ export class NodeAgent {
         .stopRecording(b.address, b.controlToken)
         .catch(() => undefined);
     if (b.address) await this.clearPolicyBeforeRemoval(id, b.address);
+    // Nothing needs the proxy's password once its policy is gone (T-45).
+    const up = b.policy.upstream;
+    if (up?.password !== undefined)
+      this.store.updateBinding(id, {
+        policy: {
+          ...b.policy,
+          upstream: {
+            host: up.host,
+            port: up.port,
+            ...(up.username !== undefined ? { username: up.username } : {}),
+          },
+        },
+      });
     await this.d.failpoints.hit("node.stop.after_policy_cleared");
     // Known from creation, or from the container's label after a restart (reconcile); a volume
     // missed here (a teardown during boot) is an orphan that volume reaping removes.
@@ -1084,6 +1097,42 @@ export class NodeAgent {
       browserSeconds: seconds,
     }));
     this.gatewayAttachmentsDrop(id);
+  }
+
+  /** A session's egress policy. Start and resync both use this, so neither can drop the proxy (T-47). */
+  private egressPolicyFor(
+    sessionId: string,
+    network: StartNetwork,
+  ): EgressPolicy {
+    return {
+      sessionId: sessionId as never,
+      ...(network.allow ? { allow: network.allow } : {}),
+      ...(network.deny ? { deny: network.deny } : {}),
+      connectionCap: LIMITS.egressConnectionCapPerSession,
+      ...(network.upstream ? { upstream: network.upstream } : {}),
+    };
+  }
+
+  /**
+   * Push a session's policy. A gateway that does not confirm the session's proxy (one from
+   * before upstream proxies answers with no acknowledgement) would send its traffic out
+   * directly, so the policy is cleared again and the session is not used (T-47).
+   */
+  private async applyPolicy(
+    address: string,
+    sessionId: string,
+    network: StartNetwork,
+  ): Promise<void> {
+    const ack = await this.d.egress.setPolicy(
+      address,
+      this.egressPolicyFor(sessionId, network),
+    );
+    if (network.upstream && ack?.upstream !== true) {
+      await this.d.egress.clearPolicy(address).catch(() => undefined);
+      throw new EgressUnsupported(
+        "the egress gateway did not confirm the session's proxy",
+      );
+    }
   }
 
   /**
@@ -1464,17 +1513,28 @@ export class NodeAgent {
     }
     for (const [ip, b] of want) {
       const p = have.get(ip);
-      if (p && p.sessionId === b.sessionId) continue;
+      // The same session through the same proxy: nothing to do. A policy that lost its proxy
+      // is pushed again, never left to send the session's traffic out directly.
+      if (
+        p &&
+        p.sessionId === b.sessionId &&
+        sameUpstream(p.upstream, b.policy.upstream)
+      )
+        continue;
       // The session may have started to end while this sync was running: do not give its address a policy back.
       const cur = this.store.getBinding(b.sessionId);
       if (!cur || cur.state === "stopping" || this.teardowns.has(b.sessionId))
         continue;
-      await this.d.egress.setPolicy(ip, {
-        sessionId: b.sessionId as never,
-        ...(b.policy.allow ? { allow: b.policy.allow } : {}),
-        ...(b.policy.deny ? { deny: b.policy.deny } : {}),
-        connectionCap: LIMITS.egressConnectionCapPerSession,
-      });
+      try {
+        await this.applyPolicy(ip, b.sessionId, b.policy);
+      } catch (e) {
+        if (!(e instanceof EgressUnsupported)) throw e;
+        // Cleared again: the session has no way out until a gateway that chains proxies runs.
+        this.d.log.error(
+          { session: b.sessionId },
+          "the egress gateway did not confirm the session's proxy",
+        );
+      }
     }
     if (!health.policiesRestored) await this.d.egress.restored();
   }
@@ -1680,6 +1740,22 @@ export class NodeAgent {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
   }
+}
+
+/** The egress gateway did not confirm a session's proxy: the session must not be used (T-47). */
+class EgressUnsupported extends Error {}
+
+/** Same proxy, compared as the gateway lists it (no password). */
+function sameUpstream(
+  listed: UpstreamProxyView | undefined,
+  want: StartNetwork["upstream"],
+): boolean {
+  if (!listed || !want) return !listed && !want;
+  return (
+    listed.host === want.host &&
+    listed.port === want.port &&
+    listed.username === want.username
+  );
 }
 
 class StartAborted extends Error {

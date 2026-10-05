@@ -2,8 +2,8 @@ import { chmodSync, closeSync, existsSync, openSync } from "node:fs";
 import Database from "better-sqlite3";
 import type {
   EndReason,
-  NetworkPolicy,
   Report,
+  StartNetwork,
   Viewport,
 } from "@kestrel/contracts";
 
@@ -17,7 +17,8 @@ export interface Binding {
   address: string | null;
   proof: string | null;
   controlToken: string | null;
-  policy: NetworkPolicy;
+  /** Includes the upstream proxy's password until the session's policy is cleared (T-45). */
+  policy: StartNetwork;
   viewport: Viewport;
   stopOnDisconnect: boolean;
   timeoutMs: number;
@@ -104,6 +105,8 @@ export class Store {
     this.db = new Database(path);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = FULL");
+    // Deleted and overwritten rows are zeroed, so a scrubbed proxy password does not linger in free pages.
+    this.db.pragma("secure_delete = ON");
     this.db.exec(SCHEMA);
   }
 
@@ -195,6 +198,7 @@ export class Store {
       startPath: "start_path",
       idleTimeoutMs: "idle_timeout_ms",
       timeoutMs: "timeout_ms",
+      policy: "policy",
     };
     const sets: string[] = [];
     const values: Record<string, unknown> = { sessionId };
@@ -202,7 +206,7 @@ export class Store {
       const col = cols[k];
       if (!col) throw new Error(`cannot update ${k}`);
       sets.push(`${col} = @${k}`);
-      values[k] = v;
+      values[k] = k === "policy" ? JSON.stringify(v) : v;
     }
     if (sets.length)
       this.db

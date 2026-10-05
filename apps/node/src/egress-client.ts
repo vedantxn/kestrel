@@ -3,13 +3,18 @@ import {
   DenialsResponse,
   EGRESS_PATHS,
   EgressHealth,
+  EgressPolicyAck,
   ListPoliciesResponse,
   type EgressPolicy,
 } from "@kestrel/contracts";
 
 /** The agent's side of the egress gateway's control API (C7): a Unix socket only this process can open. */
 export interface EgressClient {
-  setPolicy(ip: string, policy: EgressPolicy): Promise<void>;
+  /**
+   * Null when the gateway sent no acknowledgement: one from before upstream proxies answers 204,
+   * which must not be taken as having applied an upstream (T-47).
+   */
+  setPolicy(ip: string, policy: EgressPolicy): Promise<EgressPolicyAck | null>;
   clearPolicy(ip: string): Promise<void>;
   list(): Promise<ListPoliciesResponse>;
   restored(): Promise<void>;
@@ -73,8 +78,14 @@ export class UnixEgressClient implements EgressClient {
     return r.json;
   }
 
-  async setPolicy(ip: string, policy: EgressPolicy): Promise<void> {
-    await this.ok("PUT", EGRESS_PATHS.policy(ip), policy);
+  async setPolicy(
+    ip: string,
+    policy: EgressPolicy,
+  ): Promise<EgressPolicyAck | null> {
+    const ack = EgressPolicyAck.safeParse(
+      await this.ok("PUT", EGRESS_PATHS.policy(ip), policy),
+    );
+    return ack.success ? ack.data : null;
   }
   async clearPolicy(ip: string): Promise<void> {
     await this.ok("DELETE", EGRESS_PATHS.policy(ip));
