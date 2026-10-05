@@ -30,6 +30,9 @@ class FakeChrome {
   garbage = false;
   /** CDP websocket connections opened. */
   connections = 0;
+  /** Pages: the snapshot's first, then any made by createTarget. */
+  pages = ["T1"];
+  closed: string[] = [];
 
   constructor() {
     this.server = createServer((req, res) => {
@@ -68,10 +71,23 @@ class FakeChrome {
       switch (m.method) {
         case "Target.getTargets":
           return reply({
-            targetInfos: this.noPage ? [] : [{ targetId: "T1", type: "page" }],
+            targetInfos: this.noPage
+              ? []
+              : this.pages.map((targetId) => ({ targetId, type: "page" })),
           });
         case "Target.attachToTarget":
           return reply({ sessionId: "S1" });
+        case "Target.createTarget": {
+          const id = `T${this.pages.length + this.closed.length + 1}`;
+          this.pages.push(id);
+          return reply({ targetId: id });
+        }
+        case "Target.closeTarget": {
+          const id = (m.params as { targetId?: string } | undefined)?.targetId;
+          this.pages = this.pages.filter((p) => p !== id);
+          if (id) this.closed.push(id);
+          return reply({ success: true });
+        }
         case "Browser.getWindowForTarget":
           return reply({ windowId: 7 });
         case "Browser.setWindowBounds":
@@ -529,7 +545,7 @@ describe("the supervisor (R4-R6)", () => {
 });
 
 describe("the control API (C5)", () => {
-  async function rig() {
+  async function rig(opts: { snapshot?: boolean } = {}) {
     chrome = new FakeChrome();
     const port = await chrome.start();
     const fwd = new CdpForward(port);
@@ -541,7 +557,16 @@ describe("the control API (C5)", () => {
       "/dev/null",
       { displayMs: 200, chromeMs: 2000, pollMs: 20 },
     );
-    const control = new ControlServer(TOKEN, sup, fwd, port, new Tabs());
+    const control = new ControlServer(
+      TOKEN,
+      sup,
+      fwd,
+      port,
+      new Tabs(),
+      undefined,
+      undefined,
+      opts.snapshot ?? false,
+    );
     const cport = await control.listen(0, "127.0.0.1");
     closers.push(() => control.close());
     const call = async (
@@ -565,6 +590,35 @@ describe("the control API (C5)", () => {
     };
     return { sup, fwd, call };
   }
+
+  it("lets a snapshot clone replace its token once, then refuses the template's, and gives it a fresh page", async () => {
+    const { sup, call } = await rig({ snapshot: true });
+    await sup.start();
+    const fresh = "c".repeat(48);
+    expect(
+      (await call("POST", "/rekey", { token: fresh }, "wrong")).status,
+    ).toBe(401);
+    expect((await call("POST", "/rekey", { token: "short" })).status).toBe(400);
+    expect((await call("POST", "/rekey", { token: fresh })).json).toEqual({
+      ok: true,
+    });
+    // The snapshot's page is gone; the session's page was made after the restore.
+    expect(chrome!.closed).toEqual(["T1"]);
+    expect(chrome!.pages).toEqual(["T2"]);
+    expect((await call("GET", "/health")).status).toBe(401);
+    expect((await call("GET", "/health", undefined, fresh)).status).toBe(200);
+    expect(
+      (await call("POST", "/rekey", { token: "d".repeat(48) }, fresh)).status,
+    ).toBe(409);
+  });
+
+  it("has nothing to rekey when it is not a snapshot clone", async () => {
+    const { sup, call } = await rig();
+    await sup.start();
+    expect(
+      (await call("POST", "/rekey", { token: "c".repeat(48) })).status,
+    ).toBe(409);
+  });
 
   it("needs the token", async () => {
     const { call } = await rig();

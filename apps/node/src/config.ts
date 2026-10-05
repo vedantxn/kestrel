@@ -37,6 +37,21 @@ export const Env = z.object({
   /** Seccomp profile JSON; omit to use Docker's default (decided by experiment V1). */
   SECCOMP_FILE: z.string().optional(),
   RUNTIME_VERSION: z.string().default("dev"),
+  /**
+   * What a browser is (ADR 0017): a Docker container, or a Firecracker microVM restored from a
+   * snapshot of a running browser. A microVM node still uses Docker for sessions that record.
+   */
+  RUNTIME: z.enum(["docker", "microvm"]).default("docker"),
+  MICROVM_DIR: z.string().default("/data/kestrel-vm"),
+  FIRECRACKER_DIR: z.string().default("/opt/firecracker"),
+  MICROVM_CGROUP: z.string().default("kestrel-vm"),
+  /** The last octets of the session subnet VMs use; Docker's range is kept below them. */
+  MICROVM_OCTETS: z
+    .string()
+    .regex(/^\d{1,3}-\d{1,3}$/)
+    .default("128-254"),
+  MICROVM_UID: z.coerce.number().int().positive().default(10002),
+  MICROVM_NETNS_READY: z.coerce.number().int().min(0).default(8),
   /** Certificate copy for the gateway (G16): Caddy's data directory, the hostname, the destination. */
   CADDY_DATA: z.string().optional(),
   PUBLIC_HOSTNAME: z.string().optional(),

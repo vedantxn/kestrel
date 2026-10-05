@@ -56,6 +56,7 @@ const control = new ControlServer(
   tabs,
   recorder,
   sizer,
+  cfg.SNAPSHOT === "on",
 );
 
 await forward.listen(cfg.FORWARD_PORT);

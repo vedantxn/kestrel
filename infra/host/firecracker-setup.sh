@@ -28,3 +28,13 @@ if [ ! -f "$DEST/vmlinux" ]; then
 fi
 "$DEST/firecracker" --version | head -1
 sha256sum "$DEST/vmlinux"
+
+# What the microVM runtime needs from the host at every boot (deploy installs this as a unit):
+# a cgroup v2 parent with the CPU, memory and process controllers for the jailer, and /run/netns as
+# a shared mount, so the network namespaces the node agent makes from its container live on the host.
+CGROUP=${MICROVM_CGROUP:-kestrel-vm}
+mkdir -p "/sys/fs/cgroup/$CGROUP"
+echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
+echo "+cpu +memory +pids" > "/sys/fs/cgroup/$CGROUP/cgroup.subtree_control"
+ip netns add kestrel-init 2>/dev/null && ip netns del kestrel-init
+mkdir -p /data/kestrel-vm/jail /data/kestrel-vm/meta && chmod 0700 /data/kestrel-vm/meta

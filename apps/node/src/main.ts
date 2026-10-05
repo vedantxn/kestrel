@@ -9,7 +9,8 @@ import { NodeAgent, DEFAULT_CONFIG } from "./agent.js";
 import { HttpApiClient } from "./api-client.js";
 import { copyCertificate } from "./cert-copy.js";
 import { Env } from "./config.js";
-import { DockerodeDriver, DockerVolumes } from "./docker.js";
+import { DockerodeDriver, DockerVolumes, type DockerDriver } from "./docker.js";
+import { MicroVmDriver, RoutedDriver, exec } from "./microvm.js";
 import { UnixEgressClient } from "./egress-client.js";
 import { Firewall } from "./firewall.js";
 import { GatewayHub } from "./gateway-hub.js";
@@ -33,12 +34,45 @@ const docker = new DockerodeDriver(env.NODE_ID, env.NETWORK, {
   socketPath: env.DOCKER_SOCKET,
   timeout: 60_000,
 });
+const [vmFirst, vmLast] = env.MICROVM_OCTETS.split("-").map(Number) as [
+  number,
+  number,
+];
 await docker.ensureNetwork({
   name: env.NETWORK,
   iface: env.IFACE,
   subnet: env.SUBNET,
   gateway: env.BRIDGE_IP,
+  // Docker allocates below the microVMs' addresses, so the two never collide.
+  ipRange: env.SUBNET.replace(/\.\d+\/24$/, ".0/25"),
 });
+let driver: DockerDriver = docker;
+let microvm: MicroVmDriver | undefined;
+if (env.RUNTIME === "microvm") {
+  microvm = new MicroVmDriver(
+    {
+      nodeId: env.NODE_ID,
+      firecracker: `${env.FIRECRACKER_DIR}/firecracker`,
+      jailer: `${env.FIRECRACKER_DIR}/jailer`,
+      dir: env.MICROVM_DIR,
+      cgroupParent: env.MICROVM_CGROUP,
+      bridge: env.IFACE,
+      bridgeIp: env.BRIDGE_IP,
+      egressPort: env.EGRESS_PORT,
+      subnetPrefix: env.SUBNET.split(".").slice(0, 3).join("."),
+      octets: [vmFirst, vmLast],
+      vmUid: env.MICROVM_UID,
+      vmGid: env.MICROVM_UID,
+      netnsReady: env.MICROVM_NETNS_READY,
+      vcpus: 1,
+      memMib: 2048,
+    },
+    { run: exec, log },
+  );
+  await microvm.start();
+  driver = new RoutedDriver(microvm, docker);
+  log.info({ octets: env.MICROVM_OCTETS }, "browsers are microVMs");
+}
 const firewall = new Firewall({
   nodeId: env.NODE_ID,
   iface: env.IFACE,
@@ -76,7 +110,7 @@ agent = new NodeAgent({
     runtimeVersion: env.RUNTIME_VERSION,
   },
   store,
-  docker,
+  docker: driver,
   runtime: new HttpRuntimeClient(),
   egress,
   firewall,
@@ -184,7 +218,7 @@ if (env.CADDY_DATA && env.PUBLIC_HOSTNAME && env.TLS_DIR) {
 }
 
 agent.startLoops();
-docker.onEvent((e) => {
+driver.onEvent((e) => {
   if (e.action === "die" || e.action === "oom") agent.containerDied(e.id);
 });
 log.info(

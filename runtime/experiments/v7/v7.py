@@ -297,6 +297,27 @@ if __name__ == "__main__":
         cmd_restore(int(sys.argv[2]), int(sys.argv[3]))
     elif cmd == "keep":
         cmd_keep(int(sys.argv[2]))
+    elif cmd == "boot":
+        # A VM booted normally and left running at 10.200.0.2 (no snapshot), for comparison.
+        os.makedirs(RUN, exist_ok=True)
+        drop_netns(0)
+        netns(0)
+        cfg = {"boot-source": {"kernel_image_path": KERNEL, "boot_args": BOOT_ARGS},
+               "drives": [{"drive_id": "rootfs", "path_on_host": ROOTFS, "is_root_device": True, "is_read_only": True}],
+               "machine-config": {"vcpu_count": 1, "mem_size_mib": 2048, "smt": False},
+               "network-interfaces": [{"iface_id": "eth0", "guest_mac": "06:00:ac:10:00:02", "host_dev_name": "tap0"}],
+               "entropy": {}}
+        with open(f"{RUN}/b.json", "w") as f:
+            json.dump(cfg, f)
+        subprocess.Popen(["ip", "netns", "exec", "kvm0", FC, "--api-sock", f"{RUN}/b.sock", "--config-file", f"{RUN}/b.json"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        for _ in range(600):
+            try:
+                if runtimed("10.200.0.2", "GET", "/health?wait=2000", timeout=4).get("status") == "ready":
+                    break
+            except Exception:
+                time.sleep(0.1)
+        print("booted")
     elif cmd == "clean":
         cmd_clean()
     else:
