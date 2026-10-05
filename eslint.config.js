@@ -1,4 +1,5 @@
 import js from "@eslint/js";
+import reactHooks from "eslint-plugin-react-hooks";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
@@ -10,6 +11,8 @@ export default tseslint.config(
       "**/.venv/**",
       ".claude/**",
       "runtime/runtimed.mjs",
+      "**/.next/**",
+      "**/next-env.d.ts",
     ],
   },
   js.configs.recommended,
@@ -35,6 +38,23 @@ export default tseslint.config(
         { argsIgnorePattern: "^_" },
       ],
       "@typescript-eslint/consistent-type-imports": "error",
+    },
+  },
+  {
+    // P17: the dashboard. Session data is hostile (threat model T-56): never raw HTML.
+    files: ["packages/dashboard/**/*.{ts,tsx}", "apps/web/**/*.{ts,tsx}"],
+    plugins: { "react-hooks": reactHooks },
+    rules: {
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "warn",
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+          message:
+            "Session data is attacker-controlled (threat model T-56); render it as text.",
+        },
+      ],
     },
   },
 );

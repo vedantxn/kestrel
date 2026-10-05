@@ -1,0 +1,21 @@
+{
+  // Not part of the root `tsc -b` graph: this is React source compiled by the app that uses it.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "@kestrel/dashboard/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}

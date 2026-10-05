@@ -1,0 +1,24 @@
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "new-york",
+  "rsc": true,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/styles/globals.css",
+    "baseColor": "zinc",
+    "cssVariables": true
+  },
+  "iconLibrary": "lucide",
+  "aliases": {
+    "components": "@kestrel/dashboard/components",
+    "utils": "@kestrel/dashboard/lib/utils",
+    "hooks": "@kestrel/dashboard/hooks",
+    "lib": "@kestrel/dashboard/lib",
+    "ui": "@kestrel/dashboard/components/ui"
+  },
+  "registries": {
+    "@magicui": "https://magicui.design/r/{name}.json",
+    "@aceternity": "https://ui.aceternity.com/registry/{name}.json"
+  }
+}

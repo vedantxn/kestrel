@@ -15,8 +15,8 @@
     "bench/*"
   ],
   "scripts": {
-    "build": "tsc -b",
-    "typecheck": "tsc -b",
+    "build": "tsc -b && npm run build -w @kestrel/web",
+    "typecheck": "tsc -b && npm run typecheck -w @kestrel/dashboard -w @kestrel/web",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -25,13 +25,15 @@
     "openapi": "npm run -w @kestrel/contracts openapi",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
     "postinstall": "npm run generate -w @kestrel/db",
-    "db:migrate": "npm run migrate:deploy -w @kestrel/db"
+    "db:migrate": "npm run migrate:deploy -w @kestrel/db",
+    "dev:web": "npm run dev -w @kestrel/web"
   },
   "devDependencies": {
     "@apidevtools/swagger-parser": "^13.1.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.1",
     "eslint": "^10.11.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "prettier": "^3.9.9",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.0",

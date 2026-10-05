@@ -7,3 +7,5 @@ docs/v1-plan.md
 docs/api/openapi.json
 # Raw benchmark output and its reports, kept as produced.
 docs/results
+.next
+next-env.d.ts
