@@ -1,10 +1,52 @@
-import type { Socket } from "node:net";
+import { isIPv4, type Socket } from "node:net";
 import {
   LIMITS,
   matchesHostPattern,
   type EgressDenyReason,
   type EgressPolicy,
 } from "@kestrel/contracts";
+
+/**
+ * A session's upstream proxy as the gateway uses it. The password is not kept: only the
+ * `Proxy-Authorization` value made from it, which is never listed or logged.
+ */
+export interface UpstreamEntry {
+  host: string;
+  /** The host itself when it is an IPv4 literal; otherwise it is resolved per connection. */
+  ip: string | null;
+  port: number;
+  username: string | undefined;
+  authorization: string | null;
+}
+
+export function toUpstreamEntry(
+  u: NonNullable<EgressPolicy["upstream"]>,
+): UpstreamEntry {
+  return {
+    host: u.host,
+    ip: isIPv4(u.host) ? u.host : null,
+    port: u.port,
+    username: u.username,
+    authorization:
+      u.username === undefined
+        ? null
+        : "Basic " +
+          Buffer.from(`${u.username}:${u.password ?? ""}`, "utf8").toString(
+            "base64",
+          ),
+  };
+}
+
+const sameUpstream = (
+  a: UpstreamEntry | undefined,
+  b: UpstreamEntry | undefined,
+): boolean =>
+  a === b ||
+  (a !== undefined &&
+    b !== undefined &&
+    a.host === b.host &&
+    a.port === b.port &&
+    a.authorization === b.authorization);
 
 export interface Entry {
   sessionId: string;
@@ -19,6 +61,8 @@ export interface Entry {
   active: number;
   /** Every socket belonging to this policy, so clearing it can cut them at once (G10). */
   sockets: Set<Socket>;
+  /** Set: every connection leaves through this proxy, and never directly (T-47). */
+  upstream: UpstreamEntry | undefined;
 }
 
 /**
@@ -38,19 +82,22 @@ export class PolicyStore {
 
   set(ip: string, p: EgressPolicy): void {
     const existing = this.entries.get(ip);
+    const upstream = p.upstream ? toUpstreamEntry(p.upstream) : undefined;
+    // A policy update for the same session through the same exit keeps its connections. A
+    // different session at the same address is a different tenant, and a different proxy is a
+    // different exit, so the old connections are cut.
+    const keep =
+      existing !== undefined &&
+      existing.sessionId === p.sessionId &&
+      sameUpstream(existing.upstream, upstream);
     this.entries.set(ip, {
       sessionId: p.sessionId,
       allow: p.allow,
       deny: p.deny ?? [],
       connectionCap: p.connectionCap ?? LIMITS.egressConnectionCapPerSession,
-      // A policy update for the same session keeps its connections; a different session at the same
-      // address is a different tenant, so the old one's are cut.
-      active:
-        existing && existing.sessionId === p.sessionId ? existing.active : 0,
-      sockets:
-        existing && existing.sessionId === p.sessionId
-          ? existing.sockets
-          : this.cut(existing),
+      active: keep ? existing.active : 0,
+      sockets: keep ? existing.sockets : this.cut(existing),
+      upstream,
     });
   }
 
