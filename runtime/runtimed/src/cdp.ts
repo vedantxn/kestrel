@@ -54,12 +54,15 @@ export class Cdp {
     ws.on("error", () => this.failAll(new Error("CDP connection error")));
   }
 
-  static connect(url: string): Promise<Cdp> {
+  static connect(
+    url: string,
+    opts: { maxPayload?: number } = {},
+  ): Promise<Cdp> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url, {
         perMessageDeflate: false,
         handshakeTimeout: 5000,
-        maxPayload: 32 * 1024 * 1024, // screenshots
+        maxPayload: opts.maxPayload ?? 32 * 1024 * 1024, // screenshots
       });
       ws.once("open", () => resolve(new Cdp(ws)));
       ws.once("error", reject);

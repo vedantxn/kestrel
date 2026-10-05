@@ -13,8 +13,10 @@ import {
   RekeyRequest,
   RUNTIME_PATHS,
   RUNTIME_PROTOCOL_VERSION,
+  RuntimeCaptcha,
   RuntimeHealth,
 } from "@kestrel/contracts";
+import type { CaptchaWatcher } from "./captcha.js";
 import { Cdp, getVersion, ViewportSizer } from "./cdp.js";
 import type { CdpForward } from "./forward.js";
 import { runComputer, type Tabs } from "./page.js";
@@ -34,6 +36,7 @@ const same = (a: string, b: string): boolean =>
  *  GET  /health     status of the display and Chrome
  *  POST /configure  bind this container to a session: set the proof the CDP forward demands and
  *                   size the page to the requested viewport. Doubles as the agent's health check.
+ *  GET  /captcha    the known CAPTCHAs showing now (docs/lld/captcha.md)
  */
 export class ControlServer {
   private server: Server | undefined;
@@ -55,6 +58,8 @@ export class ControlServer {
     private readonly sizer = new ViewportSizer(chromePort),
     /** V7: this browser is a clone of a snapshot, started with the template's token. */
     private readonly snapshot = false,
+    /** CAPTCHA detection, started once the container is bound to a session. */
+    private readonly captcha?: CaptchaWatcher,
   ) {}
 
   async listen(port: number, host = "0.0.0.0"): Promise<number> {
@@ -70,6 +75,7 @@ export class ControlServer {
 
   async close(): Promise<void> {
     this.sizer.close();
+    this.captcha?.close();
     this.server?.closeAllConnections();
     await new Promise<void>((r) =>
       this.server ? this.server.close(() => r()) : r(),
@@ -176,6 +182,8 @@ export class ControlServer {
         this.configured = { proof: sessionProof, viewport, response };
         // Started after the viewport is applied, so the video is the window the caller asked for.
         if (parsed.data.recording) this.recorder?.start(applied.window);
+        // Not awaited: detection must not slow a start (docs/lld/captcha.md).
+        this.captcha?.start();
         return this.send(res, 200, response);
       }
 
@@ -192,6 +200,17 @@ export class ControlServer {
         this.rekeyed = true;
         await this.freshPage();
         return this.send(res, 200, { ok: true });
+      }
+
+      if (req.method === "GET" && path === RUNTIME_PATHS.captcha) {
+        if (!this.captcha) return this.send(res, 404, { error: "not found" });
+        if (!this.configured)
+          return this.send(res, 409, { error: "no session is bound" });
+        return this.send(
+          res,
+          200,
+          RuntimeCaptcha.parse(this.captcha.current()),
+        );
       }
 
       if (req.method === "POST" && path === RUNTIME_PATHS.recordingStop) {
