@@ -9,7 +9,10 @@ import {
   RECORDING_LIMITS,
   RUNTIME_PORTS,
   TIMINGS,
+  captchaSet,
   type Attachment,
+  type CaptchaProvider,
+  type Report,
   type EgressPolicy,
   type StartNetwork,
   type UpstreamProxyView,
@@ -1718,6 +1721,7 @@ export class NodeAgent {
       "heartbeat",
     );
     every(1000, () => this.tick(), "deadlines");
+    every(2000, () => this.pollCaptchas(), "captcha");
     every(1000, () => this.refillPool(), "pool");
     every(250, () => this.reap(), "reap");
     every(
@@ -1734,6 +1738,116 @@ export class NodeAgent {
       () => this.checkFirewall(),
       "firewall",
     );
+  }
+
+  // --- CAPTCHAs (docs/lld/captcha.md) ---------------------------------------------------------
+
+  /** Browsers whose `runtimed` predates CAPTCHA detection (it answered 404): not asked again. */
+  private captchaUnsupported = new Set<string>();
+  /** Consecutive failures per session; after 3, asked only every 30 s. */
+  private captchaFailures = new Map<string, { n: number; next: number }>();
+  /** Per-session budget for state changes: a burst of 6, then one every 10 s (T-50). */
+  private captchaBudget = new Map<string, { tokens: number; at: number }>();
+
+  /**
+   * Ask each ready session's browser which known CAPTCHAs are showing, and report what changed.
+   * The answer is hostile input: bounded, validated, and only ever turned into provider names
+   * and a page hostname.
+   */
+  async pollCaptchas(): Promise<void> {
+    const ready = this.store
+      .allBindings()
+      .filter(
+        (b) =>
+          b.state === "ready" &&
+          b.address &&
+          b.controlToken &&
+          b.containerId &&
+          !this.captchaUnsupported.has(b.containerId),
+      );
+    const live = new Set(this.store.allBindings().map((b) => b.sessionId));
+    for (const m of [this.captchaFailures, this.captchaBudget])
+      for (const id of m.keys()) if (!live.has(id)) m.delete(id);
+    for (let i = 0; i < ready.length; i += 16)
+      await Promise.all(ready.slice(i, i + 16).map((b) => this.pollCaptcha(b)));
+  }
+
+  private async pollCaptcha(b: Binding): Promise<void> {
+    const id = b.sessionId;
+    const now = this.now();
+    const failing = this.captchaFailures.get(id);
+    if (failing && now < failing.next) return;
+    let answer;
+    try {
+      answer = await this.d.runtime.captcha(
+        b.address as string,
+        b.controlToken as string,
+        1000,
+      );
+    } catch {
+      const n = (failing?.n ?? 0) + 1;
+      this.captchaFailures.set(id, { n, next: n >= 3 ? now + 30_000 : 0 });
+      return;
+    }
+    this.captchaFailures.delete(id);
+    if (answer === null) {
+      this.captchaUnsupported.add(b.containerId as string);
+      return;
+    }
+    if (!answer.watching) return; // unknown: report nothing rather than a false "cleared"
+
+    const hosts = new Map<CaptchaProvider, string | null>();
+    for (const d of answer.detections)
+      if (!hosts.has(d.provider)) hosts.set(d.provider, d.host);
+    const next = captchaSet(hosts.keys());
+    const prev = this.store.getCaptcha(id);
+    if (next.join() === prev.join()) return;
+
+    const budget = this.captchaBudget.get(id) ?? { tokens: 6, at: now };
+    budget.tokens = Math.min(6, budget.tokens + (now - budget.at) / 10_000);
+    budget.at = now;
+    this.captchaBudget.set(id, budget);
+    if (budget.tokens < 1) return; // coalesced: a later poll reports the state it finds then
+
+    const at = new Date(now).toISOString();
+    const events: ((rid: string) => Report)[] = [];
+    // Each event says what is present after it, one change at a time.
+    let present = prev;
+    for (const provider of prev.filter((p) => !next.includes(p))) {
+      present = present.filter((p) => p !== provider);
+      const snapshot = present;
+      events.push((rid) => ({
+        id: rid,
+        at,
+        kind: "event",
+        sessionId: id as never,
+        event: {
+          type: "captcha.cleared",
+          data: { provider, present: snapshot },
+        },
+      }));
+    }
+    for (const provider of next.filter((p) => !prev.includes(p))) {
+      present = captchaSet([...present, provider]);
+      const snapshot = present;
+      events.push((rid) => ({
+        id: rid,
+        at,
+        kind: "event",
+        sessionId: id as never,
+        event: {
+          type: "captcha.detected",
+          data: {
+            provider,
+            host: hosts.get(provider) ?? null,
+            present: snapshot,
+          },
+        },
+      }));
+    }
+    if (!this.store.recordCaptcha(id, next, events)) return;
+    budget.tokens -= 1;
+    void this.flushSoon();
   }
 
   stopLoops(): void {

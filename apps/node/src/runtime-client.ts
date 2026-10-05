@@ -3,6 +3,7 @@ import {
   ConfigureResponse,
   RUNTIME_PATHS,
   RUNTIME_PORTS,
+  RuntimeCaptcha,
   RuntimeHealth,
   type ComputerRequest,
   type ConfigureRequest,
@@ -33,6 +34,15 @@ export interface RuntimeClient {
     req: ComputerRequest,
     timeoutMs?: number,
   ): Promise<ComputerResponse>;
+  /**
+   * The CAPTCHAs showing now (docs/lld/captcha.md). Null when the browser's `runtimed` predates
+   * CAPTCHA detection (it answers 404).
+   */
+  captcha(
+    address: string,
+    token: string,
+    timeoutMs?: number,
+  ): Promise<RuntimeCaptcha | null>;
   /** W3: let the recorder write its last fragment before the container is removed. */
   stopRecording(
     address: string,
@@ -64,6 +74,16 @@ async function readLimited(
     chunks.push(value);
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/** A non-2xx answer, with its status. */
+export class RuntimeHttpError extends Error {
+  constructor(
+    path: string,
+    readonly status: number,
+  ) {
+    super(`runtime ${path}: ${status}`);
+  }
 }
 
 /** fetch says only "fetch failed": the reason (ECONNREFUSED, a reset, a timeout) is in its cause. */
@@ -113,8 +133,31 @@ export class HttpRuntimeClient implements RuntimeClient {
       });
     }
     const text = await readLimited(res, maxBytes);
-    if (!res.ok) throw new Error(`runtime ${path}: ${res.status}`);
+    if (!res.ok) throw new RuntimeHttpError(path, res.status);
     return schema.parse(JSON.parse(text));
+  }
+
+  async captcha(
+    address: string,
+    token: string,
+    timeoutMs = 1000,
+  ): Promise<RuntimeCaptcha | null> {
+    try {
+      return await this.call(
+        address,
+        token,
+        "GET",
+        RUNTIME_PATHS.captcha,
+        RuntimeCaptcha,
+        undefined,
+        timeoutMs,
+        MAX_RESPONSE_BYTES,
+        true,
+      );
+    } catch (e) {
+      if (e instanceof RuntimeHttpError && e.status === 404) return null;
+      throw e;
+    }
   }
 
   health(
