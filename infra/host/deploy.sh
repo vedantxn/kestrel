@@ -48,6 +48,7 @@ if [ ! -f "$SECRETS/db.password" ]; then
 fi
 if [ ! -f "$SECRETS/node-a.secret" ]; then head -c 32 /dev/urandom | base64 | tr -d '/+=\n' > "$SECRETS/node-a.secret"; fi
 if [ ! -f "$SECRETS/node-b.secret" ]; then head -c 32 /dev/urandom | base64 | tr -d '/+=\n' > "$SECRETS/node-b.secret"; fi
+if [ ! -f "$SECRETS/web-session.secret" ]; then head -c 48 /dev/urandom | base64 | tr -d '/+=\n' > "$SECRETS/web-session.secret"; fi
 printf 'postgresql://kestrel:%s@127.0.0.1:5432/kestrel' "$(cat "$SECRETS/db.password")" > "$SECRETS/database-url"
 # Owners: only what needs a secret can read it. The signing key is the API's alone; the gateways get the public half.
 chown 1001:1001 "$SECRETS/database-url" "$SECRETS/node-a.secret" "$SECRETS/node-b.secret" 2>/dev/null || true
@@ -55,6 +56,8 @@ chmod 0640 "$SECRETS/node-a.secret" "$SECRETS/node-b.secret"; chmod 0400 "$SECRE
 # CAPTCHA solving (docs/lld/captcha.md): the operator puts the service's key in this file by hand;
 # it never goes in the repository, an image or Terraform state. Only the API reads it.
 if [ -f "$SECRETS/captcha-solver.key" ]; then chown 1001:1001 "$SECRETS/captcha-solver.key"; chmod 0400 "$SECRETS/captcha-solver.key"; fi
+# The dashboard (P17) runs as 1002 and reads only the key that seals its sign-in cookies.
+chown 1002:1002 "$SECRETS/web-session.secret" 2>/dev/null || true; chmod 0400 "$SECRETS/web-session.secret"
 chmod 0711 "$SECRETS"; install -d -m 0755 /run/kestrel /var/lib/kestrel/a /var/lib/kestrel/b /var/lib/kestrel/postgres /run/kestrel/a /run/kestrel/b
 # /run is emptied by a reboot: have systemd make the runtime directories again at every boot, before
 # Docker starts the platform, or the node agent cannot open its sockets and restarts forever.

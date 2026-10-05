@@ -50,6 +50,30 @@ services:
     volumes:
       - /var/lib/kestrel/secrets:/secrets:ro
 
+  # P17: the dashboard. Its own uid, so it reads its session secret and nothing else; it holds no
+  # signing key and reaches the API only through the public listener, like any client.
+  web:
+    <<: *platform
+    user: "1002:1002"
+    cap_drop: [ALL]
+    command:
+      [
+        "node",
+        "node_modules/next/dist/bin/next",
+        "start",
+        "apps/web",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        "3000",
+      ]
+    environment:
+      KESTREL_API_URL: http://127.0.0.1:8080
+      KESTREL_PUBLIC_API_URL: https://${PUBLIC_HOSTNAME}
+      WEB_SESSION_SECRET_FILE: /secrets/web-session.secret
+    volumes:
+      - /var/lib/kestrel/secrets/web-session.secret:/secrets/web-session.secret:ro
+
   egress-a:
     <<: *platform
     user: "0:0"

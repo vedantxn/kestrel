@@ -25,7 +25,6 @@ const config: NextConfig = {
   poweredByHeader: false,
   // `next dev` would otherwise write AGENTS.md and CLAUDE.md into this folder.
   agentRules: false,
-  output: "standalone",
   async headers() {
     return [
       {

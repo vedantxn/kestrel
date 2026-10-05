@@ -97,8 +97,9 @@ ${hostname} {
 	handle @public {
 		reverse_proxy 127.0.0.1:8080
 	}
+	# P17: everything else is the dashboard.
 	handle {
-		respond "kestrel placeholder" 200
+		reverse_proxy 127.0.0.1:3000
 	}
 }
 CADDYFILE
