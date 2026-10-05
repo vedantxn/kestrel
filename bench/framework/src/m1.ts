@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import Docker from "dockerode";
 import WebSocket from "ws";
-import { chromium } from "playwright-core";
+import { chromium, type BrowserContext } from "playwright-core";
 import { KestrelClient } from "./client.js";
 import { DEFAULT_HOST, settledInvariants, type HostConfig } from "./collect.js";
 import {
@@ -172,15 +172,15 @@ export async function runM1(c: M1Config): Promise<Report> {
     );
     const ctx = browser.contexts()[0] ?? (await browser.newContext());
     const page = ctx.pages()[0] ?? (await ctx.newPage());
-    let listed = "";
-    let unlisted = "";
+    let listed: string;
+    let unlisted: string;
     try {
       await page.goto(c.testPageUrl, { timeout: 20_000 });
       listed = await page.title();
     } catch (e) {
       listed = `error: ${(e as Error).message.slice(0, 80)}`;
     }
-    let unlistedRefused = false;
+    let unlistedRefused: boolean;
     try {
       const r = await page.goto("https://example.com/", { timeout: 15_000 });
       unlisted = `status ${r?.status()}`;
@@ -198,10 +198,8 @@ export async function runM1(c: M1Config): Promise<Report> {
     );
     const p2 =
       (b2.contexts()[0] ?? (await b2.newContext())).pages()[0] ??
-      (await (
-        b2.contexts()[0] as import("playwright-core").BrowserContext
-      ).newPage());
-    let denied = false;
+      (await (b2.contexts()[0] as BrowserContext).newPage());
+    let denied: boolean;
     try {
       const r = await p2.goto(c.testPageUrl, { timeout: 15_000 });
       denied = (r?.status() ?? 0) >= 400;

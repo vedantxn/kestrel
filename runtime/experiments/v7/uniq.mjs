@@ -61,7 +61,10 @@ async function cdp(addr) {
   const waiting = new Map();
   ws.on("message", (d) => {
     const m = JSON.parse(d.toString());
-    if (m.id && waiting.has(m.id)) (waiting.get(m.id)(m), waiting.delete(m.id));
+    if (m.id && waiting.has(m.id)) {
+      waiting.get(m.id)(m);
+      waiting.delete(m.id);
+    }
   });
   const send = (method, params = {}, sessionId) =>
     new Promise((r) => {

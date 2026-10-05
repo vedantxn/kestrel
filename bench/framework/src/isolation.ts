@@ -1,7 +1,7 @@
 import { request } from "node:http";
 import Docker from "dockerode";
 import { newId } from "@kestrel/contracts";
-import { chromium } from "playwright-core";
+import { chromium, type BrowserContext } from "playwright-core";
 import type { KestrelClient } from "./client.js";
 
 /**
@@ -384,9 +384,7 @@ export async function fromChrome(
     );
     const page =
       (browser.contexts()[0] ?? (await browser.newContext())).pages()[0] ??
-      (await (
-        browser.contexts()[0] as import("playwright-core").BrowserContext
-      ).newPage());
+      (await (browser.contexts()[0] as BrowserContext).newPage());
     const forbidden: [string, string][] = [
       ["http://169.254.169.254/latest/meta-data/", "the metadata service"],
       ["http://169.254.170.2/", "the container credentials endpoint"],
@@ -432,8 +430,7 @@ export async function fromChrome(
     }
     try {
       // A new page: an earlier attack's navigation may still be unwinding on the old one.
-      const ctx =
-        browser.contexts()[0] as import("playwright-core").BrowserContext;
+      const ctx = browser.contexts()[0] as BrowserContext;
       const fresh = await ctx.newPage();
       await fresh.goto(cfg.testPageUrl, { timeout: 20_000 });
       const title = await fresh.title();
