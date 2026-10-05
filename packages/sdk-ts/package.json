@@ -1,6 +1,7 @@
 {
   "name": "@kestrel/sdk",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "description": "TypeScript client for Kestrel, open-source cloud browsers for AI agents",
   "type": "module",
   "main": "./dist/index.js",
