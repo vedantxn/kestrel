@@ -17,6 +17,11 @@ export const EGRESS_DENY_REASONS = [
   "resolve_failed",
   "connection_cap", // N11
   "no_policy", // N6, N13
+  // Upstream proxies (docs/lld/upstream-proxy.md)
+  "upstream_blocked", // the proxy's address is not public, is the host's own, or its port is a bad port
+  "upstream_unreachable", // the proxy did not resolve, refused or timed out, or closed before replying
+  "upstream_auth_failed", // the proxy answered 407
+  "upstream_refused", // any other non-2xx, or a malformed or oversized reply
 ] as const;
 export const EgressDenyReason = z.enum(EGRESS_DENY_REASONS);
 export type EgressDenyReason = z.infer<typeof EgressDenyReason>;

@@ -139,6 +139,9 @@ export class ControlServer {
             return this.send(res, 400, {
               error: parsed.error.issues[0]?.message ?? "invalid policy",
             });
+          // Temporary until the proxy chains upstreams: refuse rather than exit directly.
+          if (parsed.data.upstream)
+            return this.send(res, 400, { error: "upstream not supported yet" });
           this.policies.set(ip, parsed.data);
           this.metrics.policies.set(this.policies.size);
           return this.send(res, 204);

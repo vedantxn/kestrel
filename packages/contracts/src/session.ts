@@ -2,6 +2,8 @@ import { z } from "zod";
 import { LIMITS } from "./timings.js";
 import { HostPattern } from "./host-pattern.js";
 import { NodeId, SessionId } from "./ids.js";
+import { PlainText } from "./plain-text.js";
+import { ProxyConfig, SessionProxy } from "./proxy.js";
 
 // --- Status and end reason (HLD 8.1) ---------------------------------------------------
 
@@ -128,18 +130,6 @@ export const NetworkPolicy = z
   .meta({ id: "NetworkPolicy" });
 export type NetworkPolicy = z.infer<typeof NetworkPolicy>;
 
-/** Postgres cannot store NUL in text or jsonb, and no caller string needs control characters. */
-const PlainText = (min: number, max: number) =>
-  z
-    .string()
-    .min(min)
-    .max(max)
-    .refine(
-      // eslint-disable-next-line no-control-regex -- matching control characters is the point
-      (v) => !/[\u0000-\u001f\u007f]/.test(v),
-      "must not contain control characters",
-    );
-
 export const Metadata = z
   .record(PlainText(1, 64), PlainText(0, 512))
   .refine((m) => Object.keys(m).length <= 16, "at most 16 keys")
@@ -180,6 +170,7 @@ export const SessionOptions = z
         "Record the browser's display to video, retrievable from `/recording` after the session.",
       ),
     metadata: Metadata.default({}),
+    proxy: SessionProxy.optional(),
   })
   .meta({ id: "SessionOptions" });
 export type SessionOptions = z.infer<typeof SessionOptions>;
@@ -188,6 +179,7 @@ export type SessionOptions = z.infer<typeof SessionOptions>;
 
 export const CreateSessionRequest = SessionOptions.partial()
   .extend({
+    proxy: ProxyConfig.optional(),
     idempotencyKey: PlainText(1, 255)
       .optional()
       .describe(

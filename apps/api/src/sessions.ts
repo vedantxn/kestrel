@@ -128,6 +128,11 @@ export async function createSession(
     );
   }
 
+  // Temporary until the egress gateway and node agent chain upstream proxies.
+  if (body.proxy)
+    throw new AppError("invalid_request", "proxy is not available yet.", {
+      param: "proxy",
+    });
   const { idempotencyKey, waitForCapacityMs = 0, ...rest } = body;
   const options = SessionOptions.parse(rest);
 

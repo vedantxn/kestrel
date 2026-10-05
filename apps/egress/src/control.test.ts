@@ -158,7 +158,7 @@ describe("the control API (C7)", () => {
           unknown: 1,
         })
       ).status,
-    ).toBe(204); // unknown fields are ignored, not an error;
+    ).toBe(400); // unknown fields are refused, never dropped (T-47)
     expect(
       (await call("PUT", "/v1/policies/not-an-ip", { sessionId: ses })).status,
     ).toBe(404);
