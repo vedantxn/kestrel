@@ -47,3 +47,14 @@ resource "aws_s3_object" "index" {
     </html>
   HTML
 }
+
+# CAPTCHA detection's test pages (docs/lld/captcha.md): real widgets from Google, hCaptcha and
+# Cloudflare, with their official always-pass test keys, so `bench captcha` costs nothing.
+resource "aws_s3_object" "captcha" {
+  for_each     = fileset("${path.module}/testpage/captcha", "*.html")
+  bucket       = aws_s3_bucket.testpage.id
+  key          = "test/captcha/${each.value}"
+  source       = "${path.module}/testpage/captcha/${each.value}"
+  etag         = filemd5("${path.module}/testpage/captcha/${each.value}")
+  content_type = "text/html; charset=utf-8"
+}

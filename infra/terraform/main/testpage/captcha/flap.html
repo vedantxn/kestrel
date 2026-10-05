@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>flap</title>
+    <script>
+      (function () {
+        var base = document.title;
+        window.ok = function () {
+          window.solved = 1;
+        };
+        setInterval(function () {
+          document.title =
+            base +
+            " wd=" +
+            navigator.webdriver +
+            (window.solved ? " solved" : "");
+        }, 250);
+      })();
+    </script>
+  </head>
+  <body style="margin: 0; font: 16px sans-serif">
+    <!-- Official test keys: they always pass, and are for testing only. -->
+    <div style="position: absolute; left: 40px; top: 40px">
+      <div id="slot"></div>
+      <script>
+        (function () {
+          var src =
+            "https://www.google.com/recaptcha/api2/anchor?ar=1&k=6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI&co=aHR0cHM6Ly9leGFtcGxlLmNvbTo0NDM.&hl=en&size=normal";
+          var slot = document.getElementById("slot"),
+            on = false,
+            end = Date.now() + 30000;
+          var t = setInterval(function () {
+            if (Date.now() > end) {
+              clearInterval(t);
+              slot.textContent = "";
+              return;
+            }
+            if (on) slot.textContent = "";
+            else {
+              var f = document.createElement("iframe");
+              f.src = src;
+              f.width = 304;
+              f.height = 78;
+              slot.appendChild(f);
+            }
+            on = !on;
+          }, 300);
+        })();
+      </script>
+    </div>
+  </body>
+</html>

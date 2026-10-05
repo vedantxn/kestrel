@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>hcaptcha</title>
+    <script>
+      (function () {
+        var base = document.title;
+        window.ok = function () {
+          window.solved = 1;
+        };
+        setInterval(function () {
+          document.title =
+            base +
+            " wd=" +
+            navigator.webdriver +
+            (window.solved ? " solved" : "");
+        }, 250);
+      })();
+    </script>
+  </head>
+  <body style="margin: 0; font: 16px sans-serif">
+    <!-- Official test keys: they always pass, and are for testing only. -->
+    <div style="position: absolute; left: 40px; top: 40px">
+      <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+      <div
+        class="h-captcha"
+        data-sitekey="10000000-ffff-ffff-ffff-000000000001"
+        data-callback="ok"
+      ></div>
+    </div>
+  </body>
+</html>
