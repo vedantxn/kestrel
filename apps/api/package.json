@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc -b",
     "start": "node dist/server.js",
-    "admin": "node dist/admin.js"
+    "admin": "node dist/admin.js",
+    "seed:demo": "node dist/seed-demo.js"
   },
   "dependencies": {
     "@kestrel/contracts": "*",
