@@ -99,6 +99,7 @@ export async function toApiSession(
         ? row.startPath
         : null,
     usage: { browserSeconds: row.browserSeconds },
+    captcha: null,
   };
 }
 

@@ -127,6 +127,7 @@ export function fakeSession(overrides: Partial<Session> = {}): Session {
     nodeId: "a",
     startPath: "hot",
     usage: { browserSeconds: 0 },
+    captcha: null,
     ...overrides,
   };
 }

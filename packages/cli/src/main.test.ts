@@ -32,6 +32,7 @@ function session(overrides: Partial<Session> = {}): Session {
     nodeId: "a",
     startPath: "hot",
     usage: { browserSeconds: 3 },
+    captcha: null,
     ...overrides,
   };
 }

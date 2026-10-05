@@ -24,6 +24,7 @@ from kestrel_sdk import (
     NetworkPolicy,
     ProxyConfig,
     Session,
+    SessionCaptcha,
     SessionEvent,
     SessionOptions,
     SessionProxy,
@@ -36,6 +37,7 @@ from kestrel_sdk import (
 from kestrel_sdk._types import (
     SESSION_STATUSES,
     TERMINAL_STATUSES,
+    CaptchaProvider,
     EndReason,
     ErrorCode,
     EventType,
@@ -75,6 +77,7 @@ def params(fn: Any, *skip: str) -> set[str]:
         (Viewport, SCHEMAS["Viewport"]),
         (NetworkPolicy, SCHEMAS["NetworkPolicy"]),
         (SessionProxy, SCHEMAS["SessionProxy"]),
+        (SessionCaptcha, SCHEMAS["SessionCaptcha"]),
         (ProxyConfig, SCHEMAS["ProxyConfig"]),
         (Usage, SCHEMAS["Session"]["properties"]["usage"]),
         (SessionToken, SCHEMAS["SessionToken"]),
@@ -102,6 +105,7 @@ def test_enums() -> None:
     assert set(get_args(EndReason)) == enum(session["endReason"])
     assert set(get_args(ErrorCode)) == enum(SCHEMAS["Error"]["properties"]["code"])
     assert TERMINAL_STATUSES <= set(SESSION_STATUSES)
+    assert set(get_args(CaptchaProvider)) == set(SCHEMAS["CaptchaProvider"]["enum"])
 
 
 @pytest.mark.parametrize("resource", [Sessions, AsyncSessions])

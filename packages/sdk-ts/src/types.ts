@@ -49,6 +49,20 @@ export interface NetworkPolicy {
   deny?: string[] | undefined;
 }
 
+export type CaptchaProvider =
+  | "recaptcha"
+  | "hcaptcha"
+  | "turnstile"
+  | "cloudflare_challenge"
+  | "arkose"
+  | "datadome";
+
+export interface SessionCaptcha {
+  providers: CaptchaProvider[];
+  /** When the current, unbroken presence began. */
+  since: string;
+}
+
 /** A session's upstream proxy as stored and returned. The password is never returned. */
 export interface SessionProxy {
   /** `http://host:port`. */
@@ -121,6 +135,11 @@ export interface Session {
   nodeId: string | null;
   startPath: "hot" | "cold" | null;
   usage: { browserSeconds: number };
+  /**
+   * A CAPTCHA from a known provider is showing on a page, or null. It may already be solved: a
+   * solved checkbox stays until the page moves on. Hand a person a control live-view link.
+   */
+  captcha: SessionCaptcha | null;
 }
 
 export interface ListSessionsQuery {
@@ -187,7 +206,21 @@ export type EventBody =
         signal: string | null;
       };
     }
-  | { type: "node.lost"; data: { nodeId: string } };
+  | { type: "node.lost"; data: { nodeId: string } }
+  | {
+      type: "captcha.detected";
+      data: {
+        provider: CaptchaProvider;
+        /** The hostname of the page it is on. */
+        host: string | null;
+        /** Every provider present after this event. */
+        present: CaptchaProvider[];
+      };
+    }
+  | {
+      type: "captcha.cleared";
+      data: { provider: CaptchaProvider; present: CaptchaProvider[] };
+    };
 
 /**
  * One entry in a session's timeline. A newer server may send types not listed here; the

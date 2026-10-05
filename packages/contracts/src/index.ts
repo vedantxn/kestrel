@@ -1,4 +1,5 @@
 export * from "./agent-gateway.js";
+export * from "./captcha.js";
 export * from "./connect.js";
 export * from "./egress-control.js";
 export * from "./errors.js";
@@ -15,5 +16,5 @@ export * from "./timings.js";
 export * from "./tokens.js";
 
 /** Bumped on any change to a frozen contract, with the affected consumers listed in the commit. */
-export const CONTRACTS_VERSION = "0.1.5";
+export const CONTRACTS_VERSION = "0.1.6";
 export * from "./computer.js";

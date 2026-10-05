@@ -36,6 +36,11 @@ export const RUNTIME_PATHS = {
    * once, authenticated by the template token; the template token is refused from then on.
    */
   rekey: "/rekey",
+  /**
+   * `GET`: the CAPTCHAs present now (`RuntimeCaptcha`, in captcha.ts). 409 before configure; a
+   * `runtimed` from before CAPTCHA detection answers 404, which means not supported.
+   */
+  captcha: "/captcha",
 } as const;
 
 /** `GET /health`. A pooled container is "hot" only when this says `ready`. */
