@@ -25,6 +25,9 @@ export const USAGE = `Usage: kestrel <command> [options]
 Commands:
   sessions create [--timeout ms] [--idle-timeout ms] [--viewport WxH] [--record]
                   [--allow host]... [--deny host]... [--wait-for-capacity ms]
+                  [--proxy http://host:port [--proxy-username u]]
+                                the proxy's password is read from
+                                $KESTREL_PROXY_PASSWORD, never from a flag
   sessions list [--status s] [--limit n] [--cursor c]
   sessions get <id>
   sessions stop <id>
@@ -76,6 +79,8 @@ const COMMANDS: Record<string, Command> = {
       deny: { type: "string", multiple: true },
       "wait-for-capacity": { type: "string" },
       record: { type: "boolean" },
+      proxy: { type: "string" },
+      "proxy-username": { type: "string" },
     },
     args: [],
     async run(k, _args, v, io) {
@@ -91,6 +96,7 @@ const COMMANDS: Record<string, Command> = {
           allow: v.allow as string[] | undefined,
           deny: v.deny as string[] | undefined,
         };
+      req.proxy = proxy(v, io);
       const s = await k.sessions.create(req, { signal: io.signal });
       if (v.json) return json(io, s);
       io.stdout(details(s));
@@ -339,6 +345,30 @@ export function table(rows: string[][]): string {
 }
 
 /**
+ * `--proxy` and `--proxy-username`. The password comes from the environment only: a flag would
+ * leave it in shell history and in the process list.
+ */
+function proxy(v: Values, io: Io): CreateSessionRequest["proxy"] {
+  const password = io.env.KESTREL_PROXY_PASSWORD || undefined;
+  const username =
+    typeof v["proxy-username"] === "string" ? v["proxy-username"] : undefined;
+  if (typeof v.proxy !== "string") {
+    if (username)
+      throw new UsageError("--proxy-username needs --proxy http://host:port");
+    return undefined;
+  }
+  if (password && !username)
+    throw new UsageError(
+      "KESTREL_PROXY_PASSWORD is set: pass --proxy-username as well",
+    );
+  return {
+    server: v.proxy,
+    ...(username ? { username } : {}),
+    ...(password ? { password } : {}),
+  };
+}
+
+/**
  * One session as `key  value` lines. `connectUrl` is left out on purpose: it carries a
  * bearer token, and terminal output ends up in screenshots and shared logs.
  */
@@ -356,6 +386,13 @@ function details(s: Session): string {
     ["timeout", `${s.options.timeout} ms`],
     ["idle timeout", `${s.options.idleTimeout} ms`],
     ["recording", s.options.recording ? "yes" : "no"],
+    [
+      "proxy",
+      s.options.proxy
+        ? s.options.proxy.server +
+          (s.options.proxy.username ? ` (as ${s.options.proxy.username})` : "")
+        : "-",
+    ],
     ["browser seconds", String(s.usage.browserSeconds)],
   ];
   const meta = Object.entries(s.options.metadata);

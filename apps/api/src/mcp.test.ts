@@ -224,6 +224,25 @@ describe("session tools", () => {
     session(await call(c, "stop_session", { sessionId: created.id }));
   });
 
+  it("create_session takes a proxy, and its result never holds the password", async () => {
+    const result = await call(await connect(), "create_session", {
+      proxy: {
+        server: "http://proxy.example.com:3128",
+        username: "u",
+        password: "pr0xy-mcp",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("pr0xy-mcp");
+    const created = session(result);
+    expect(created.options.proxy).toEqual({
+      server: "http://proxy.example.com:3128",
+      username: "u",
+    });
+    expect(env.nodes.a!.startCalls.at(-1)!.network.upstream?.password).toBe(
+      "pr0xy-mcp",
+    );
+  });
+
   it("is scoped to the key's project", async () => {
     const mine = session(await call(await connect(), "create_session"));
     const other = await connect(env.project2.key);

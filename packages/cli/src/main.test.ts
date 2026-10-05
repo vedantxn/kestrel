@@ -118,6 +118,56 @@ describe("sessions", () => {
     expect(r.stdout).not.toContain(TOKEN);
   });
 
+  it("create --proxy takes the password from the environment only, and never prints it", async () => {
+    const proxied = session({
+      options: {
+        ...session().options,
+        proxy: { server: "http://proxy.example.com:3128", username: "u" },
+      },
+    });
+    const r = await cli(
+      [
+        "sessions",
+        "create",
+        "--proxy",
+        "http://proxy.example.com:3128",
+        "--proxy-username",
+        "u",
+      ],
+      () => ({ status: 201, body: proxied }),
+      { KESTREL_PROXY_PASSWORD: "pr0xy-cli" },
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]!.body).toMatchObject({
+      proxy: {
+        server: "http://proxy.example.com:3128",
+        username: "u",
+        password: "pr0xy-cli",
+      },
+    });
+    expect(r.stdout).toMatch(
+      /^proxy\s+http:\/\/proxy\.example\.com:3128 \(as u\)$/m,
+    );
+    expect(r.stdout + r.stderr).not.toContain("pr0xy-cli");
+  });
+
+  it("create refuses a proxy password without a username, and a username without a proxy", async () => {
+    const noUser = await cli(
+      ["sessions", "create", "--proxy", "http://p.example.com:3128"],
+      ok(session()),
+      { KESTREL_PROXY_PASSWORD: "pr0xy-cli" },
+    );
+    expect(noUser.code).toBe(2);
+    expect(noUser.calls).toHaveLength(0);
+    expect(noUser.stderr).not.toContain("pr0xy-cli");
+    const noProxy = await cli(
+      ["sessions", "create", "--proxy-username", "u"],
+      ok(session()),
+    );
+    expect(noProxy.code).toBe(2);
+    expect(noProxy.calls).toHaveLength(0);
+  });
+
   it("create --json prints the API's JSON", async () => {
     const r = await cli(["sessions", "create", "--json"], () => ({
       status: 201,

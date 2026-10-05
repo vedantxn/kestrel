@@ -152,6 +152,18 @@ const createInput = {
     .record(z.string(), z.string())
     .optional()
     .describe("Up to 16 string labels kept with the session."),
+  proxy: z
+    .object({
+      server: z.string().max(300),
+      username: z.string().max(255).optional(),
+      password: z.string().max(255).optional(),
+    })
+    .optional()
+    .describe(
+      "Send the browser's traffic through your own HTTP proxy, e.g. {server: 'http://proxy.example.com:8080', username, password}. " +
+        "Only http:// proxies; the proxy resolves hostnames. The password is never returned, " +
+        "but anything passed to a tool stays in this conversation's transcript.",
+    ),
   idempotencyKey: z
     .string()
     .max(255)
