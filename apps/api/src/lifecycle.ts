@@ -128,7 +128,7 @@ export async function beginStop(
     id,
     from: BEFORE_STOPPING,
     to: "stopping",
-    data: { endReason: reason, stoppingAt: at },
+    data: { endReason: reason, stoppingAt: at, captcha: Prisma.DbNull },
     events: [{ type: "session.stopping", data: { endReason: reason } }],
     at,
   });

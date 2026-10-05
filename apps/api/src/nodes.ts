@@ -1,4 +1,5 @@
 import {
+  SessionCaptcha,
   TIMINGS,
   sanitizeDeep,
   type HeartbeatRequest,
@@ -9,6 +10,7 @@ import {
   type ReportsRequest,
   type ReportsResponse,
 } from "@kestrel/contracts";
+import { Prisma } from "@kestrel/db";
 import type { Ctx } from "./context.js";
 import { AppError } from "./errors.js";
 import { publicSessionId, sessionUuid } from "./ids.js";
@@ -241,7 +243,7 @@ async function applyReport(
   if (!uuid) return;
   const session = await tx.session.findUnique({
     where: { id: uuid },
-    select: { status: true, nodeId: true },
+    select: { status: true, nodeId: true, captcha: true },
   });
   if (!session || session.nodeId !== nodeId) return; // not ours to change; acked so the node stops resending
   const at = new Date(r.at);
@@ -269,6 +271,26 @@ async function applyReport(
         to: "ready",
         events: [],
         at,
+      });
+    }
+    // The session's CAPTCHA field follows its captcha.* events, in the same transaction. Each
+    // event carries the full set present, so the next one repairs a dropped one.
+    if (
+      r.event.type === "captcha.detected" ||
+      r.event.type === "captcha.cleared"
+    ) {
+      const present = r.event.data.present;
+      const prev = SessionCaptcha.safeParse(session.captcha);
+      await tx.session.updateMany({
+        where: { id: uuid, status: { in: ["ready", "active"] } },
+        data: {
+          captcha: present.length
+            ? {
+                providers: present,
+                since: prev.success ? prev.data.since : at.toISOString(),
+              }
+            : Prisma.DbNull,
+        },
       });
     }
     // runtime.crashed is recorded; the matching `removed` report ends the session.
