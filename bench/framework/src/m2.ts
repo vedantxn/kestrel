@@ -3,8 +3,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { chromium, type Browser, type Page } from "playwright-core";
 import WebSocket from "ws";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { Session } from "@kestrel/contracts";
 import { KestrelClient } from "./client.js";
+import type { HostConfig } from "./collect.js";
 import { m1ConfigFromEnv } from "./m1.js";
 import { makeReport, type Report } from "./report.js";
 
@@ -20,6 +23,15 @@ export interface M2Config {
   testPageUrl: string;
   /** Seconds of recorded activity in the recording check. */
   recordSeconds: number;
+  /** The node agents, to see what serves a session (a VM's id starts with `vm-`). */
+  host: HostConfig;
+  /**
+   * Node a's runtime (`RUNTIME_A`). On a microVM node, checks 4 and 7 require the recording
+   * session to be a VM (docs/lld/microvm-recording.md).
+   */
+  runtimeA: "docker" | "microvm";
+  /** Decodes a recording; defaults to ffprobe and ffmpeg in the runtime image, run by Docker. */
+  decode?: (mp4: Buffer) => Promise<Decoded>;
   environment: Record<string, string | number>;
   only?: number[];
   log: (m: string) => void;
@@ -127,6 +139,162 @@ export function mp4Boxes(b: Buffer): string[] {
     off += size;
   }
   return out;
+}
+
+/** What decoding a recording found. */
+export interface Decoded {
+  /** ffmpeg decoded every frame without an error. */
+  clean: boolean;
+  errors: string;
+  frames: number;
+  width: number;
+  height: number;
+  codec: string;
+  seconds: number;
+}
+
+/**
+ * Decode a recording with the runtime image's own ffprobe and ffmpeg (the harness container has
+ * the Docker socket, and the recording is piped in, so no file is shared). No network.
+ */
+export function decodeWithRuntimeImage(mp4: Buffer): Promise<Decoded> {
+  return decodeMp4(mp4, (tool, args) => [
+    "docker",
+    [
+      "run",
+      "--rm",
+      "-i",
+      "--network",
+      "none",
+      "--read-only",
+      "--entrypoint",
+      tool,
+      "kestrel-runtime:dev",
+      ...args,
+    ],
+  ]);
+}
+
+/** Decode with ffprobe and ffmpeg, run as `command(tool, args)` says, the file on stdin. */
+export async function decodeMp4(
+  mp4: Buffer,
+  command: (tool: string, args: string[]) => [string, string[]],
+): Promise<Decoded> {
+  const run = (args: string[]) =>
+    new Promise<{ code: number; out: string; err: string }>((resolve) => {
+      const [cmd, argv] = command(args[0]!, args.slice(1));
+      const p = spawn(cmd, argv, { stdio: ["pipe", "pipe", "pipe"] });
+      let out = "";
+      let err = "";
+      p.stdout.on("data", (d: Buffer) => (out += d.toString()));
+      p.stderr.on("data", (d: Buffer) => (err += d.toString()));
+      p.stdin.on("error", () => undefined);
+      p.stdin.end(mp4);
+      p.on("error", (e) => resolve({ code: 127, out, err: e.message }));
+      p.on("close", (code) => resolve({ code: code ?? 1, out, err }));
+    });
+  const probe = await run([
+    "ffprobe",
+    "-v",
+    "error",
+    "-count_frames",
+    "-select_streams",
+    "v:0",
+    "-show_entries",
+    "stream=codec_name,width,height,nb_read_frames:format=duration",
+    "-of",
+    "json",
+    "-i",
+    "pipe:0",
+  ]);
+  const full = await run([
+    "ffmpeg",
+    "-v",
+    "error",
+    "-xerror",
+    "-i",
+    "pipe:0",
+    "-f",
+    "null",
+    "-",
+  ]);
+  return parseDecoded(
+    probe.out,
+    full.code === 0 ? full.err : `exit ${full.code}: ${full.err}`,
+  );
+}
+
+/** ffprobe's JSON and ffmpeg's error output, as a `Decoded`. */
+export function parseDecoded(probeJson: string, ffmpegErrors: string): Decoded {
+  let j: {
+    streams?: {
+      codec_name?: string;
+      width?: number;
+      height?: number;
+      nb_read_frames?: string;
+    }[];
+    format?: { duration?: string };
+  } = {};
+  try {
+    j = JSON.parse(probeJson) as typeof j;
+  } catch {
+    /* no streams */
+  }
+  const s = j.streams?.[0] ?? {};
+  return {
+    clean: ffmpegErrors.trim() === "",
+    errors: ffmpegErrors.trim().slice(0, 300),
+    frames: Number(s.nb_read_frames ?? 0),
+    width: s.width ?? 0,
+    height: s.height ?? 0,
+    codec: s.codec_name ?? "",
+    seconds: Number(j.format?.duration ?? 0),
+  };
+}
+
+/** Why a decoded recording of `seconds` of activity is not good enough, or null. */
+export function judgeDecoded(
+  d: Decoded,
+  seconds: number,
+  framerate = 10,
+): string | null {
+  if (!d.clean) return `ffmpeg reported errors decoding it: ${d.errors}`;
+  if (d.codec !== "h264") return `video codec ${d.codec || "none"}, not h264`;
+  if (d.width < 200 || d.height < 200)
+    return `a ${d.width}x${d.height} picture`;
+  // The last fragment may be cut at the end, and a slow pull can freeze (not drop) the picture.
+  const want = Math.floor((seconds - 4) * framerate);
+  if (d.frames < want)
+    return `${d.frames} frames decoded, wanted at least ${want} for ${seconds} s`;
+  return null;
+}
+
+/** Which container or VM serves a session, from its node agent's own state. */
+async function servedBy(
+  host: HostConfig,
+  sessionId: string,
+): Promise<{ id: string; node: string } | null> {
+  let answered = 0;
+  for (const n of host.nodes) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${n.agentPort}/v1/state`, {
+        headers: {
+          authorization: `Bearer ${readFileSync(n.secretFile, "utf8").trim()}`,
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+      const st = (await r.json()) as {
+        sessions: { sessionId: string; containerId: string | null }[];
+      };
+      answered++;
+      const b = st.sessions.find((s) => s.sessionId === sessionId);
+      if (b?.containerId) return { id: b.containerId, node: n.id };
+    } catch {
+      /* the next node */
+    }
+  }
+  if (answered === 0) throw new Error("no node agent answered /v1/state");
+  return null;
 }
 
 const textOf = (r: unknown): string =>
@@ -283,34 +451,73 @@ export async function runM2(c: M2Config): Promise<Report> {
       }
     });
 
+  /**
+   * A recording session on node a, which on a microVM node must be a VM (its recording pulled out
+   * of the guest, docs/lld/microvm-recording.md); sessions that land on another node are stopped.
+   */
+  const openRecorded = async () => {
+    for (let i = 0; i < 6; i++) {
+      const h = await open(client, { recording: true });
+      const where = await servedBy(c.host, h.session.id);
+      if (c.runtimeA !== "microvm" || where?.node === "a") {
+        if (c.runtimeA === "microvm" && !where?.id.startsWith("vm-")) {
+          await close(client, h);
+          throw new Error(
+            `the recording session on the microVM node is served by ${where?.id.slice(0, 16) ?? "nothing"}, not a VM`,
+          );
+        }
+        return { h, where: where?.id ?? "unknown" };
+      }
+      await close(client, h);
+    }
+    throw new Error("no recording session landed on node a");
+  };
+
+  /** Record `seconds` of a changing page, stop, and read the recording back once the browser is gone. */
+  const recordOne = async (seconds: number) => {
+    const { h, where } = await openRecorded();
+    const t0 = Date.now();
+    try {
+      await h.page.goto(c.testPageUrl);
+      while (Date.now() - t0 < seconds * 1000) {
+        await h.page.evaluate(
+          "document.body.style.background = '#' + Math.floor(Math.random()*0xffffff).toString(16).padStart(6,'0')",
+        );
+        await sleep(500);
+      }
+      const during = await client.recording(h.session.id);
+      if (!during || during.length === 0)
+        throw new Error("no recording while the session runs");
+    } finally {
+      await close(client, h);
+    }
+    await client.waitFor(h.session.id, [...TERMINAL], 60_000);
+    // The browser (container or VM) is gone from its node...
+    await until(
+      "the session's browser to be removed",
+      20_000,
+      async () => (await servedBy(c.host, h.session.id)) === null,
+    );
+    // ...and the recording is still served.
+    const bytes = await until(
+      "the recording after the session",
+      20_000,
+      async () => (await client.recording(h.session.id)) ?? false,
+    );
+    return { bytes, where, seconds };
+  };
+  let recorded: Awaited<ReturnType<typeof recordOne>> | null = null;
+  const madeIn = (id: string) =>
+    id.startsWith("vm-") ? `microVM ${id.slice(0, 15)}` : "a container";
+
   if (want(4))
     await check(
       "4",
-      `a ${c.recordSeconds} s recording plays back, and outlives its container`,
+      `a ${c.recordSeconds} s recording plays back, and outlives its ${c.runtimeA === "microvm" ? "VM" : "container"}`,
       async () => {
-        const h = await open(client, { recording: true });
-        const t0 = Date.now();
-        try {
-          await h.page.goto(c.testPageUrl);
-          while (Date.now() - t0 < c.recordSeconds * 1000) {
-            await h.page.evaluate(
-              "document.body.style.background = '#' + Math.floor(Math.random()*0xffffff).toString(16).padStart(6,'0')",
-            );
-            await sleep(500);
-          }
-          const during = await client.recording(h.session.id);
-          if (!during || during.length === 0)
-            throw new Error("no recording while the session runs");
-        } finally {
-          await close(client, h);
-        }
-        await client.waitFor(h.session.id, [...TERMINAL], 60_000);
-        const bytes = await until(
-          "the recording after the session",
-          20_000,
-          async () => (await client.recording(h.session.id)) ?? false,
-        );
-        const boxes = mp4Boxes(bytes);
+        const r = await recordOne(c.recordSeconds);
+        recorded = r;
+        const boxes = mp4Boxes(r.bytes);
         const frags = boxes.filter((b) => b === "moof").length;
         if (boxes[0] !== "ftyp" || !boxes.includes("moov"))
           throw new Error(`not an MP4: ${boxes.slice(0, 4).join(",")}`);
@@ -319,7 +526,22 @@ export async function runM2(c: M2Config): Promise<Report> {
           throw new Error(
             `${frags} fragments, wanted at least ${expected} for ${c.recordSeconds} s`,
           );
-        return `${(bytes.length / 1024).toFixed(0)} KiB, ${frags} fragments (~${frags * 2} s), still served after the container was removed`;
+        return `${(r.bytes.length / 1024).toFixed(0)} KiB, ${frags} fragments, made in ${madeIn(r.where)}; still served after it was removed`;
+      },
+    );
+
+  if (want(7))
+    await check(
+      "7",
+      `a recording ${c.runtimeA === "microvm" ? "made in a microVM " : ""}decodes end to end`,
+      async () => {
+        const r = recorded ?? (await recordOne(20));
+        if (c.runtimeA === "microvm" && !r.where.startsWith("vm-"))
+          throw new Error(`the recording was made in ${r.where}, not a VM`);
+        const d = await (c.decode ?? decodeWithRuntimeImage)(r.bytes);
+        const why = judgeDecoded(d, r.seconds);
+        if (why) throw new Error(why);
+        return `${d.frames} ${d.codec} frames, ${d.width}x${d.height}, ${d.seconds.toFixed(1)} s, decoded without errors (made in ${madeIn(r.where)})`;
       },
     );
 
@@ -448,7 +670,9 @@ export function m2ConfigFromEnv(
     apiKey: base.apiKey,
     testPageUrl: base.testPageUrl,
     recordSeconds: Number(env.RECORD_SECONDS ?? (env.QUICK === "1" ? 20 : 60)),
-    environment: base.environment,
+    host: base.host,
+    runtimeA: env.RUNTIME_A === "microvm" ? "microvm" : "docker",
+    environment: { ...base.environment, runtimeA: env.RUNTIME_A ?? "docker" },
     ...(env.ONLY ? { only: env.ONLY.split(",").map(Number) } : {}),
     log,
   };

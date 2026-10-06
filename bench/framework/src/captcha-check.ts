@@ -140,8 +140,9 @@ export async function runCaptchaCheck(c: CaptchaCheckConfig): Promise<Report> {
     }
   };
 
-  // One session per node, plus a recording session on the first (a Docker container on a
-  // microVM node). Sessions that land elsewhere are stopped.
+  // One session per node, plus a recording session on the first (on a microVM node a VM whose
+  // recording is pulled out; a Docker container with MICROVM_RECORDING=docker). Sessions that
+  // land elsewhere are stopped.
   const held: Held[] = [];
   const spare: Session[] = [];
   const get = (h: Held) => client.get(h.session.id);
