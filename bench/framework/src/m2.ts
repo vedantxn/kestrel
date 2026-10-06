@@ -26,8 +26,9 @@ export interface M2Config {
   /** The node agents, to see what serves a session (a VM's id starts with `vm-`). */
   host: HostConfig;
   /**
-   * Node a's runtime (`RUNTIME_A`). On a microVM node, checks 4 and 7 require the recording
-   * session to be a VM (docs/lld/microvm-recording.md).
+   * Node a's runtime as far as recording goes: "microvm" when `RUNTIME_A=microvm` and recording
+   * sessions are VMs too (`MICROVM_RECORDING` not `docker`). Then checks 4 and 7 take a recording
+   * session on node a and require it to be a VM (docs/lld/microvm-recording.md).
    */
   runtimeA: "docker" | "microvm";
   /** Decodes a recording; defaults to ffprobe and ffmpeg in the runtime image, run by Docker. */
@@ -671,8 +672,15 @@ export function m2ConfigFromEnv(
     testPageUrl: base.testPageUrl,
     recordSeconds: Number(env.RECORD_SECONDS ?? (env.QUICK === "1" ? 20 : 60)),
     host: base.host,
-    runtimeA: env.RUNTIME_A === "microvm" ? "microvm" : "docker",
-    environment: { ...base.environment, runtimeA: env.RUNTIME_A ?? "docker" },
+    runtimeA:
+      env.RUNTIME_A === "microvm" && env.MICROVM_RECORDING !== "docker"
+        ? "microvm"
+        : "docker",
+    environment: {
+      ...base.environment,
+      runtimeA: env.RUNTIME_A ?? "docker",
+      microvmRecording: env.MICROVM_RECORDING ?? "vm",
+    },
     ...(env.ONLY ? { only: env.ONLY.split(",").map(Number) } : {}),
     log,
   };
