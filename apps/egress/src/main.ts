@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
 import { createLogger, parseEnv } from "@kestrel/shared";
@@ -6,7 +7,7 @@ import { ControlServer } from "./control.js";
 import { DenialLog } from "./denials.js";
 import { createEgressMetrics } from "./metrics.js";
 import { PolicyStore } from "./policy.js";
-import { EgressProxy } from "./proxy.js";
+import { defaultUpstreamCa, EgressProxy } from "./proxy.js";
 import { DnsResolve } from "./resolver.js";
 
 const Env = z.object({
@@ -24,6 +25,11 @@ const Env = z.object({
   METRICS_HOST: z.string().default("127.0.0.1"),
   METRICS_PORT: z.coerce.number().int().default(7301),
   LOG_LEVEL: z.string().default("info"),
+  /**
+   * PEM certificates trusted for `https://` upstream proxies in addition to the system's and
+   * Node's own (a proxy with a private CA). Empty: none.
+   */
+  PROXY_CA_FILE: z.string().default(""),
 });
 
 const env = parseEnv(Env);
@@ -70,6 +76,10 @@ const proxy = new EgressProxy({
   metrics,
   log,
   blockedAddresses: own,
+  upstreamCa: [
+    ...defaultUpstreamCa(),
+    ...(env.PROXY_CA_FILE ? [readFileSync(env.PROXY_CA_FILE, "utf8")] : []),
+  ],
 });
 const control = new ControlServer(policies, denials, metrics, log);
 

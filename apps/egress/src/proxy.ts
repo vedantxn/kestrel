@@ -1,4 +1,9 @@
-import { connect as netConnect, type Socket } from "node:net";
+import { connect as netConnect, isIPv4, type Socket } from "node:net";
+import {
+  connect as tlsConnect,
+  getCACertificates,
+  type TLSSocket,
+} from "node:tls";
 import {
   Agent,
   createServer as createHttpServer,
@@ -13,12 +18,14 @@ import { ipAllowed, parseHost } from "./addresses.js";
 import type { DenialLog } from "./denials.js";
 import type { EgressMetrics } from "./metrics.js";
 import {
+  countBytes,
   listDecision,
   type Entry,
   type PolicyStore,
   type UpstreamEntry,
 } from "./policy.js";
 import type { Resolver } from "./resolver.js";
+import { socksConnect } from "./socks5.js";
 import { readConnectReply } from "./upstream.js";
 
 /** N9. The gateway must not be a general relay: web ports only. */
@@ -43,8 +50,32 @@ export interface ProxyOptions {
   /** A client that has not finished its request this soon is dropped. */
   preRequestTimeoutMs?: number;
   maxConnections?: number;
-  /** The whole of an upstream proxy's reply to CONNECT must arrive within this. */
+  /**
+   * The whole of an upstream proxy's reply to CONNECT, its SOCKS5 handshake, or its TLS
+   * handshake, must arrive within this.
+   */
   upstreamReplyTimeoutMs?: number;
+  /**
+   * Certificates trusted for `https://` proxies. Default: Node's bundled roots, the operating
+   * system's store and NODE_EXTRA_CA_CERTS.
+   */
+  upstreamCa?: string[];
+}
+
+/** The way to a session's proxy, opened, or why not. */
+type Opened =
+  | { ok: true; socket: Socket; rest: Buffer }
+  | { ok: false; reason: EgressDenyReason; status: number; message: string };
+
+/** Node's bundled roots and NODE_EXTRA_CA_CERTS, and the operating system's store. */
+export function defaultUpstreamCa(): string[] {
+  const out = new Set(getCACertificates("default"));
+  try {
+    for (const c of getCACertificates("system")) out.add(c);
+  } catch {
+    /* no system store here */
+  }
+  return [...out];
 }
 
 type Decision =
@@ -119,10 +150,12 @@ export class EgressProxy {
   private readonly connectFn: (ip: string, port: number) => Socket;
   private resolving = 0;
   private usedSockets = new WeakSet<Socket>();
+  private readonly upstreamCa: string[];
 
   constructor(private readonly o: ProxyOptions) {
     this.connectFn =
       o.connect ?? ((ip, port) => netConnect({ host: ip, port }));
+    this.upstreamCa = o.upstreamCa ?? defaultUpstreamCa();
   }
 
   async listen(host: string, port: number): Promise<number> {
@@ -435,10 +468,187 @@ export class EgressProxy {
   }
 
   /**
-   * CONNECT through the session's proxy: connect to a checked address of the proxy, ask it for
-   * a tunnel to the destination by name, and read its answer as hostile input. Only a 2xx opens
-   * the tunnel, and nothing of the proxy's answer reaches Chrome (T-46). Every failure path
-   * gives back the slot and never connects anywhere else (T-47).
+   * Open the way to a session's proxy: connect to a checked address of it, put TLS on that
+   * connection for an `https://` proxy, and, with `tunnel`, ask the proxy for a tunnel to the
+   * destination by name (HTTP CONNECT, or a SOCKS5 CONNECT with the name as address type 3).
+   * Without `tunnel` the connection to the proxy itself is returned, for an absolute-URI
+   * request. Everything the proxy says is read as hostile input (T-46), and no failure ever
+   * leads anywhere but back to the caller (T-47). `holder` always has the socket in use, so
+   * the caller can cut a handshake its client has left.
+   */
+  private async openUpstream(
+    d: Extract<Decision, { ok: true }>,
+    via: UpstreamEntry,
+    holder: { sock: Socket | null },
+    tunnel: boolean,
+  ): Promise<Opened> {
+    const failed = (
+      reason: EgressDenyReason,
+      status: number,
+      message: string,
+    ): Opened => {
+      holder.sock?.destroy();
+      return { ok: false, reason, status, message };
+    };
+    let sock = await this.dial(d.addresses, via.port).catch(() => null);
+    if (!sock)
+      return failed(
+        "upstream_unreachable",
+        502,
+        "could not connect to the proxy",
+      );
+    sock.on("error", () => undefined);
+    holder.sock = sock;
+
+    if (via.scheme === "https") {
+      const t = await this.tlsTo(sock, via.host);
+      if (t.kind === "timeout")
+        return failed(
+          "upstream_unreachable",
+          504,
+          "the proxy's TLS handshake did not finish in time",
+        );
+      if (t.kind === "failed")
+        return failed(
+          "upstream_tls_failed",
+          502,
+          `TLS to the proxy failed: ${t.why}`,
+        );
+      sock = t.sock;
+      holder.sock = sock;
+    }
+    if (!tunnel) return { ok: true, socket: sock, rest: Buffer.alloc(0) };
+
+    const replyMs = this.o.upstreamReplyTimeoutMs ?? 10_000;
+    if (via.scheme === "socks5") {
+      const r = await socksConnect(
+        sock,
+        {
+          host: d.host,
+          port: d.port,
+          ...(via.socksCredentials ?? {}),
+        },
+        replyMs,
+      );
+      if (r.kind === "ok") return { ok: true, socket: sock, rest: r.rest };
+      if (r.kind === "auth")
+        return failed(
+          "upstream_auth_failed",
+          502,
+          "the proxy refused the credentials",
+        );
+      if (r.kind === "refused")
+        return failed(
+          "upstream_refused",
+          502,
+          r.code !== undefined
+            ? `the proxy refused the connection (SOCKS5 reply ${r.code})`
+            : "the proxy sent a reply that is not SOCKS5",
+        );
+      if (r.kind === "timeout")
+        return failed(
+          "upstream_unreachable",
+          504,
+          "the proxy did not answer in time",
+        );
+      return failed(
+        "upstream_unreachable",
+        502,
+        "the proxy closed the connection",
+      );
+    }
+
+    const target = `${d.host}:${d.port}`;
+    sock.write(
+      `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n` +
+        (via.authorization
+          ? `Proxy-Authorization: ${via.authorization}\r\n`
+          : "") +
+        "\r\n",
+    );
+    const reply = await readConnectReply(sock, replyMs);
+    if (reply.kind === "ok")
+      return { ok: true, socket: sock, rest: reply.rest };
+    if (reply.kind === "auth")
+      return failed(
+        "upstream_auth_failed",
+        502,
+        "the proxy refused the credentials",
+      );
+    if (reply.kind === "refused")
+      return failed(
+        "upstream_refused",
+        502,
+        "the proxy refused the connection",
+      );
+    if (reply.kind === "timeout")
+      return failed(
+        "upstream_unreachable",
+        504,
+        "the proxy did not answer in time",
+      );
+    return failed(
+      "upstream_unreachable",
+      502,
+      "the proxy closed the connection",
+    );
+  }
+
+  /**
+   * TLS to an `https://` proxy over a connection already made to a checked address. The
+   * certificate must chain to the trust store (`upstreamCa`) and name the proxy's host; SNI is
+   * the host, unless it is an IP address (RFC 6066), when the certificate must name that address.
+   */
+  private tlsTo(
+    raw: Socket,
+    host: string,
+  ): Promise<
+    | { kind: "ok"; sock: TLSSocket }
+    | { kind: "failed"; why: string }
+    | { kind: "timeout" }
+  > {
+    return new Promise((resolve) => {
+      const tls = tlsConnect({
+        socket: raw,
+        host,
+        ...(isIPv4(host) ? {} : { servername: host }),
+        ca: this.upstreamCa,
+        rejectUnauthorized: true,
+      });
+      let settled = false;
+      const done = (
+        r:
+          | { kind: "ok"; sock: TLSSocket }
+          | { kind: "failed"; why: string }
+          | { kind: "timeout" },
+      ): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (r.kind !== "ok") tls.destroy();
+        resolve(r);
+      };
+      const timer = setTimeout(
+        () => done({ kind: "timeout" }),
+        this.o.upstreamReplyTimeoutMs ?? 10_000,
+      );
+      tls.once("secureConnect", () => done({ kind: "ok", sock: tls }));
+      tls.on("error", (e: NodeJS.ErrnoException) =>
+        done({
+          kind: "failed",
+          why: (e.code ?? e.message).slice(0, 80),
+        }),
+      );
+      tls.once("close", () =>
+        done({ kind: "failed", why: "closed during the handshake" }),
+      );
+    });
+  }
+
+  /**
+   * CONNECT through the session's proxy. Only a tunnel the proxy agreed to is used, and nothing
+   * of the proxy's answer reaches Chrome (T-46). Every failure path gives back the slot and
+   * never connects anywhere else (T-47).
    */
   private async connectVia(
     source: string,
@@ -447,85 +657,31 @@ export class EgressProxy {
     d: Extract<Decision, { ok: true }>,
     via: UpstreamEntry,
   ): Promise<void> {
-    const fail = (
-      reason: EgressDenyReason,
-      status: number,
-      message: string,
-    ): void => {
-      d.release();
-      this.upstreamFailed(source, d, reason, status, message);
-      if (!client.destroyed) this.refuse(client, status, message, reason);
-    };
-
-    let proxy: Socket | null = null;
-    try {
-      proxy = await this.dial(d.addresses, via.port);
-    } catch {
-      proxy = null;
-    }
-    if (!proxy)
-      return fail(
-        "upstream_unreachable",
-        502,
-        "could not connect to the proxy",
-      );
-    proxy.on("error", () => undefined);
     // Leaving mid-handshake, or the policy being cleared, ends the handshake at once.
+    const holder: { sock: Socket | null } = { sock: null };
     const abandon = (): void => {
-      proxy.destroy();
+      holder.sock?.destroy();
     };
     client.once("close", abandon);
     d.entry.sockets.add(client);
-
-    const target = `${d.host}:${d.port}`;
-    proxy.write(
-      `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n` +
-        (via.authorization
-          ? `Proxy-Authorization: ${via.authorization}\r\n`
-          : "") +
-        "\r\n",
-    );
-    const reply = await readConnectReply(
-      proxy,
-      this.o.upstreamReplyTimeoutMs ?? 10_000,
-    );
+    const r = await this.openUpstream(d, via, holder, true);
     client.off("close", abandon);
     d.entry.sockets.delete(client);
 
     if (client.destroyed || this.o.policies.get(source) !== d.entry) {
       d.release();
-      proxy.destroy();
+      if (r.ok) r.socket.destroy();
       client.destroy();
       return;
     }
-    if (reply.kind !== "ok") {
-      proxy.destroy();
-      if (reply.kind === "auth")
-        return fail(
-          "upstream_auth_failed",
-          502,
-          "the proxy refused the credentials",
-        );
-      if (reply.kind === "refused")
-        return fail(
-          "upstream_refused",
-          502,
-          "the proxy refused the connection",
-        );
-      if (reply.kind === "timeout")
-        return fail(
-          "upstream_unreachable",
-          504,
-          "the proxy did not answer in time",
-        );
-      return fail(
-        "upstream_unreachable",
-        502,
-        "the proxy closed the connection",
-      );
+    if (!r.ok) {
+      d.release();
+      this.upstreamFailed(source, d, r.reason, r.status, r.message);
+      if (!client.destroyed) this.refuse(client, r.status, r.message, r.reason);
+      return;
     }
     this.o.metrics.requests.inc({ result: "allowed" });
-    this.splice(client, proxy, head, reply.rest, d);
+    this.splice(client, r.socket, head, r.rest, d);
   }
 
   /** Relay both ways until either side closes, the idle timeout passes or the policy is cleared. */
@@ -556,14 +712,21 @@ export class EgressProxy {
     client.setTimeout(idle, done);
     upstream.setTimeout(idle, done);
     client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-    if (early.length) client.write(early);
-    if (head.length) upstream.write(head);
-    client.on("data", (c) =>
-      this.o.metrics.bytes.inc({ direction: "out" }, c.length),
-    );
-    upstream.on("data", (c) =>
-      this.o.metrics.bytes.inc({ direction: "in" }, c.length),
-    );
+    // Bytes are counted per session (G-20) at the browser's side: what it sent, what it got.
+    const count = (dir: "up" | "down", n: number): void => {
+      countBytes(entry.bytes, dir, n);
+      this.o.metrics.bytes.inc({ direction: dir === "up" ? "out" : "in" }, n);
+    };
+    if (early.length) {
+      client.write(early);
+      count("down", early.length);
+    }
+    if (head.length) {
+      upstream.write(head);
+      count("up", head.length);
+    }
+    client.on("data", (c: Buffer) => count("up", c.length));
+    upstream.on("data", (c: Buffer) => count("down", c.length));
     client.pipe(upstream);
     upstream.pipe(client);
     // A socket paused while its reply was read starts flowing again through the pipe.
@@ -721,6 +884,9 @@ export class EgressProxy {
     res.on("close", finish);
     res.setTimeout(this.o.idleTimeoutMs ?? 5 * 60_000, () => res.destroy());
 
+    // Through an HTTP or HTTPS proxy the request goes to the proxy in absolute-URI form; through
+    // a SOCKS5 proxy it goes, in origin form, down a tunnel the proxy opened to the destination.
+    const absolute = via !== undefined && via.scheme !== "socks5";
     const headers: Record<string, string | string[]> = {};
     for (const [k, v] of Object.entries(req.headers)) {
       if (v === undefined || HOP_BY_HOP.has(k)) continue;
@@ -728,9 +894,10 @@ export class EgressProxy {
     }
     headers.host = url.host;
     headers.connection = "close";
-    // Through a proxy: the absolute URI, by name, and our credentials. Chrome's own
-    // Proxy-Authorization, if any, was stripped above as hop-by-hop.
-    if (via?.authorization) headers["proxy-authorization"] = via.authorization;
+    // Our credentials, by name. Chrome's own Proxy-Authorization, if any, was stripped above
+    // as hop-by-hop.
+    if (absolute && via.authorization)
+      headers["proxy-authorization"] = via.authorization;
     const dialPort = via ? via.port : d.port;
     let failed = false;
     const upstreamFailed = (
@@ -747,17 +914,46 @@ export class EgressProxy {
       }
     };
 
+    // The way to the proxy is opened first (TLS, and the SOCKS5 tunnel), so every failure of the
+    // proxy is reported as the proxy's, before any of the request is sent.
+    let opened: Socket | null = null;
+    if (via) {
+      const holder: { sock: Socket | null } = { sock: null };
+      const abandon = (): void => {
+        holder.sock?.destroy();
+      };
+      res.once("close", abandon);
+      const r = await this.openUpstream(d, via, holder, !absolute);
+      res.off("close", abandon);
+      if (finished || this.o.policies.get(source) !== entry) {
+        if (r.ok) r.socket.destroy();
+        res.destroy();
+        return;
+      }
+      if (!r.ok) return upstreamFailed(r.reason, r.message);
+      // A destination that speaks before it is asked is not HTTP.
+      if (r.rest.length) {
+        r.socket.destroy();
+        return upstreamFailed(
+          "upstream_refused",
+          "the far end spoke before the request",
+        );
+      }
+      opened = r.socket;
+      opened.resume();
+    }
+
     const upstream = httpRequest(
       {
         host: d.addresses[0],
         port: dialPort,
         method,
-        path: via
+        path: absolute
           ? `http://${url.host}${url.pathname}${url.search}`
           : url.pathname + url.search,
         headers,
-        agent: new PinnedAgent(() =>
-          this.connectFn(d.addresses[0] as string, dialPort),
+        agent: new PinnedAgent(
+          () => opened ?? this.connectFn(d.addresses[0] as string, dialPort),
         ),
         setHost: false,
         timeout: this.o.connectTimeoutMs ?? 10_000,
@@ -773,7 +969,7 @@ export class EgressProxy {
               "upstream sent an invalid status",
             );
           }
-          if (via && code === 407) {
+          if (absolute && code === 407) {
             up.destroy();
             return upstreamFailed(
               "upstream_auth_failed",
@@ -786,6 +982,10 @@ export class EgressProxy {
             if (v !== undefined && !HOP_BY_HOP.has(k)) out[k] = v;
           out.connection = "close";
           res.writeHead(code, out);
+          up.on("data", (c: Buffer) => {
+            countBytes(entry.bytes, "down", c.length);
+            this.o.metrics.bytes.inc({ direction: "in" }, c.length);
+          });
           up.on("aborted", () => res.destroy());
           up.on("error", () => res.destroy());
           up.pipe(res);
@@ -811,6 +1011,10 @@ export class EgressProxy {
       upstreamFailed("upstream_unreachable", "upstream error");
     });
     req.on("error", () => upstream.destroy());
+    req.on("data", (c: Buffer) => {
+      countBytes(entry.bytes, "up", c.length);
+      this.o.metrics.bytes.inc({ direction: "out" }, c.length);
+    });
     req.pipe(upstream);
   }
 

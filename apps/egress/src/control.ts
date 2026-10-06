@@ -9,6 +9,8 @@ import { isIPv4 } from "node:net";
 import {
   DenialsResponse,
   EGRESS_PATHS,
+  EgressClearAck,
+  EgressUsageResponse,
   EgressHealth,
   EgressPolicy,
   EgressPolicyAck,
@@ -116,6 +118,9 @@ export class ControlServer {
           ...(entry.upstream
             ? {
                 upstream: {
+                  ...(entry.upstream.scheme !== "http"
+                    ? { scheme: entry.upstream.scheme }
+                    : {}),
                   host: entry.upstream.host,
                   port: entry.upstream.port,
                   ...(entry.upstream.username !== undefined
@@ -127,6 +132,20 @@ export class ControlServer {
           openConnections: entry.active,
         }));
         return this.send(res, 200, ListPoliciesResponse.parse({ policies }));
+      }
+      if (req.method === "GET" && path === EGRESS_PATHS.usage) {
+        return this.send(
+          res,
+          200,
+          EgressUsageResponse.parse({
+            epoch: this.denials.epoch,
+            sessions: this.policies.list().map(({ entry }) => ({
+              sessionId: entry.sessionId,
+              up: entry.bytes.up,
+              down: entry.bytes.down,
+            })),
+          }),
+        );
       }
       if (req.method === "GET" && path === EGRESS_PATHS.denials) {
         const after = Number(url.searchParams.get("after") ?? 0);
@@ -156,11 +175,6 @@ export class ControlServer {
             return this.send(res, 400, {
               error: parsed.error.issues[0]?.message ?? "invalid policy",
             });
-          // Until TLS and SOCKS5 chaining land, such an upstream is refused, never chained as HTTP (T-47).
-          if (parsed.data.upstream?.scheme)
-            return this.send(res, 400, {
-              error: "this gateway chains http:// proxies only",
-            });
           this.policies.set(ip, parsed.data);
           this.metrics.policies.set(this.policies.size);
           // The acknowledgement tells the agent this gateway applied the upstream (T-47).
@@ -174,9 +188,20 @@ export class ControlServer {
           );
         }
         if (req.method === "DELETE") {
-          this.policies.delete(ip);
+          const cleared = this.policies.delete(ip);
           this.metrics.policies.set(this.policies.size);
-          return this.send(res, 204);
+          if (!cleared) return this.send(res, 204);
+          // The session's final byte counts (G-20); this process forgets them now.
+          return this.send(
+            res,
+            200,
+            EgressClearAck.parse({
+              sessionId: cleared.sessionId,
+              epoch: this.denials.epoch,
+              up: cleared.bytes.up,
+              down: cleared.bytes.down,
+            }),
+          );
         }
       }
       this.send(res, 404, { error: "not found" });

@@ -7,33 +7,44 @@ import {
 } from "@kestrel/contracts";
 
 /**
- * A session's upstream proxy as the gateway uses it. The password is not kept: only the
- * `Proxy-Authorization` value made from it, which is never listed or logged.
+ * A session's upstream proxy as the gateway uses it. For HTTP and HTTPS proxies the password is
+ * not kept, only the `Proxy-Authorization` value made from it; SOCKS5 sends the username and
+ * password themselves (RFC 1929), so for a SOCKS5 proxy they are kept, in memory only. Neither
+ * is ever listed or logged.
  */
 export interface UpstreamEntry {
+  scheme: "http" | "https" | "socks5";
   host: string;
   /** The host itself when it is an IPv4 literal; otherwise it is resolved per connection. */
   ip: string | null;
   port: number;
   username: string | undefined;
   authorization: string | null;
+  /** SOCKS5 only. */
+  socksCredentials: { username: string; password: string } | null;
 }
 
 export function toUpstreamEntry(
   u: NonNullable<EgressPolicy["upstream"]>,
 ): UpstreamEntry {
+  const scheme = u.scheme ?? "http";
   return {
+    scheme,
     host: u.host,
     ip: isIPv4(u.host) ? u.host : null,
     port: u.port,
     username: u.username,
     authorization:
-      u.username === undefined
+      u.username === undefined || scheme === "socks5"
         ? null
         : "Basic " +
           Buffer.from(`${u.username}:${u.password ?? ""}`, "utf8").toString(
             "base64",
           ),
+    socksCredentials:
+      scheme === "socks5" && u.username !== undefined
+        ? { username: u.username, password: u.password ?? "" }
+        : null,
   };
 }
 
@@ -44,9 +55,29 @@ const sameUpstream = (
   a === b ||
   (a !== undefined &&
     b !== undefined &&
+    a.scheme === b.scheme &&
     a.host === b.host &&
     a.port === b.port &&
-    a.authorization === b.authorization);
+    a.authorization === b.authorization &&
+    a.socksCredentials?.username === b.socksCredentials?.username &&
+    a.socksCredentials?.password === b.socksCredentials?.password);
+
+/** Bytes relayed for a session (threat model G-20), counted at the browser's side of the gateway. */
+export interface ByteCounter {
+  /** From the browser. */
+  up: number;
+  /** To the browser. */
+  down: number;
+}
+
+/** Add to a counter, saturating where JSON numbers stop being exact. */
+export function countBytes(
+  c: ByteCounter,
+  dir: "up" | "down",
+  n: number,
+): void {
+  c[dir] = Math.min(Number.MAX_SAFE_INTEGER, c[dir] + n);
+}
 
 export interface Entry {
   sessionId: string;
@@ -63,6 +94,8 @@ export interface Entry {
   sockets: Set<Socket>;
   /** Set: every connection leaves through this proxy, and never directly (T-47). */
   upstream: UpstreamEntry | undefined;
+  /** Kept across policy updates for the same session; reported and forgotten when it is cleared. */
+  bytes: ByteCounter;
 }
 
 /**
@@ -85,11 +118,9 @@ export class PolicyStore {
     const upstream = p.upstream ? toUpstreamEntry(p.upstream) : undefined;
     // A policy update for the same session through the same exit keeps its connections. A
     // different session at the same address is a different tenant, and a different proxy is a
-    // different exit, so the old connections are cut.
-    const keep =
-      existing !== undefined &&
-      existing.sessionId === p.sessionId &&
-      sameUpstream(existing.upstream, upstream);
+    // different exit, so the old connections are cut. The session's byte counts carry over.
+    const same = existing !== undefined && existing.sessionId === p.sessionId;
+    const keep = same && sameUpstream(existing.upstream, upstream);
     this.entries.set(ip, {
       sessionId: p.sessionId,
       allow: p.allow,
@@ -98,15 +129,20 @@ export class PolicyStore {
       active: keep ? existing.active : 0,
       sockets: keep ? existing.sockets : this.cut(existing),
       upstream,
+      bytes: same ? existing.bytes : { up: 0, down: 0 },
     });
   }
 
-  /** Clear a policy and cut its open tunnels at once: an address is never free while it still has a way out (G10). */
-  delete(ip: string): boolean {
+  /**
+   * Clear a policy and cut its open tunnels at once: an address is never free while it still has
+   * a way out (G10). Returns the cleared session and its final byte counts, or null.
+   */
+  delete(ip: string): { sessionId: string; bytes: ByteCounter } | null {
     const e = this.entries.get(ip);
-    if (!e) return false;
+    if (!e) return null;
     this.cut(e);
-    return this.entries.delete(ip);
+    this.entries.delete(ip);
+    return { sessionId: e.sessionId, bytes: { ...e.bytes } };
   }
 
   private cut(e: Entry | undefined): Set<Socket> {

@@ -6,6 +6,8 @@ import { Writable } from "node:stream";
 import {
   DenialsResponse,
   EGRESS_PATHS,
+  EgressClearAck,
+  EgressUsageResponse,
   EgressHealth,
   ListPoliciesResponse,
   newId,
@@ -125,9 +127,14 @@ describe("the control API (C7)", () => {
         openConnections: 0,
       },
     ]);
-    expect(
-      (await call("DELETE", EGRESS_PATHS.policy("172.30.1.5"))).status,
-    ).toBe(204);
+    // The first clear answers the session's final byte counts (G-20); a repeat finds nothing.
+    const cleared = await call("DELETE", EGRESS_PATHS.policy("172.30.1.5"));
+    expect(cleared.status).toBe(200);
+    expect(EgressClearAck.parse(cleared.json)).toMatchObject({
+      sessionId: ses,
+      up: 0,
+      down: 0,
+    });
     expect(
       (await call("DELETE", EGRESS_PATHS.policy("172.30.1.5"))).status,
     ).toBe(204);
@@ -307,5 +314,65 @@ describe("the control API (C7)", () => {
     await again.listen(r.path);
     server = again;
     expect((await r.call("GET", EGRESS_PATHS.health)).status).toBe(200);
+  });
+});
+
+describe("byte counters per session (G-20)", () => {
+  it("lists each session's bytes, keeps them across updates, and hands them over on clear", async () => {
+    const { call, policies, denials } = await rig();
+    const ip = "172.30.1.9";
+    await call("PUT", EGRESS_PATHS.policy(ip), { sessionId: ses });
+    const e = policies.get(ip)!;
+    e.bytes.up = 1200;
+    e.bytes.down = 64_000;
+    const usage = EgressUsageResponse.parse(
+      (await call("GET", EGRESS_PATHS.usage)).json,
+    );
+    expect(usage).toEqual({
+      epoch: denials.epoch,
+      sessions: [{ sessionId: ses, up: 1200, down: 64_000 }],
+    });
+    // The same session, a new policy: the counts carry over.
+    await call("PUT", EGRESS_PATHS.policy(ip), {
+      sessionId: ses,
+      allow: ["example.com"],
+    });
+    expect(policies.get(ip)!.bytes).toEqual({ up: 1200, down: 64_000 });
+    const cleared = EgressClearAck.parse(
+      (await call("DELETE", EGRESS_PATHS.policy(ip))).json,
+    );
+    expect(cleared).toEqual({
+      sessionId: ses,
+      epoch: denials.epoch,
+      up: 1200,
+      down: 64_000,
+    });
+    // Another tenant at the address starts from zero.
+    const other = newId("ses");
+    await call("PUT", EGRESS_PATHS.policy(ip), { sessionId: other });
+    expect(
+      EgressUsageResponse.parse((await call("GET", EGRESS_PATHS.usage)).json)
+        .sessions,
+    ).toEqual([{ sessionId: other, up: 0, down: 0 }]);
+  });
+
+  it("lists a SOCKS5 upstream with its scheme and without its password", async () => {
+    const { call } = await rig();
+    const put = await call("PUT", EGRESS_PATHS.policy("172.30.1.10"), {
+      sessionId: ses,
+      upstream: {
+        scheme: "socks5",
+        host: "s.example.com",
+        port: 1080,
+        username: "u",
+        password: "socks-secret",
+      },
+    });
+    expect(put.json).toEqual({ sessionId: ses, upstream: true });
+    const listed = JSON.stringify(
+      (await call("GET", EGRESS_PATHS.policies)).json,
+    );
+    expect(listed).toContain('"scheme":"socks5"');
+    expect(listed).not.toContain("socks-secret");
   });
 });
