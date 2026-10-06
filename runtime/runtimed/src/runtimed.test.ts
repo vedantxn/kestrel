@@ -605,7 +605,7 @@ describe("the control API (C5)", () => {
       fetch(`http://127.0.0.1:${cport}${path}`, {
         headers: token ? { authorization: `Bearer ${token}` } : {},
       });
-    return { sup, fwd, call, raw };
+    return { sup, fwd, call, raw, port };
   }
 
   /** A recorder whose ffmpeg is a stream the test writes to. */
@@ -735,6 +735,60 @@ describe("the control API (C5)", () => {
     const old = await rig();
     await old.sup.start();
     expect((await old.call("GET", "/captcha")).status).toBe(404);
+  });
+
+  it("makes a probe of a clone rekeyed as one: never a session, and /probe only there (G-23)", async () => {
+    const { sup, call, port } = await rig({ snapshot: true });
+    await sup.start();
+    const probeToken = "e".repeat(48);
+    // Before the rekey, and on any browser that is not a probe, there is no /probe.
+    expect(
+      (
+        await call("POST", "/probe", {
+          targets: [{ name: "x", host: "127.0.0.1", port: 1 }],
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (await call("POST", "/rekey", { token: probeToken, probe: true })).json,
+    ).toEqual({ ok: true });
+    // The snapshot's page is kept: a probe shows nothing.
+    expect(chrome!.closed).toEqual([]);
+    expect(
+      (
+        await call(
+          "POST",
+          "/configure",
+          { sessionProof: PROOF, viewport: { width: 1280, height: 720 } },
+          probeToken,
+        )
+      ).status,
+    ).toBe(409);
+    expect(
+      (await call("POST", "/probe", { targets: [] }, probeToken)).status,
+    ).toBe(400);
+    const r = await call(
+      "POST",
+      "/probe",
+      {
+        targets: [
+          { name: "chrome", host: "127.0.0.1", port },
+          { name: "closed", host: "127.0.0.1", port: 1, timeoutMs: 500 },
+        ],
+      },
+      probeToken,
+    );
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({
+      results: [
+        { name: "chrome", result: "connected" },
+        { name: "closed", result: "ECONNREFUSED" },
+      ],
+    });
+    expect(
+      (await call("POST", "/rekey", { token: "d".repeat(48) }, probeToken))
+        .status,
+    ).toBe(409);
   });
 
   it("has nothing to rekey when it is not a snapshot clone", async () => {

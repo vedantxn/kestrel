@@ -18,11 +18,13 @@ import {
   RUNTIME_PROTOCOL_VERSION,
   RuntimeCaptcha,
   RuntimeHealth,
+  ProbeRequest,
 } from "@kestrel/contracts";
 import type { CaptchaWatcher } from "./captcha.js";
 import { Cdp, getVersion, ViewportSizer } from "./cdp.js";
 import type { CdpForward } from "./forward.js";
 import { runComputer, type Tabs } from "./page.js";
+import { runProbe } from "./probe.js";
 import type { Recorder } from "./recorder.js";
 import type { Supervisor } from "./supervisor.js";
 
@@ -52,6 +54,8 @@ export class ControlServer {
   } | null = null;
 
   private rekeyed = false;
+  /** The harness's probe VM (G-23): never a session; it serves `/probe` instead. */
+  private probe = false;
 
   constructor(
     private token: string,
@@ -169,6 +173,8 @@ export class ControlServer {
           return this.send(res, 400, {
             error: parsed.error.issues[0]?.message ?? "invalid",
           });
+        if (this.probe)
+          return this.send(res, 409, { error: "a probe is never a session" });
         if (!this.supervisor.chromeReady)
           return this.send(res, 503, { error: "the browser is not ready" });
         const { sessionProof, viewport } = parsed.data;
@@ -205,8 +211,20 @@ export class ControlServer {
           });
         this.token = parsed.data.token;
         this.rekeyed = true;
-        await this.freshPage();
+        // A probe keeps the snapshot's page: nothing is ever shown in it, and it is never configured.
+        if (parsed.data.probe) this.probe = true;
+        else await this.freshPage();
         return this.send(res, 200, { ok: true });
+      }
+
+      if (req.method === "POST" && path === RUNTIME_PATHS.probe) {
+        if (!this.probe) return this.send(res, 404, { error: "not found" });
+        const parsed = ProbeRequest.safeParse(await this.body(req));
+        if (!parsed.success)
+          return this.send(res, 400, {
+            error: parsed.error.issues[0]?.message ?? "invalid",
+          });
+        return this.send(res, 200, await runProbe(parsed.data));
       }
 
       if (req.method === "GET" && path === RUNTIME_PATHS.captcha) {
