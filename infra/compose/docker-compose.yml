@@ -92,6 +92,8 @@ services:
       GATEWAY_UID: "1500"
       GATEWAY_GID: "1500"
       KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS_NODE:-}
+      # The harness's probe controls (docs/harness.md): on only while infra/host/bench.sh runs m1 or m2.
+      KESTREL_HARNESS: ${KESTREL_HARNESS:-off}
     volumes:
       - /run/kestrel:/run/kestrel
       - /var/lib/kestrel:/var/lib/kestrel
@@ -170,6 +172,8 @@ services:
       GATEWAY_UID: "1500"
       GATEWAY_GID: "1500"
       KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS_NODE_B:-}
+      # The harness's probe controls (docs/harness.md): on only while infra/host/bench.sh runs m1 or m2.
+      KESTREL_HARNESS: ${KESTREL_HARNESS:-off}
     volumes:
       - /run/kestrel:/run/kestrel
       - /var/lib/kestrel:/var/lib/kestrel

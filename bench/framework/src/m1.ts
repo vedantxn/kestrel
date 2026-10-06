@@ -504,6 +504,9 @@ export function m1ConfigFromEnv(
       poolTarget: Number(env.POOL ?? 2),
       tenancy: "single-tenant, one dedicated host",
       quick: quick ? "yes" : "no",
+      // What each node's browsers are (ADR 0017); the collectors and cases follow each agent's own report.
+      runtimeA: env.RUNTIME_A ?? "docker",
+      nodes: env.TWO_NODES === "1" ? "a, b (Docker)" : "a",
     },
     ...(env.ONLY ? { only: env.ONLY.split(",").map(Number) } : {}),
     ...(env.CHAOS_ONLY ? { chaosOnly: env.CHAOS_ONLY.split(",") } : {}),

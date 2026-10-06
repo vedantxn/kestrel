@@ -7,7 +7,8 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import type { Session } from "@kestrel/contracts";
 import { KestrelClient } from "./client.js";
-import type { HostConfig } from "./collect.js";
+import { settledInvariants, type HostConfig } from "./collect.js";
+import { checkInvariants } from "./invariants.js";
 import { m1ConfigFromEnv } from "./m1.js";
 import { makeReport, type Report } from "./report.js";
 
@@ -649,6 +650,26 @@ export async function runM2(c: M2Config): Promise<Report> {
         }
       },
     );
+
+  // Nothing the v2 checks did may leak: containers, VMs (and their jails, cgroups and namespaces
+  // on a microVM node), policies, routes or recordings' containers.
+  if (want(8)) {
+    c.log("check 8: invariants after the v2 checks");
+    const r = await settledInvariants(checkInvariants, c.host, {
+      harnessExpected: true,
+    });
+    report.add({
+      id: "8",
+      name: "invariants after the v2 checks (containers and VMs)",
+      pass: r.ok,
+      detail: r.ok
+        ? "nothing leaked or inconsistent"
+        : r.violations
+            .slice(0, 6)
+            .map((v) => `${v.rule}: ${v.detail}`)
+            .join("; "),
+    });
+  }
 
   return report.build();
 }
