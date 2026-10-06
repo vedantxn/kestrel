@@ -6,6 +6,7 @@ import {
   type Report,
 } from "@kestrel/contracts";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { Env as ApiEnv, loadSolver } from "./config.js";
 import { CAPTCHA_LABELS, LIVE_PAGE } from "./live-page.js";
 import { makeEnv, type Env } from "./test/harness.js";
 
@@ -67,6 +68,7 @@ describe("Session.captcha follows the node's captcha events", () => {
     expect((await get(s.id)).captcha).toEqual({
       providers: ["recaptcha", "turnstile"],
       since: first!.since,
+      solve: null,
     });
 
     cleared(s, "recaptcha", ["turnstile"]);
@@ -165,6 +167,178 @@ describe("Session.captcha follows the node's captcha events", () => {
     expect(list.data.find((x) => x.id === s.id)?.captcha?.providers).toEqual([
       "datadome",
     ]);
+  });
+});
+
+const SOLVER_KEY = "solver-key-do-not-leak-0123456789";
+
+describe("CAPTCHA solving, opt-in per session", () => {
+  const withSolver = async () => {
+    await env.close();
+    env = await makeEnv({
+      captchaSolver: { service: "2captcha", apiKey: SOLVER_KEY },
+    });
+  };
+  const solving = (s: Session, type: string, data: object): Report =>
+    nodeOf(s).report(s.id, { type, data } as never);
+
+  it("is refused when the deployment has no solver, and off by default", async () => {
+    const res = await env.create({ captcha: { solve: true } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({
+      error: { code: "invalid_request" },
+    });
+    expect(String(res.body)).toMatch(/no CAPTCHA solver/);
+    const s = await created();
+    expect(s.options.captcha).toEqual({ solve: false });
+    expect(env.nodes.a!.startCalls.at(-1)!.captcha).toBeUndefined();
+  });
+
+  it("sends the solver to the node in that session's start only, and stores or returns the key nowhere", async () => {
+    await withSolver();
+    const plain = await created();
+    expect(env.nodes.a!.startCalls.at(-1)!.captcha).toBeUndefined();
+    const res = await env.create({
+      captcha: { solve: true },
+      idempotencyKey: "solve-1",
+    });
+    expect(res.statusCode).toBe(201);
+    const s = Session.parse(res.json());
+    expect(s.options.captcha).toEqual({ solve: true });
+    expect(env.nodes.a!.startCalls.at(-1)!.captcha).toEqual({
+      solver: { service: "2captcha", apiKey: SOLVER_KEY },
+    });
+    expect(res.body).not.toContain(SOLVER_KEY);
+    const rows = JSON.stringify(
+      [
+        await env.db.session.findMany(),
+        await env.db.sessionEvent.findMany(),
+        await env.db.idempotencyKey.findMany(),
+      ],
+      (_k, v: unknown) => (typeof v === "bigint" ? String(v) : v),
+    );
+    expect(rows).not.toContain(SOLVER_KEY);
+    expect(plain.options.captcha.solve).toBe(false);
+  });
+
+  it("puts the latest solve of something still present on the session", async () => {
+    await withSolver();
+    const s = Session.parse(
+      (await env.create({ captcha: { solve: true } })).json(),
+    );
+    detected(s, "recaptcha", ["recaptcha"]);
+    solving(s, "captcha.solving", {
+      provider: "recaptcha",
+      host: "shop.example.com",
+    });
+    await nodeOf(s).flushReports(env.internal);
+    expect((await get(s.id)).captcha?.solve).toMatchObject({
+      provider: "recaptcha",
+      status: "solving",
+      reason: null,
+    });
+    env.clock.advance(4_000);
+    solving(s, "captcha.solved", {
+      provider: "recaptcha",
+      host: "shop.example.com",
+      durationMs: 4000,
+      callback: true,
+    });
+    await nodeOf(s).flushReports(env.internal);
+    const solved = (await get(s.id)).captcha!;
+    expect(solved.providers).toEqual(["recaptcha"]);
+    expect(solved.solve).toEqual({
+      provider: "recaptcha",
+      status: "solved",
+      at: new Date(env.clock.now()).toISOString(),
+      reason: null,
+    });
+    // Another CAPTCHA appearing keeps the solve; the solved one going takes it away.
+    detected(s, "geetest", ["recaptcha", "geetest"]);
+    solving(s, "captcha.failed", {
+      provider: "geetest",
+      host: "shop.example.com",
+      reason: "unsupported",
+    });
+    await nodeOf(s).flushReports(env.internal);
+    expect((await get(s.id)).captcha?.solve).toMatchObject({
+      provider: "geetest",
+      status: "failed",
+      reason: "unsupported",
+    });
+    cleared(s, "geetest", ["recaptcha"]);
+    await nodeOf(s).flushReports(env.internal);
+    expect((await get(s.id)).captcha).toMatchObject({
+      providers: ["recaptcha"],
+      solve: null,
+    });
+    // A solve event for something no longer present is on the timeline only.
+    solving(s, "captcha.failed", {
+      provider: "turnstile",
+      host: null,
+      reason: "inject_failed",
+    });
+    cleared(s, "recaptcha", []);
+    await nodeOf(s).flushReports(env.internal);
+    expect((await get(s.id)).captcha).toBeNull();
+    expect((await events(s.id)).map((e) => e.type)).toEqual([
+      "captcha.detected",
+      "captcha.solving",
+      "captcha.solved",
+      "captcha.detected",
+      "captcha.failed",
+      "captcha.cleared",
+      "captcha.failed",
+      "captcha.cleared",
+    ]);
+  });
+
+  it("refuses a solving report that carries more than the schema allows", async () => {
+    const s = await created();
+    const node = nodeOf(s);
+    solving(s, "captcha.solving", { provider: "geetest", host: null });
+    await expect(node.flushReports(env.internal)).rejects.toThrow(/400/);
+  });
+});
+
+describe("the solver configuration", () => {
+  it("reads the key from a file and names only the variable when something is wrong", () => {
+    const read = () => " the-key \n";
+    expect(loadSolver({}, read)).toBeUndefined();
+    expect(
+      loadSolver(
+        { CAPTCHA_SOLVER: "capsolver", CAPTCHA_SOLVER_KEY_FILE: "/k" },
+        read,
+      ),
+    ).toEqual({ service: "capsolver", apiKey: "the-key" });
+    expect(() => loadSolver({ CAPTCHA_SOLVER: "capsolver" }, read)).toThrow(
+      /CAPTCHA_SOLVER_KEY_FILE/,
+    );
+    expect(() =>
+      loadSolver(
+        { CAPTCHA_SOLVER: "custom", CAPTCHA_SOLVER_KEY_FILE: "/k" },
+        read,
+      ),
+    ).toThrow(/url/);
+    const bad = () =>
+      loadSolver(
+        { CAPTCHA_SOLVER: "capsolver", CAPTCHA_SOLVER_KEY_FILE: "/k" },
+        () => "has a space secret",
+      );
+    expect(bad).toThrow(/apiKey/);
+    expect(bad).not.toThrow(/secret/);
+    // Compose passes unset variables as empty strings: that is no solver.
+    const vars = ApiEnv.parse({
+      DATABASE_URL: "postgresql://x",
+      PUBLIC_HOSTNAME: "h",
+      TOKEN_PRIVATE_KEY_FILE: "/k",
+      KESTREL_NODES: "[]",
+      CAPTCHA_SOLVER: "",
+      CAPTCHA_SOLVER_URL: "",
+      CAPTCHA_SOLVER_KEY_FILE: "/secrets/captcha-solver.key",
+    });
+    expect(vars.CAPTCHA_SOLVER).toBeUndefined();
+    expect(loadSolver(vars, read)).toBeUndefined();
   });
 });
 

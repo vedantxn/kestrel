@@ -22,6 +22,9 @@ export const CAPTCHA_LABELS: Record<CaptchaProvider, string> = {
   cloudflare_challenge: "Cloudflare challenge page",
   arkose: "Arkose",
   datadome: "DataDome",
+  perimeterx: "HUMAN press and hold",
+  geetest: "GeeTest",
+  aws_waf: "AWS WAF",
 };
 
 export const LIVE_PAGE = `<!doctype html>

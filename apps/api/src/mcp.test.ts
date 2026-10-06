@@ -260,6 +260,18 @@ describe("session tools", () => {
       await call(c, "get_session", { sessionId: created.id }),
     );
     expect(got.captcha?.providers).toEqual(["turnstile"]);
+    expect(got.captcha?.solve).toBeNull();
+  });
+
+  it("create_session takes captcha.solve, refused with a reason when the deployment has no solver", async () => {
+    const c = await connect();
+    expect(
+      errorOf(await call(c, "create_session", { captcha: { solve: true } })),
+    ).toMatchObject({ code: "invalid_request" });
+    const created = session(
+      await call(c, "create_session", { captcha: { solve: false } }),
+    );
+    expect(created.options.captcha).toEqual({ solve: false });
   });
 
   it("is scoped to the key's project", async () => {

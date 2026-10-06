@@ -43,6 +43,10 @@ services:
       TOKEN_PRIVATE_KEY_FILE: /secrets/token-private.pem
       KESTREL_NODES: ${KESTREL_NODES}
       KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS:-}
+      # CAPTCHA solving (docs/lld/captcha.md): the service and an optional URL; the key is a file.
+      CAPTCHA_SOLVER: ${CAPTCHA_SOLVER:-}
+      CAPTCHA_SOLVER_URL: ${CAPTCHA_SOLVER_URL:-}
+      CAPTCHA_SOLVER_KEY_FILE: /secrets/captcha-solver.key
     volumes:
       - /var/lib/kestrel/secrets:/secrets:ro
 

@@ -52,6 +52,9 @@ printf 'postgresql://kestrel:%s@127.0.0.1:5432/kestrel' "$(cat "$SECRETS/db.pass
 # Owners: only what needs a secret can read it. The signing key is the API's alone; the gateways get the public half.
 chown 1001:1001 "$SECRETS/database-url" "$SECRETS/node-a.secret" "$SECRETS/node-b.secret" 2>/dev/null || true
 chmod 0640 "$SECRETS/node-a.secret" "$SECRETS/node-b.secret"; chmod 0400 "$SECRETS/database-url" "$SECRETS/db.password"
+# CAPTCHA solving (docs/lld/captcha.md): the operator puts the service's key in this file by hand;
+# it never goes in the repository, an image or Terraform state. Only the API reads it.
+if [ -f "$SECRETS/captcha-solver.key" ]; then chown 1001:1001 "$SECRETS/captcha-solver.key"; chmod 0400 "$SECRETS/captcha-solver.key"; fi
 chmod 0711 "$SECRETS"; install -d -m 0755 /run/kestrel /var/lib/kestrel/a /var/lib/kestrel/b /var/lib/kestrel/postgres /run/kestrel/a /run/kestrel/b
 # /run is emptied by a reboot: have systemd make the runtime directories again at every boot, before
 # Docker starts the platform, or the node agent cannot open its sockets and restarts forever.
@@ -75,11 +78,21 @@ if [ "$TWO" = 1 ]; then
 fi
 # Pool tuning (optional): warm browsers beyond the slots, and how many to start at once.
 SIZES="$SIZES\nPOOL_HEADROOM=${POOL_HEADROOM:-0}\nREFILL_AT_ONCE=${REFILL_AT_ONCE:-}\nRECORDING=${RECORDING:-on}\nREAP_MAX_QUEUE=${REAP_MAX_QUEUE:-4}\nRECORDING_POOL=${RECORDING_POOL:-1}"
+# The solver service and URL persist across deploys unless given again (CAPTCHA_SOLVER=none turns it off).
+prev() { sed -n "s/^$1=//p" /var/lib/kestrel/compose.env 2>/dev/null | tail -n 1; }
+CAPTCHA_SOLVER=${CAPTCHA_SOLVER-$(prev CAPTCHA_SOLVER)}
+CAPTCHA_SOLVER_URL=${CAPTCHA_SOLVER_URL-$(prev CAPTCHA_SOLVER_URL)}
+if [ "$CAPTCHA_SOLVER" = none ]; then CAPTCHA_SOLVER=; CAPTCHA_SOLVER_URL=; fi
+if [ -n "$CAPTCHA_SOLVER" ] && [ ! -s "$SECRETS/captcha-solver.key" ]; then
+  echo "CAPTCHA_SOLVER is $CAPTCHA_SOLVER but $SECRETS/captcha-solver.key is missing or empty" >&2; exit 1
+fi
 cat > /var/lib/kestrel/compose.env <<ENV
 PUBLIC_HOSTNAME=$HOSTNAME_PUBLIC
 PUBLIC_IP=$PUBLIC_IP
 TEST_PAGE_URL=$TEST_PAGE_URL
 KESTREL_NODES=$NODES
+CAPTCHA_SOLVER=$CAPTCHA_SOLVER
+CAPTCHA_SOLVER_URL=$CAPTCHA_SOLVER_URL
 ENV
 printf "$SIZES\nRUNTIME_A=$RUNTIME_A\nMICROVM_NETNS_READY=${MICROVM_NETNS_READY:-8}\nMICROVM_RECORDING=${MICROVM_RECORDING:-vm}\n" >> /var/lib/kestrel/compose.env
 chmod 0600 /var/lib/kestrel/compose.env

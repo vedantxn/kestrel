@@ -14,7 +14,7 @@ import {
   parseEnv,
   systemClock,
 } from "@kestrel/shared";
-import { Env, loadNodes } from "./config.js";
+import { Env, loadNodes, loadSolver } from "./config.js";
 import type { Ctx } from "./context.js";
 import { buildInternalApp, buildPublicApp } from "./http.js";
 import { createMetrics } from "./metrics.js";
@@ -49,7 +49,16 @@ const ctx: Ctx = {
   nodeCallTimeoutMs: 30_000,
   state: { waiters: 0, waitersByProject: new Map() },
   monotonic: () => performance.now(),
+  captchaSolver: loadSolver(env),
 };
+if (ctx.captchaSolver)
+  log.info(
+    {
+      service: ctx.captchaSolver.service,
+      custom: Boolean(ctx.captchaSolver.url),
+    },
+    "CAPTCHA solving is available",
+  );
 
 const sweeper = new Sweeper(ctx);
 const publicApp = buildPublicApp(ctx);

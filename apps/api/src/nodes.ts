@@ -281,6 +281,13 @@ async function applyReport(
     ) {
       const present = r.event.data.present;
       const prev = SessionCaptcha.safeParse(session.captcha);
+      // A solve is kept while its provider stays present.
+      const solve =
+        prev.success &&
+        prev.data.solve &&
+        present.includes(prev.data.solve.provider)
+          ? prev.data.solve
+          : null;
       await tx.session.updateMany({
         where: { id: uuid, status: { in: ["ready", "active"] } },
         data: {
@@ -288,10 +295,40 @@ async function applyReport(
             ? {
                 providers: present,
                 since: prev.success ? prev.data.since : at.toISOString(),
+                solve,
               }
             : Prisma.DbNull,
         },
       });
+    }
+    // Solving: the latest solve of a provider still present (a solve event for one that has gone
+    // is recorded on the timeline only).
+    if (
+      r.event.type === "captcha.solving" ||
+      r.event.type === "captcha.solved" ||
+      r.event.type === "captcha.failed"
+    ) {
+      const prev = SessionCaptcha.safeParse(session.captcha);
+      const { provider } = r.event.data;
+      if (prev.success && prev.data.providers.includes(provider))
+        await tx.session.updateMany({
+          where: { id: uuid, status: { in: ["ready", "active"] } },
+          data: {
+            captcha: {
+              ...prev.data,
+              solve: {
+                provider,
+                status: r.event.type.slice("captcha.".length) as
+                  "solving" | "solved" | "failed",
+                at: at.toISOString(),
+                reason:
+                  r.event.type === "captcha.failed"
+                    ? r.event.data.reason
+                    : null,
+              },
+            },
+          },
+        });
     }
     // runtime.crashed is recorded; the matching `removed` report ends the session.
     return;

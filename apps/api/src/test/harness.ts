@@ -60,6 +60,7 @@ export interface EnvOptions {
   nodeCallTimeoutMs?: number;
   failpoints?: string;
   log?: Logger;
+  captchaSolver?: Ctx["captchaSolver"];
 }
 
 const TABLES = [
@@ -148,6 +149,7 @@ export async function makeEnv(opts: EnvOptions = {}): Promise<Env> {
     nodeCallTimeoutMs: opts.nodeCallTimeoutMs ?? 200,
     state: { waiters: 0, waitersByProject: new Map() },
     monotonic: () => clock.now(),
+    ...(opts.captchaSolver ? { captchaSolver: opts.captchaSolver } : {}),
   };
   const sweeper = new Sweeper(ctx);
   const api = buildPublicApp(ctx);

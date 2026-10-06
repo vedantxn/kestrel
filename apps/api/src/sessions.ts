@@ -155,6 +155,12 @@ export async function createSession(
     ...(split ? { proxy: split.stored } : {}),
     ...(timezone !== undefined ? { timezone } : {}),
   });
+  // Solving is opt-in per session and needs the operator's solver service (docs/lld/captcha.md).
+  if (options.captcha.solve && !ctx.captchaSolver)
+    throw new AppError(
+      "invalid_request",
+      "captcha.solve: this deployment has no CAPTCHA solver service configured.",
+    );
 
   let idemRow: string | undefined;
   if (idempotencyKey) {
@@ -330,6 +336,10 @@ async function startOnNode(
       // Only when set: a node from before time zones then refuses the start (strict) rather
       // than run the session in the wrong zone.
       ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
+      // The solver's key goes to the node here and nowhere else (T-54).
+      ...(options.captcha.solve && ctx.captchaSolver
+        ? { captcha: { solver: ctx.captchaSolver } }
+        : {}),
     };
 
     let result;
