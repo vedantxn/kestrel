@@ -336,7 +336,7 @@ async function startOnNode(
       // Only when set: a node from before time zones then refuses the start (strict) rather
       // than run the session in the wrong zone.
       ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
-      // The solver's key goes to the node here and nowhere else (T-54).
+      // The solver's key goes to the node here and nowhere else (T-56).
       ...(options.captcha.solve && ctx.captchaSolver
         ? { captcha: { solver: ctx.captchaSolver } }
         : {}),

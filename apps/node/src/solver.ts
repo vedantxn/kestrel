@@ -9,7 +9,7 @@ import { z } from "zod";
 /**
  * CAPTCHA solver services (`docs/lld/captcha.md`, "Solver services"). The node agent asks one on
  * behalf of a session created with `captcha.solve`, with the deployment's own key; the key and
- * everything the service answers stay in this process's memory (T-54, T-56).
+ * everything the service answers stay in this process's memory (T-56, T-58).
  *
  * The interface is one call, `solve`, so any other kind of service plugs in. The one
  * implementation speaks the `createTask` / `getTaskResult` protocol that CapSolver, 2Captcha and

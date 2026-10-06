@@ -564,7 +564,7 @@ export class NodeAgent {
       startPath: null,
     });
     if (req.captcha) {
-      // The key stays in memory: a restarted agent knows only that solving was asked (T-54).
+      // The key stays in memory: a restarted agent knows only that solving was asked (T-56).
       this.store.setSolves(id);
       this.solverConfigs.set(id, req.captcha.solver);
     }
@@ -2275,7 +2275,7 @@ export class NodeAgent {
   private solverConfigs = new Map<string, CaptchaSolverConfig>();
   /** Providers already tried while they stay present; one that clears may be tried again. */
   private solveAttempted = new Map<string, Set<CaptchaProvider>>();
-  /** Solves asked for per session (the operator pays for each, T-55). */
+  /** Solves asked for per session (the operator pays for each, T-57). */
   private solvesUsed = new Map<string, number>();
   private solving = new Set<string>();
 

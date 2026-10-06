@@ -178,7 +178,7 @@ export function isSolvable(p: CaptchaProvider): p is SolvableCaptchaProvider {
 }
 
 export const CAPTCHA_SOLVE_LIMITS = {
-  /** Solves one session may ask for: the operator pays for each one (T-55). */
+  /** Solves one session may ask for: the operator pays for each one (T-57). */
   maxSolvesPerSession: 10,
   /** A whole solve, from asking the service to the token in the page. */
   solveTimeoutMs: 180_000,
@@ -231,7 +231,7 @@ export const CaptchaSiteKey = z
   .max(CAPTCHA_SOLVE_LIMITS.siteKeyMaxLength)
   .regex(/^[A-Za-z0-9_-]+$/, "a site key");
 
-/** A token from a solver service: hostile input, so a plain bounded charset (T-56). */
+/** A token from a solver service: hostile input, so a plain bounded charset (T-58). */
 export const CaptchaToken = z
   .string()
   .min(1)
@@ -254,7 +254,7 @@ export type CaptchaSolverService = z.infer<typeof CaptchaSolverService>;
 
 /**
  * Internal (C4): the deployment's solver, sent to the node in a start that asked for solving.
- * The key is a secret: never stored by the API or the node, logged or returned (T-54).
+ * The key is a secret: never stored by the API or the node, logged or returned (T-56).
  */
 export const CaptchaSolverConfig = z
   .strictObject({
