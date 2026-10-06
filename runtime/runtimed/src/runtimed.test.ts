@@ -1,6 +1,13 @@
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { PROOF_HEADER, RuntimeCaptcha } from "@kestrel/contracts";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import {
+  PROOF_HEADER,
+  RECORDING_FRAGMENTS_HEADER,
+  RecordingFragments,
+  RuntimeCaptcha,
+} from "@kestrel/contracts";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyViewport, ViewportSizer } from "./cdp.js";
@@ -9,7 +16,9 @@ import { Tabs } from "./page.js";
 import { CaptchaWatcher } from "./captcha.js";
 import { ControlServer } from "./control.js";
 import { CdpForward } from "./forward.js";
+import { Recorder } from "./recorder.js";
 import { Supervisor, type Proc, type SpawnFn } from "./supervisor.js";
+import { stream } from "./test/mp4.js";
 import type { Env } from "./config.js";
 
 const PROOF = "ab".repeat(32);
@@ -546,7 +555,9 @@ describe("the supervisor (R4-R6)", () => {
 });
 
 describe("the control API (C5)", () => {
-  async function rig(opts: { snapshot?: boolean; captcha?: boolean } = {}) {
+  async function rig(
+    opts: { snapshot?: boolean; captcha?: boolean; recorder?: Recorder } = {},
+  ) {
     chrome = new FakeChrome();
     const port = await chrome.start();
     const fwd = new CdpForward(port);
@@ -564,7 +575,7 @@ describe("the control API (C5)", () => {
       fwd,
       port,
       new Tabs(),
-      undefined,
+      opts.recorder,
       undefined,
       opts.snapshot ?? false,
       opts.captcha ? new CaptchaWatcher(port) : undefined,
@@ -590,8 +601,99 @@ describe("the control API (C5)", () => {
         json: (await res.json()) as Record<string, unknown>,
       };
     };
-    return { sup, fwd, call };
+    const raw = (path: string, token: string | null = TOKEN) =>
+      fetch(`http://127.0.0.1:${cport}${path}`, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+      });
+    return { sup, fwd, call, raw };
   }
+
+  /** A recorder whose ffmpeg is a stream the test writes to. */
+  function pullRecorder() {
+    const out = new PassThrough();
+    const stdin = new PassThrough();
+    const proc = Object.assign(new EventEmitter(), {
+      stdout: out,
+      stdin,
+      kill: () => (
+        out.end(),
+        setImmediate(() => proc.emit("exit", null, "SIGKILL"))
+      ),
+    });
+    stdin.on("data", () =>
+      setImmediate(() => (out.end(), proc.emit("exit", 0, null))),
+    );
+    const spawned: string[][] = [];
+    const recorder = new Recorder(
+      "/nonexistent-dir",
+      ":99",
+      ((_c: string, a: string[]) => (spawned.push(a), proc)) as never,
+    );
+    return { recorder, out, spawned };
+  }
+
+  it("serves a microVM's recording as fragments the agent pulls, never before configure", async () => {
+    const { recorder, out, spawned } = pullRecorder();
+    const { sup, call, raw } = await rig({ snapshot: true, recorder });
+    await sup.start();
+    // The template (and a clone before its session is bound) records nothing.
+    expect((await raw("/recording/fragments?after=0", null)).status).toBe(401);
+    expect((await raw("/recording/fragments?after=0")).status).toBe(409);
+    expect(spawned).toEqual([]);
+    expect(
+      (
+        await call("POST", "/configure", {
+          sessionProof: PROOF,
+          viewport: { width: 1280, height: 720 },
+          recording: true,
+          recordingSink: "pull",
+        })
+      ).status,
+    ).toBe(200);
+    expect(spawned[0]).toContain("pipe:1");
+    for (const bad of ["", "?after=-1", "?after=x", "?after=1e3"])
+      expect((await raw(`/recording/fragments${bad}`)).status).toBe(400);
+
+    const s = stream(2);
+    out.write(s);
+    await new Promise((r) => setImmediate(r));
+    const res = await raw("/recording/fragments?after=0");
+    expect(res.status).toBe(200);
+    const meta = RecordingFragments.parse(
+      JSON.parse(res.headers.get(RECORDING_FRAGMENTS_HEADER)!),
+    );
+    expect(meta).toMatchObject({ state: "recording", done: false });
+    expect(meta.fragments.map((f) => f.seq)).toEqual([1, 2, 3, 4]);
+    const body = Buffer.from(await res.arrayBuffer());
+    expect(body).toEqual(s);
+    // Acknowledged by asking for what comes after; going back is refused.
+    const next = await raw("/recording/fragments?after=4");
+    expect(
+      JSON.parse(next.headers.get(RECORDING_FRAGMENTS_HEADER)!),
+    ).toMatchObject({ fragments: [] });
+    expect((await raw("/recording/fragments?after=2")).status).toBe(409);
+    expect((await raw("/recording/fragments?after=9")).status).toBe(409);
+
+    expect((await call("POST", "/recording/stop")).json).toEqual({
+      state: "stopped",
+    });
+    const last = await raw("/recording/fragments?after=4");
+    expect(
+      JSON.parse(last.headers.get(RECORDING_FRAGMENTS_HEADER)!),
+    ).toMatchObject({ state: "stopped", fragments: [], done: true });
+  });
+
+  it("has no fragments to pull for a container recording to its volume", async () => {
+    const { recorder } = pullRecorder();
+    const { sup, call, raw } = await rig({ recorder });
+    await sup.start();
+    await call("POST", "/configure", {
+      sessionProof: PROOF,
+      viewport: { width: 1280, height: 720 },
+      recording: true,
+    });
+    expect((await raw("/recording/fragments?after=0")).status).toBe(404);
+  });
 
   it("lets a snapshot clone replace its token once, then refuses the template's, and gives it a fresh page", async () => {
     const { sup, call } = await rig({ snapshot: true });

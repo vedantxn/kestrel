@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { Recorder, recorderArgs, type Spawn } from "./recorder.js";
+import { box, stream } from "./test/mp4.js";
 
 class FakeProc extends EventEmitter {
   stdin = new PassThrough();
@@ -75,5 +76,84 @@ describe("the recorder (W3)", () => {
     p.emit("exit", 1, null);
     expect(r.state).toBe("failed");
     await r.stop(); // nothing to stop
+  });
+});
+
+class PipedProc extends FakeProc {
+  stdout = new PassThrough();
+  constructor() {
+    super(false);
+    // Asked to finish, ffmpeg ends its stream, then exits.
+    this.stdin.on("data", () =>
+      setImmediate(() => {
+        this.stdout.end();
+        this.emit("exit", 0, null);
+      }),
+    );
+  }
+  override kill(sig: string) {
+    this.killed = sig;
+    this.stdout.end();
+    setImmediate(() => this.emit("exit", null, sig));
+  }
+}
+
+const tick = () => new Promise((res) => setImmediate(res));
+
+describe("the recorder's pull sink (microVM)", () => {
+  it("writes to a pipe, cut at 4 MiB as well as at keyframes", () => {
+    const a = recorderArgs({
+      display: ":99",
+      width: 1280,
+      height: 720,
+      out: "pipe:1",
+    });
+    expect(a.join(" ")).toContain("-frag_size 4194304");
+    expect(a.at(-1)).toBe("pipe:1");
+    expect(
+      recorderArgs({ display: ":99", width: 2, height: 2, out: "/a/b.mp4" }),
+    ).not.toContain("-frag_size");
+  });
+
+  it("needs no volume, reads ffmpeg's output into fragments, and ends them when ffmpeg stops", async () => {
+    const p = new PipedProc();
+    let piped: boolean | undefined;
+    const r = new Recorder(
+      "/nonexistent-dir",
+      ":99",
+      ((_c: string, _a: string[], pipe: boolean) => (
+        (piped = pipe),
+        p
+      )) as unknown as Spawn,
+    );
+    expect(r.fragments).toBeNull();
+    expect(r.start({ width: 800, height: 600 }, "pull")).toBe(true);
+    expect(piped).toBe(true);
+    p.stdout.write(stream(2));
+    await tick();
+    // init, two media fragments, the index
+    expect(r.fragments!.take(0, 1e9, 64).fragments).toHaveLength(4);
+    await r.stop();
+    await tick();
+    expect(r.state).toBe("stopped");
+    expect(r.fragments!.take(4, 1e9, 64)).toEqual({
+      fragments: [],
+      done: true,
+    });
+  });
+
+  it("kills ffmpeg if what it writes is not the recorder's MP4, keeping the whole fragments", async () => {
+    const p = new PipedProc();
+    const r = new Recorder(
+      "/nonexistent-dir",
+      ":99",
+      (() => p) as unknown as Spawn,
+    );
+    r.start({ width: 800, height: 600 }, "pull");
+    p.stdout.write(Buffer.concat([stream(1).subarray(0, -58), box("evil", 4)]));
+    await tick();
+    expect(p.killed).toBe("SIGKILL");
+    expect(r.state).toBe("failed");
+    expect(r.fragments!.take(0, 1e9, 64).fragments).toHaveLength(2);
   });
 });

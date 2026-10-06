@@ -10,6 +10,9 @@ import {
   ConfigureRequest,
   ConfigureResponse,
   LIMITS,
+  RECORDING_FRAGMENTS_HEADER,
+  RECORDING_LIMITS,
+  RecordingFragments,
   RekeyRequest,
   RUNTIME_PATHS,
   RUNTIME_PROTOCOL_VERSION,
@@ -37,6 +40,8 @@ const same = (a: string, b: string): boolean =>
  *  POST /configure  bind this container to a session: set the proof the CDP forward demands and
  *                   size the page to the requested viewport. Doubles as the agent's health check.
  *  GET  /captcha    the known CAPTCHAs showing now (docs/lld/captcha.md)
+ *  GET  /recording/fragments?after=N
+ *                   a microVM's recording, pulled by the agent (docs/lld/microvm-recording.md)
  */
 export class ControlServer {
   private server: Server | undefined;
@@ -181,7 +186,9 @@ export class ControlServer {
         const response = ConfigureResponse.parse(applied);
         this.configured = { proof: sessionProof, viewport, response };
         // Started after the viewport is applied, so the video is the window the caller asked for.
-        if (parsed.data.recording) this.recorder?.start(applied.window);
+        // In a microVM this is the first moment anything is recorded: the template never is.
+        if (parsed.data.recording)
+          this.recorder?.start(applied.window, parsed.data.recordingSink);
         // Not awaited: detection must not slow a start (docs/lld/captcha.md).
         this.captcha?.start();
         return this.send(res, 200, response);
@@ -211,6 +218,48 @@ export class ControlServer {
           200,
           RuntimeCaptcha.parse(this.captcha.current()),
         );
+      }
+
+      if (req.method === "GET" && path === RUNTIME_PATHS.recordingFragments) {
+        if (!this.configured)
+          return this.send(res, 409, { error: "no session is bound" });
+        const q = this.recorder?.fragments;
+        if (!q || !this.recorder)
+          return this.send(res, 404, { error: "no pull recording" });
+        const raw = new URL(req.url ?? "/", "http://runtime").searchParams.get(
+          "after",
+        );
+        if (raw === null || !/^\d{1,9}$/.test(raw))
+          return this.send(res, 400, { error: "after must be a number" });
+        let got: ReturnType<typeof q.take>;
+        try {
+          got = q.take(
+            Number(raw),
+            RECORDING_LIMITS.pullBytes,
+            RECORDING_LIMITS.pullFragments,
+          );
+        } catch (e) {
+          return this.send(res, 409, { error: (e as Error).message });
+        }
+        const meta = RecordingFragments.parse({
+          state: this.recorder.state,
+          fragments: got.fragments.map((f) => ({
+            seq: f.seq,
+            bytes: f.data.length,
+          })),
+          done: got.done,
+        });
+        res.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": got.fragments.reduce(
+            (n, f) => n + f.data.length,
+            0,
+          ),
+          [RECORDING_FRAGMENTS_HEADER]: JSON.stringify(meta),
+        });
+        for (const f of got.fragments) res.write(f.data);
+        res.end();
+        return;
       }
 
       if (req.method === "POST" && path === RUNTIME_PATHS.recordingStop) {
