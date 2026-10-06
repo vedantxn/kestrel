@@ -2,7 +2,9 @@ import { request } from "node:http";
 import {
   DenialsResponse,
   EGRESS_PATHS,
+  EgressClearAck,
   EgressHealth,
+  EgressUsageResponse,
   EgressPolicyAck,
   ListPoliciesResponse,
   type EgressPolicy,
@@ -15,7 +17,13 @@ export interface EgressClient {
    * which must not be taken as having applied an upstream (T-47).
    */
   setPolicy(ip: string, policy: EgressPolicy): Promise<EgressPolicyAck | null>;
-  clearPolicy(ip: string): Promise<void>;
+  /**
+   * The cleared session's final byte counts (G-20), or null: no policy was there, or the gateway
+   * predates byte counters.
+   */
+  clearPolicy(ip: string): Promise<EgressClearAck | null>;
+  /** Bytes per session since the gateway started (G-20). An older gateway answers 404 (throws). */
+  usage(): Promise<EgressUsageResponse>;
   list(): Promise<ListPoliciesResponse>;
   restored(): Promise<void>;
   health(): Promise<EgressHealth>;
@@ -87,8 +95,14 @@ export class UnixEgressClient implements EgressClient {
     );
     return ack.success ? ack.data : null;
   }
-  async clearPolicy(ip: string): Promise<void> {
-    await this.ok("DELETE", EGRESS_PATHS.policy(ip));
+  async clearPolicy(ip: string): Promise<EgressClearAck | null> {
+    const ack = EgressClearAck.safeParse(
+      await this.ok("DELETE", EGRESS_PATHS.policy(ip)),
+    );
+    return ack.success ? ack.data : null;
+  }
+  async usage(): Promise<EgressUsageResponse> {
+    return EgressUsageResponse.parse(await this.ok("GET", EGRESS_PATHS.usage));
   }
   async list(): Promise<ListPoliciesResponse> {
     return ListPoliciesResponse.parse(

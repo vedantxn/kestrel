@@ -6,7 +6,9 @@ import {
   type ConfigureRequest,
   type ConfigureResponse,
   type DenialsResponse,
+  type EgressClearAck,
   type EgressHealth,
+  type EgressUsageResponse,
   type EgressPolicy,
   type HeartbeatRequest,
   type HeartbeatResponse,
@@ -148,7 +150,10 @@ export class FakeRuntime implements RuntimeClient {
   calls: { op: string; address: string }[] = [];
   configured = new Map<string, ConfigureRequest>();
   /** What configure does for an address: default ok. */
-  behavior = new Map<string, "fail" | "badViewport" | "garbage">();
+  behavior = new Map<
+    string,
+    "fail" | "badViewport" | "garbage" | "noTimezone"
+  >();
   /** Containers that never become ready. */
   neverReady = new Set<string>();
   failAllConfigures = false;
@@ -198,6 +203,8 @@ export class FakeRuntime implements RuntimeClient {
       viewport: v,
       deviceScaleFactor: 1,
       chromeVersion: "154.0.8037.92",
+      // A runtimed from before time zones says nothing about them.
+      ...(b === "noTimezone" ? {} : { timezone: req.timezone ?? null }),
     };
   }
 
@@ -314,6 +321,10 @@ export class FakeEgress implements EgressClient {
   log: string[] = [];
   denialList: DenialsResponse["denials"] = [];
   denialEpoch = "e1";
+  /** Bytes per address, as the gateway counts them (G-20). */
+  bytes = new Map<string, { up: number; down: number }>();
+  /** A gateway from before byte counters: no /v1/usage, and a bare 204 on clear. */
+  noUsage = false;
 
   private check() {
     if (this.down) throw new Error("egress: connection refused");
@@ -332,10 +343,26 @@ export class FakeEgress implements EgressClient {
     this.policies.set(ip, p);
     return { sessionId: p.sessionId, upstream: p.upstream !== undefined };
   }
-  async clearPolicy(ip: string) {
+  async clearPolicy(ip: string): Promise<EgressClearAck | null> {
     this.check();
     this.log.push(`clear ${ip}`);
+    const p = this.policies.get(ip);
     this.policies.delete(ip);
+    const b = this.bytes.get(ip) ?? { up: 0, down: 0 };
+    this.bytes.delete(ip);
+    if (!p || this.noUsage) return null;
+    return { sessionId: p.sessionId, epoch: this.denialEpoch, ...b };
+  }
+  async usage(): Promise<EgressUsageResponse> {
+    this.check();
+    if (this.noUsage) throw new Error("egress GET /v1/usage: 404");
+    return {
+      epoch: this.denialEpoch,
+      sessions: [...this.policies].map(([ip, p]) => ({
+        sessionId: p.sessionId,
+        ...(this.bytes.get(ip) ?? { up: 0, down: 0 }),
+      })),
+    };
   }
   async list(): Promise<ListPoliciesResponse> {
     this.check();
@@ -349,6 +376,7 @@ export class FakeEgress implements EgressClient {
         ...(p.upstream
           ? {
               upstream: {
+                ...(p.upstream.scheme ? { scheme: p.upstream.scheme } : {}),
                 host: p.upstream.host,
                 port: p.upstream.port,
                 ...(p.upstream.username !== undefined
@@ -383,6 +411,7 @@ export class FakeEgress implements EgressClient {
   /** The egress gateway restarts: no policies, not restored. */
   restart() {
     this.policies.clear();
+    this.bytes.clear();
     this.restoredFlag = false;
   }
 }

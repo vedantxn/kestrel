@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 CREATE TABLE IF NOT EXISTS stops (session_id TEXT PRIMARY KEY, until INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS captcha (session_id TEXT PRIMARY KEY, providers TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS egress_bytes (
+  session_id TEXT PRIMARY KEY,
+  epoch TEXT NOT NULL,
+  base_up INTEGER NOT NULL,
+  base_down INTEGER NOT NULL,
+  seen_up INTEGER NOT NULL,
+  seen_down INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS recordings (
   session_id TEXT PRIMARY KEY,
   volume TEXT NOT NULL,
@@ -249,6 +257,76 @@ export class Store {
   deleteBinding(sessionId: string): void {
     this.db.prepare("DELETE FROM sessions WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM captcha WHERE session_id = ?").run(sessionId);
+    this.db
+      .prepare("DELETE FROM egress_bytes WHERE session_id = ?")
+      .run(sessionId);
+  }
+
+  // --- egress bytes (threat model G-20) --------------------------------------------------------
+
+  /**
+   * Fold a reading of the egress gateway's counters for a session the store holds. Within one
+   * gateway epoch the counts only grow; a restarted gateway (a new epoch) counts again from zero,
+   * so what was seen before is kept as a base. Readings are bounded and validated by the caller.
+   */
+  recordEgressBytes(
+    sessionId: string,
+    epoch: string,
+    up: number,
+    down: number,
+  ): void {
+    this.db.transaction(() => {
+      const held = this.db
+        .prepare("SELECT 1 FROM sessions WHERE session_id = ?")
+        .get(sessionId);
+      if (!held) return;
+      const r = this.db
+        .prepare("SELECT * FROM egress_bytes WHERE session_id = ?")
+        .get(sessionId) as
+        | {
+            epoch: string;
+            base_up: number;
+            base_down: number;
+            seen_up: number;
+            seen_down: number;
+          }
+        | undefined;
+      const cap = (n: number) => Math.min(Number.MAX_SAFE_INTEGER, n);
+      const next = !r
+        ? { base_up: 0, base_down: 0, seen_up: up, seen_down: down }
+        : r.epoch !== epoch
+          ? {
+              base_up: cap(r.base_up + r.seen_up),
+              base_down: cap(r.base_down + r.seen_down),
+              seen_up: up,
+              seen_down: down,
+            }
+          : {
+              base_up: r.base_up,
+              base_down: r.base_down,
+              seen_up: Math.max(r.seen_up, up),
+              seen_down: Math.max(r.seen_down, down),
+            };
+      this.db
+        .prepare(
+          `INSERT INTO egress_bytes (session_id, epoch, base_up, base_down, seen_up, seen_down)
+           VALUES (@sessionId, @epoch, @base_up, @base_down, @seen_up, @seen_down)
+           ON CONFLICT(session_id) DO UPDATE SET epoch = excluded.epoch, base_up = excluded.base_up,
+             base_down = excluded.base_down, seen_up = excluded.seen_up, seen_down = excluded.seen_down`,
+        )
+        .run({ sessionId, epoch, ...next });
+    })();
+  }
+
+  /** A session's egress bytes so far: up from the browser, down to it. */
+  egressBytes(sessionId: string): { up: number; down: number } {
+    const r = this.db
+      .prepare(
+        "SELECT base_up + seen_up AS up, base_down + seen_down AS down FROM egress_bytes WHERE session_id = ?",
+      )
+      .get(sessionId) as { up: number; down: number } | undefined;
+    const cap = (n: number) => Math.min(Number.MAX_SAFE_INTEGER, n);
+    return r ? { up: cap(r.up), down: cap(r.down) } : { up: 0, down: 0 };
   }
 
   // --- CAPTCHAs (docs/lld/captcha.md) --------------------------------------------------------

@@ -530,9 +530,6 @@ export class NodeAgent {
       return { result: "refused", reason: "stop already received" };
     if (this.sessionCount() >= this.c.slotsTotal)
       return { result: "refused", reason: "no slot" };
-    // Until time zones are applied, a start that asks for one is refused, not run in the wrong zone.
-    if (req.timezone !== undefined)
-      return { result: "refused", reason: "time zones are not supported" };
 
     const t0 = this.now();
     this.store.insertBinding({
@@ -631,6 +628,7 @@ export class NodeAgent {
           viewport: req.viewport,
           recording,
           recordingSink: this.pulls ? "pull" : "volume",
+          ...(req.timezone !== undefined ? { timezone: req.timezone } : {}),
         });
         // The container is untrusted: check that what it reports is what was asked (A6).
         if (
@@ -641,6 +639,12 @@ export class NodeAgent {
             `the browser reports a ${cfg.viewport.width}x${cfg.viewport.height} viewport, not the requested one`,
           );
         }
+        // A runtimed from before time zones ignores the field: the session must not run in the
+        // wrong zone, and every browser here would do the same, so the pool is not spent on it.
+        if (req.timezone !== undefined && cfg.timezone !== req.timezone)
+          throw new RuntimeUnsupported(
+            "the browser did not apply the session's time zone",
+          );
         this.store.updateBinding(id, { proof });
         await this.d.failpoints.hit("node.start.after_configure");
         if (this.aborted(id)) throw new StartAborted();
@@ -699,7 +703,8 @@ export class NodeAgent {
         if (this.aborted(id))
           return { result: "failed", reason: "stopped while starting" };
         // Another browser would meet the same gateway: do not spend the pool on it.
-        if (e instanceof EgressUnsupported) break;
+        if (e instanceof EgressUnsupported || e instanceof RuntimeUnsupported)
+          break;
       }
     }
     this.startMarks.delete(id);
@@ -1263,6 +1268,7 @@ export class NodeAgent {
         policy: {
           ...b.policy,
           upstream: {
+            ...(up.scheme !== undefined ? { scheme: up.scheme } : {}),
             host: up.host,
             port: up.port,
             ...(up.username !== undefined ? { username: up.username } : {}),
@@ -1285,6 +1291,8 @@ export class NodeAgent {
     const seconds = b.readyAt
       ? Math.max(0, (this.now() - b.readyAt) / 1000)
       : 0;
+    // G-20: what the egress gateway counted, up to the clear that answered its final counts.
+    const bytes = this.store.egressBytes(id);
     // The binding goes and the report is queued in one transaction: a crash cannot lose the report.
     queueMicrotask(() => {
       void this.refillPool(); // a slot is free again
@@ -1298,6 +1306,8 @@ export class NodeAgent {
       sessionId: id as never,
       endReason: reason,
       browserSeconds: seconds,
+      egressBytesUp: bytes.up,
+      egressBytesDown: bytes.down,
     }));
     this.gatewayAttachmentsDrop(id);
   }
@@ -1352,7 +1362,10 @@ export class NodeAgent {
     let last: unknown;
     for (let i = 0; i < 3; i++) {
       try {
-        await this.d.egress.clearPolicy(address);
+        const ack = await this.d.egress.clearPolicy(address);
+        // The session's final byte counts (G-20), if this gateway counts them.
+        if (ack && ack.sessionId === id)
+          this.store.recordEgressBytes(id, ack.epoch, ack.up, ack.down);
         return;
       } catch (e) {
         last = e;
@@ -2007,6 +2020,28 @@ export class NodeAgent {
     }
   }
 
+  /**
+   * Threat model G-20: fold the egress gateway's byte counters into the store, so a session's
+   * bytes survive a gateway restart (counted from zero again under a new epoch) and reach the API
+   * in its `removed` report. A gateway from before byte counters has no `/v1/usage`: nothing to do.
+   */
+  async pollEgressUsage(): Promise<void> {
+    let res;
+    try {
+      res = await this.d.egress.usage();
+    } catch (e) {
+      this.d.log.debug(
+        { err: e instanceof Error ? e.message : String(e) },
+        "egress usage unavailable",
+      );
+      return;
+    }
+    const live = new Set(this.store.allBindings().map((b) => b.sessionId));
+    for (const s of res.sessions)
+      if (live.has(s.sessionId))
+        this.store.recordEgressBytes(s.sessionId, res.epoch, s.up, s.down);
+  }
+
   // --- loops ----------------------------------------------------------------------------------
 
   startLoops(): void {
@@ -2056,6 +2091,7 @@ export class NodeAgent {
         await this.reconcile();
         await this.syncEgress();
         await this.pollDenials();
+        await this.pollEgressUsage();
       },
       "reconcile",
     );
@@ -2219,6 +2255,9 @@ export class NodeAgent {
 /** The egress gateway did not confirm a session's proxy: the session must not be used (T-47). */
 class EgressUnsupported extends Error {}
 
+/** The browser's runtimed cannot do what the session asked (a time zone): no other browser here can either. */
+class RuntimeUnsupported extends Error {}
+
 /** Same proxy, compared as the gateway lists it (no password). */
 function sameUpstream(
   listed: UpstreamProxyView | undefined,
@@ -2226,6 +2265,7 @@ function sameUpstream(
 ): boolean {
   if (!listed || !want) return !listed && !want;
   return (
+    (listed.scheme ?? "http") === (want.scheme ?? "http") &&
     listed.host === want.host &&
     listed.port === want.port &&
     listed.username === want.username
