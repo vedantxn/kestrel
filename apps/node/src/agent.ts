@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
+import type Docker from "dockerode";
 import { constants as fsConstants } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  CREATION_LABEL,
   LIMITS,
   NODE_PROTOCOL_VERSION,
   RECORDING_FILE,
@@ -185,6 +187,10 @@ export class NodeAgent {
   private teardowns = new Map<string, Promise<void>>();
   private poolStarting = new Map<string, Promise<boolean>>();
   private tasks = new Set<Promise<unknown>>();
+  /** Creation labels of containers being made and not yet in the store (see `createContainer`). */
+  private creating = new Set<string>();
+  /** Containers being removed (or frozen for the reaper) whose record may already be gone. */
+  private removing = new Set<string>();
   /** Pooled browsers being created, not yet in the store: counted so a second refill cannot over-fill the pool. */
   private spawning = 0;
   /** Of `spawning`, how many are being made with a recording volume. */
@@ -302,6 +308,7 @@ export class NodeAgent {
     slotsTotal: number;
     poolHeadroom: number;
     retiring: string[];
+    creating: string[];
     admitting: boolean;
     failpoints: Record<string, string>;
   } {
@@ -320,7 +327,10 @@ export class NodeAgent {
       pendingReports: this.store.pendingReportCount(),
       slotsTotal: this.c.slotsTotal,
       poolHeadroom: this.c.poolHeadroom ?? 0,
-      retiring: this.reapQueue.map((q) => q.id),
+      retiring: [
+        ...new Set([...this.reapQueue.map((q) => q.id), ...this.removing]),
+      ],
+      creating: [...this.creating],
       admitting: this.firewallOk,
       failpoints: this.d.failpoints.describe(),
     };
@@ -360,7 +370,7 @@ export class NodeAgent {
       .allPool()
       .filter((p) => p.state === "starting")) {
       this.store.deletePool(p.containerId);
-      await this.d.docker.remove(p.containerId).catch(() => undefined);
+      await this.removeContainer(p.containerId).catch(() => undefined);
     }
     await this.idle();
     await this.reconcile();
@@ -586,7 +596,7 @@ export class NodeAgent {
             await this.d.egress
               .clearPolicy(held.address)
               .catch(() => undefined);
-            await this.d.docker.remove(held.containerId).catch(() => undefined);
+            await this.removeContainer(held.containerId).catch(() => undefined);
             this.d.hub.removeRoute(id);
           }
           return { result: "failed", reason: "stopped while starting" };
@@ -599,7 +609,7 @@ export class NodeAgent {
         // A dead pooled browser never reaches a client (G8): clear the policy, drop the container, try the next.
         if (held) {
           await this.d.egress.clearPolicy(held.address).catch(() => undefined);
-          await this.d.docker.remove(held.containerId).catch(() => undefined);
+          await this.removeContainer(held.containerId).catch(() => undefined);
           this.store.updateBinding(id, {
             containerId: null,
             address: null,
@@ -683,7 +693,7 @@ export class NodeAgent {
           controlToken: null,
           startPath: null,
         });
-        await this.d.docker.remove(p.containerId).catch(() => undefined);
+        await this.removeContainer(p.containerId).catch(() => undefined);
       }
       return null;
     };
@@ -753,10 +763,18 @@ export class NodeAgent {
       "pool: going cold",
     );
     this.mark(sessionId, "cold:begin");
-    const created = await this.createContainer("session", recording);
+    // Recorded against the session before the creation lets go of it: nothing can see the
+    // container in Docker and find no record of it.
+    let bound!: ReturnType<typeof bind>;
+    const created = await this.createContainer(
+      "session",
+      recording,
+      (made, token) => {
+        bound = bind(made.id, made.address as string, token, "cold");
+      },
+    );
     this.mark(sessionId, "cold:created");
     const info = created.info;
-    const bound = bind(info.id, info.address as string, created.token, "cold");
     const isReady = await this.waitReady(info.address as string, created.token);
     this.mark(sessionId, "cold:ready");
     if (!isReady) {
@@ -766,33 +784,60 @@ export class NodeAgent {
         controlToken: null,
         startPath: null,
       });
-      await this.d.docker.remove(info.id).catch(() => undefined);
+      await this.removeContainer(info.id).catch(() => undefined);
       throw new Error("the browser did not become ready");
     }
     return bound;
   }
 
+  /**
+   * Make a container (or VM) and record it. Docker lists a container the moment it is created,
+   * well before `run` returns, so each carries a creation label that the agent reports (in
+   * `state().creating`) until `record` has written it to the store: the invariant checker can
+   * then tell a container being made from one nothing owns.
+   */
   private async createContainer(
     role: Role,
     withVolume: boolean,
+    record: (info: ContainerInfo, token: string) => void,
+    run: (spec: Docker.ContainerCreateOptions) => Promise<ContainerInfo> = (
+      spec,
+    ) => this.d.docker.run(spec),
   ): Promise<{ info: ContainerInfo; token: string }> {
     const token = hex(24);
-    const volume = withVolume ? await this.makeRecordingVolume() : undefined;
-    let info: ContainerInfo;
+    const creation = hex(8);
+    this.creating.add(creation);
     try {
-      info = await this.d.docker.run(
-        buildContainerSpec(this.d.dockerSpec, role, token, volume),
-      );
-    } catch (e) {
-      if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
-      throw e;
+      const volume = withVolume ? await this.makeRecordingVolume() : undefined;
+      const spec = buildContainerSpec(this.d.dockerSpec, role, token, volume);
+      spec.Labels = { ...spec.Labels, [CREATION_LABEL]: creation };
+      let info: ContainerInfo;
+      try {
+        info = await run(spec);
+      } catch (e) {
+        if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
+        throw e;
+      }
+      if (!info.address) {
+        await this.removeContainer(info.id).catch(() => undefined);
+        throw new Error("the container has no address on the session network");
+      }
+      if (volume) this.volumeOf.set(info.id, volume);
+      record(info, token);
+      return { info, token };
+    } finally {
+      this.creating.delete(creation);
     }
-    if (!info.address) {
-      await this.d.docker.remove(info.id).catch(() => undefined);
-      throw new Error("the container has no address on the session network");
+  }
+
+  /** Remove a container, reported as retiring meanwhile (its record may already be gone). */
+  private async removeContainer(id: string): Promise<void> {
+    this.removing.add(id);
+    try {
+      await this.d.docker.remove(id);
+    } finally {
+      this.removing.delete(id);
     }
-    if (volume) this.volumeOf.set(info.id, volume);
-    return { info, token };
   }
 
   /**
@@ -886,7 +931,15 @@ export class NodeAgent {
   private async spawnPooled(withVolume: boolean): Promise<boolean> {
     let created: { info: ContainerInfo; token: string };
     try {
-      created = await this.createContainer("pool", withVolume);
+      created = await this.createContainer("pool", withVolume, (made, tok) =>
+        this.store.upsertPool({
+          containerId: made.id,
+          address: made.address as string,
+          controlToken: tok,
+          state: "starting",
+          createdAt: this.now(),
+        }),
+      );
     } catch (e) {
       this.spawning--;
       if (withVolume) this.spawningWithVolume--;
@@ -897,13 +950,6 @@ export class NodeAgent {
       return false;
     }
     const { info, token } = created;
-    this.store.upsertPool({
-      containerId: info.id,
-      address: info.address as string,
-      controlToken: token,
-      state: "starting",
-      createdAt: this.now(),
-    });
     this.spawning--;
     if (withVolume) this.spawningWithVolume--;
     const ready = this.waitReady(info.address as string, token).then(
@@ -925,7 +971,7 @@ export class NodeAgent {
             "pool: dropped a browser that did not become ready",
           );
           this.store.deletePool(info.id);
-          await this.d.docker.remove(info.id).catch(() => undefined);
+          await this.removeContainer(info.id).catch(() => undefined);
         }
         return false;
       },
@@ -950,10 +996,14 @@ export class NodeAgent {
     // A frozen container keeps its memory until it is removed: defer only while the host has room.
     const free = this.d.memAvailableMb?.();
     if (free !== undefined && free < REAP_MIN_FREE_MB) return false;
+    // Retiring from now: its record may already be gone (an evicted pooled browser).
+    this.removing.add(id);
     try {
       await this.d.docker.pause(id);
     } catch {
       return false; // already dead, or the pause failed: remove it the ordinary way
+    } finally {
+      this.removing.delete(id);
     }
     this.reapQueue.push({
       id,
@@ -964,7 +1014,7 @@ export class NodeAgent {
   }
 
   private async removeWithVolume(id: string, volume?: string): Promise<void> {
-    await this.d.docker.remove(id).catch(() => undefined);
+    await this.removeContainer(id).catch(() => undefined);
     if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
   }
 
@@ -979,7 +1029,7 @@ export class NodeAgent {
         const quiet = this.makingPool.size === 0 && this.spawning === 0;
         const overdue = performance.now() - oldest.at > REAP_MAX_DELAY_MS;
         if (!quiet && !overdue) return;
-        await this.d.docker.remove(oldest.id).catch((e: unknown) =>
+        await this.removeContainer(oldest.id).catch((e: unknown) =>
           this.d.log.warn(
             {
               container: oldest.id.slice(0, 12),
@@ -1138,7 +1188,7 @@ export class NodeAgent {
       b.containerId && !recorded ? this.volumeOf.get(b.containerId) : undefined;
     if (b.containerId) this.volumeOf.delete(b.containerId);
     if (b.containerId && !(await this.deferRemoval(b.containerId, volume))) {
-      await this.d.docker.remove(b.containerId);
+      await this.removeContainer(b.containerId);
       // A volume nobody recorded to goes with its container; reconciliation catches any left behind.
       if (volume) await this.d.volumes?.remove(volume).catch(() => undefined);
     }
@@ -1444,7 +1494,7 @@ export class NodeAgent {
           "pool: reconciliation dropped a record",
         );
         this.store.deletePool(p.containerId);
-        if (c) await this.d.docker.remove(c.id).catch(() => undefined);
+        if (c) await this.removeContainer(c.id).catch(() => undefined);
       } else known.add(p.containerId);
     }
     for (const c of containers) {
@@ -1457,7 +1507,7 @@ export class NodeAgent {
         { container: c.id.slice(0, 12) },
         "removing a container nothing refers to",
       );
-      await this.d.docker.remove(c.id).catch(() => undefined);
+      await this.removeContainer(c.id).catch(() => undefined);
     }
     await this.reapVolumes(containers, now).catch((e) =>
       this.d.log.warn(

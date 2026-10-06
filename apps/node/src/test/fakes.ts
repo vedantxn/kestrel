@@ -48,6 +48,12 @@ export class FakeDocker implements DockerDriver {
   removed: string[] = [];
   runCalls = 0;
   failRuns = 0;
+  /**
+   * While set, `run` makes the container (Docker lists it) and then waits on this before
+   * answering, as a real create-and-start does; `remove` likewise waits on `removeGate`.
+   */
+  runGate: Promise<void> | null = null;
+  removeGate: Promise<void> | null = null;
   private next = 2;
   private listeners = new Set<(e: DockerEvent) => void>();
 
@@ -71,6 +77,7 @@ export class FakeDocker implements DockerDriver {
     };
     this.containers.set(id, info);
     this.specs.set(id, spec);
+    if (this.runGate) await this.runGate;
     return { ...info };
   }
   async inspect(id: string) {
@@ -78,6 +85,7 @@ export class FakeDocker implements DockerDriver {
     return c ? { ...c } : null;
   }
   async remove(id: string) {
+    if (this.removeGate) await this.removeGate;
     if (this.containers.delete(id)) this.removed.push(id);
   }
   paused = new Set<string>();
