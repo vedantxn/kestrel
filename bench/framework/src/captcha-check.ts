@@ -1,14 +1,19 @@
+import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import WebSocket from "ws";
 import type { CaptchaProvider, Session } from "@kestrel/contracts";
 import { KestrelClient } from "./client.js";
+import { FAKE_TOKENS, FakeSolverService } from "./fake-solver.js";
 import { m1ConfigFromEnv } from "./m1.js";
 import { makeReport, type Report } from "./report.js";
 
 /**
- * The CAPTCHA detection check (`docs/lld/captcha.md`), run on the host against the real
- * deployment, with real widgets from the providers on the S3 test site (official always-pass test
- * keys). Pages are driven with raw CDP only (attach and `Page.navigate`, no domain enabled), the
- * way a careful client would, and read back through the browser's target list.
+ * The CAPTCHA check (`docs/lld/captcha.md`), run on the host against the real deployment, with
+ * real widgets from the providers on the S3 test site (official always-pass test keys). Pages are
+ * driven with raw CDP only (attach and `Page.navigate`, no domain enabled), the way a careful
+ * client would, and read back through the browser's target list. Solving runs against a fake
+ * solver service on this host (`fake-solver.ts`); the deployment must be configured with
+ * `CAPTCHA_SOLVER=custom CAPTCHA_SOLVER_URL=http://127.0.0.1:<SOLVER_PORT>`.
  */
 export interface CaptchaCheckConfig {
   apiUrl: string;
@@ -20,6 +25,59 @@ export interface CaptchaCheckConfig {
   environment: Record<string, string | number>;
   only?: number[];
   log: (m: string) => void;
+  /** Run the solving checks (8-11). */
+  solve: boolean;
+  /** Where the fake solver service listens: the deployment's CAPTCHA_SOLVER_URL. */
+  solverPort: number;
+  /** The deployment's solver key file, for the leak sweep. */
+  solverKeyFile: string;
+}
+
+const sh = (cmd: string, args: string[]) =>
+  new Promise<string>((resolve, reject) =>
+    execFile(
+      cmd,
+      args,
+      { maxBuffer: 256 * 1024 * 1024 },
+      (e, stdout, stderr) =>
+        e
+          ? reject(new Error(`${cmd}: ${stderr || e.message}`))
+          : resolve(stdout + stderr),
+    ),
+  );
+
+/**
+ * The providers' test secrets: Google's accepts any token for the test site key, hCaptcha's only
+ * its test response, Turnstile's its dummy token (checked against each siteverify in the spike).
+ */
+const SITEVERIFY: Partial<Record<CaptchaProvider, [string, string]>> = {
+  recaptcha: [
+    "https://www.google.com/recaptcha/api/siteverify",
+    "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe",
+  ],
+  hcaptcha: [
+    "https://api.hcaptcha.com/siteverify",
+    "0x0000000000000000000000000000000000000000",
+  ],
+  turnstile: [
+    "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    "1x0000000000000000000000000000000AA",
+  ],
+};
+
+/** What the provider says of a token, as the site's server would ask it. */
+async function siteverify(
+  provider: CaptchaProvider,
+  token: string,
+): Promise<boolean> {
+  const v = SITEVERIFY[provider];
+  if (!v) return false;
+  const res = await fetch(v[0], {
+    method: "POST",
+    body: new URLSearchParams({ secret: v[1], response: token }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  return ((await res.json()) as { success?: boolean }).success === true;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -93,6 +151,19 @@ async function hold(session: Session, label: string): Promise<Held> {
 
 const navigate = (h: Held, url: string) =>
   h.cdp.send("Page.navigate", { url }, h.pageSession);
+
+/** A form field's value, read the way the site's own code would (the client's own session). */
+async function fieldValue(h: Held, name: string): Promise<string> {
+  const r = await h.cdp.send<{ result: { value?: unknown } }>(
+    "Runtime.evaluate",
+    {
+      expression: `(document.querySelector('[name="${name}"]') || {}).value || ""`,
+      returnByValue: true,
+    },
+    h.pageSession,
+  );
+  return typeof r.result.value === "string" ? r.result.value : "";
+}
 
 async function titleOf(h: Held): Promise<string> {
   const { targetInfos } = await h.cdp.send<{
@@ -370,6 +441,342 @@ export async function runCaptchaCheck(c: CaptchaCheckConfig): Promise<Report> {
           return `${h.label}: ${n} events over ${Math.round(elapsed / 1000)} s of a frame appearing and going every 300 ms (bound ${bound}); cleared at the end`;
         },
       );
+
+    if (want(5))
+      await check(
+        "5",
+        "in-page CAPTCHAs and a Cloudflare challenge in German are detected on every node, and cleared",
+        async () => {
+          const out: string[] = [];
+          const cases: [string, CaptchaProvider][] = [
+            ["perimeterx", "perimeterx"],
+            ["geetest", "geetest"],
+            ["aws-waf", "aws_waf"],
+            ["interstitial-de", "cloudflare_challenge"],
+          ];
+          for (const h of held) {
+            for (const [name, provider] of cases) {
+              await navigate(h, page(name));
+              await until(
+                `${h.label} ${name}: captcha ${provider}`,
+                15_000,
+                async () =>
+                  providersOf(await get(h)) === provider ? true : false,
+              );
+              const s = await get(h);
+              if (s.captcha?.providers.join() !== provider)
+                throw new Error(
+                  `${h.label} ${name}: ${JSON.stringify(s.captcha)}`,
+                );
+              await navigate(h, page("plain"));
+              await until(
+                `${h.label} ${name}: cleared`,
+                15_000,
+                async () => (await get(h)).captcha === null,
+              );
+            }
+            out.push(`${h.label}: ${cases.length} of ${cases.length}`);
+          }
+          return out.join("; ");
+        },
+      );
+
+    if (want(6))
+      await check(
+        "6",
+        "same-site frames: reCAPTCHA on Google's demo page and hCaptcha on hCaptcha's",
+        async () => {
+          const h = held[0]!;
+          const cases: [string, CaptchaProvider, string][] = [
+            [
+              "https://www.google.com/recaptcha/api2/demo",
+              "recaptcha",
+              "www.google.com",
+            ],
+            [
+              "https://accounts.hcaptcha.com/demo",
+              "hcaptcha",
+              "accounts.hcaptcha.com",
+            ],
+          ];
+          for (const [url, provider, host] of cases) {
+            const before = (await client.eventList(h.session.id)).length;
+            await navigate(h, url);
+            await until(`${url}: captcha ${provider}`, 20_000, async () =>
+              providersOf(await get(h)) === provider ? true : false,
+            );
+            const ev = (await client.eventList(h.session.id))
+              .slice(before)
+              .find((e) => e.type === "captcha.detected");
+            if ((ev?.data as { host?: string } | undefined)?.host !== host)
+              throw new Error(`${url}: detected ${JSON.stringify(ev?.data)}`);
+            await navigate(h, page("plain"));
+            await until(
+              `${url}: cleared`,
+              15_000,
+              async () => (await get(h)).captcha === null,
+            );
+          }
+          return "both detected with the provider's own host (neither frame is a target), then cleared";
+        },
+      );
+
+    if (want(7))
+      await check(
+        "7",
+        "the page probe leaves no trace in the page: no trapped call, no mutation, navigator.webdriver false",
+        async () => {
+          const h = held[0]!;
+          await navigate(h, page("probe-traps"));
+          await until("perimeterx on the trap page", 15_000, async () =>
+            providersOf(await get(h)) === "perimeterx" ? true : false,
+          );
+          // Found, so probed at every read (2 s) while it stays: 15 s is several probes.
+          await sleep(15_000);
+          const title = await titleOf(h);
+          if (!/wd=false hits=0\b/.test(title))
+            throw new Error(`title ${JSON.stringify(title)}`);
+          await navigate(h, page("plain"));
+          return `after 15 s of probing: ${JSON.stringify(title)}`;
+        },
+      );
+
+    if (c.solve && (want(8) || want(9) || want(10) || want(11))) {
+      const fake = new FakeSolverService();
+      await fake.listen(c.solverPort);
+      const solving: Held[] = [];
+      try {
+        if (want(8))
+          await check(
+            "8",
+            "sessions without captcha.solve never reach the solver",
+            async () => {
+              if (fake.tasks.length)
+                throw new Error(`${fake.tasks.length} tasks`);
+              const h = held[0]!;
+              await navigate(h, page("recaptcha"));
+              await until("captcha recaptcha", 12_000, async () =>
+                providersOf(await get(h)) === "recaptcha" ? true : false,
+              );
+              await sleep(6_000);
+              const s = await get(h);
+              await navigate(h, page("plain"));
+              if (fake.tasks.length || s.captcha?.solve)
+                throw new Error(
+                  `${fake.tasks.length} tasks; solve ${JSON.stringify(s.captcha?.solve)}`,
+                );
+              return "no task at the solver and no solve on the session after 6 s with a reCAPTCHA showing";
+            },
+          );
+
+        for (let i = 0; i < 12 && solving.length < c.nodes.length; i++) {
+          const { session } = await client.create({
+            waitForCapacityMs: 30_000,
+            idleTimeout: 600_000,
+            captcha: { solve: true },
+          });
+          const node = session.nodeId ?? "?";
+          if (
+            c.nodes.includes(node) &&
+            !solving.some((h) => h.session.nodeId === node)
+          )
+            solving.push(await hold(session, `node ${node} (solving)`));
+          else await client.stop(session.id).catch(() => undefined);
+        }
+
+        if (want(9))
+          await check(
+            "9",
+            "a session with captcha.solve gets a token into reCAPTCHA, hCaptcha and Turnstile on every node; the callback runs and the token verifies with the provider's test secret",
+            async () => {
+              const out: string[] = [];
+              const cases: [string, CaptchaProvider, string][] = [
+                ["recaptcha", "recaptcha", "g-recaptcha-response"],
+                ["recaptcha-explicit", "recaptcha", "g-recaptcha-response"],
+                ["hcaptcha", "hcaptcha", "h-captcha-response"],
+                ["turnstile-interactive", "turnstile", "cf-turnstile-response"],
+              ];
+              for (const h of solving) {
+                for (const [name, provider, field] of cases) {
+                  const before = (await client.eventList(h.session.id)).length;
+                  const t0 = Date.now();
+                  await navigate(h, page(name));
+                  const s = await until(
+                    `${h.label} ${name}: solved`,
+                    60_000,
+                    async () => {
+                      const s = await get(h);
+                      if (s.captcha?.solve?.status === "failed")
+                        throw new Error(
+                          `${h.label} ${name}: ${JSON.stringify(s.captcha.solve)}`,
+                        );
+                      return s.captcha?.solve?.status === "solved" ? s : false;
+                    },
+                  );
+                  if (s.captcha?.solve?.provider !== provider)
+                    throw new Error(
+                      `${h.label} ${name}: ${JSON.stringify(s.captcha)}`,
+                    );
+                  await until(
+                    `${h.label} ${name}: the page's callback`,
+                    5_000,
+                    async () => (await titleOf(h)).includes("solved"),
+                  );
+                  const token = await fieldValue(h, field);
+                  if (!token)
+                    throw new Error(`${h.label} ${name}: ${field} is empty`);
+                  const verified = await siteverify(provider, token);
+                  if (!verified)
+                    throw new Error(
+                      `${h.label} ${name}: the provider refused the token`,
+                    );
+                  const types = (await client.eventList(h.session.id))
+                    .slice(before)
+                    .map((e) => e.type)
+                    .filter((t) => t.startsWith("captcha."));
+                  if (
+                    types.join() !==
+                    "captcha.detected,captcha.solving,captcha.solved"
+                  )
+                    throw new Error(
+                      `${h.label} ${name}: events ${types.join()}`,
+                    );
+                  out.push(`${h.label} ${name} ${Date.now() - t0} ms`);
+                  await navigate(h, page("plain"));
+                  await until(
+                    `${h.label} ${name}: cleared`,
+                    15_000,
+                    async () => (await get(h)).captcha === null,
+                  );
+                }
+              }
+              const sent = fake.tasks.map((t) => new URL(t.websiteURL));
+              if (
+                sent.some((u) => u.search || u.hash || u.hostname !== pageHost)
+              )
+                throw new Error(
+                  `a task carried more than origin and path: ${fake.tasks.map((t) => t.websiteURL).join(" ")}`,
+                );
+              return `${out.join("; ")}; ${fake.tasks.length} tasks, each with the page's origin and path only`;
+            },
+          );
+
+        if (want(10))
+          await check(
+            "10",
+            "a solver failure and a provider the platform does not solve fall back to a person",
+            async () => {
+              const h = solving[0]!;
+              const out: string[] = [];
+              for (const [name, provider, reason] of [
+                ["solve-fail", "recaptcha", "solver_error"],
+                ["geetest", "geetest", "unsupported"],
+              ] as const) {
+                await navigate(h, page(name));
+                const s = await until(`${name}: failed`, 60_000, async () => {
+                  const s = await get(h);
+                  return s.captcha?.solve?.status === "failed" ? s : false;
+                });
+                if (
+                  s.captcha?.solve?.provider !== provider ||
+                  s.captcha.solve.reason !== reason
+                )
+                  throw new Error(`${name}: ${JSON.stringify(s.captcha)}`);
+                // The fallback still works: a control link can be minted for a person.
+                const t = await client.mintToken(h.session.id, {
+                  scope: "control",
+                });
+                if (!t.url) throw new Error(`${name}: no control link`);
+                out.push(`${name}: failed ${reason}`);
+                await navigate(h, page("plain"));
+                await until(
+                  `${name}: cleared`,
+                  15_000,
+                  async () => (await get(h)).captcha === null,
+                );
+              }
+              return `${out.join("; ")}; a control link was minted each time`;
+            },
+          );
+
+        if (want(11))
+          await check(
+            "11",
+            "the solver's key, site keys, page paths and tokens are in no log, row or node store",
+            async () => {
+              const key = readFileSync(c.solverKeyFile, "utf8").trim();
+              if (
+                fake.tasks.length &&
+                !fake.tasks.every((t) => t.clientKey === key)
+              )
+                throw new Error(
+                  "the solver got a key other than the configured one",
+                );
+              const secrets = [
+                key,
+                "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI",
+                "/test/captcha/",
+                ...Object.values(FAKE_TOKENS),
+              ];
+              const found: string[] = [];
+              const scan = (where: string, text: string) => {
+                for (const s of secrets)
+                  if (text.includes(s))
+                    found.push(`${where} (${s === key ? "the key" : s})`);
+              };
+              const containers = (
+                await sh("docker", [
+                  "ps",
+                  "--format",
+                  "{{.Names}}",
+                  "--filter",
+                  "name=kestrel-",
+                ])
+              )
+                .split("\n")
+                .filter((n) => /^kestrel-(api|egress|node|gateway)-/.test(n));
+              for (const name of containers)
+                scan(`${name} logs`, await sh("docker", ["logs", name]));
+              scan(
+                "postgres",
+                await sh("docker", [
+                  "exec",
+                  "kestrel-postgres-1",
+                  "psql",
+                  "-U",
+                  "kestrel",
+                  "-d",
+                  "kestrel",
+                  "-tAc",
+                  "select options::text from sessions union all select coalesce(captcha::text, '') from sessions union all select request_hash from idempotency_keys union all select data::text from session_events",
+                ]),
+              );
+              for (const node of c.nodes)
+                scan(
+                  `node ${node} store`,
+                  await sh("docker", [
+                    "exec",
+                    "-w",
+                    "/app/apps/node",
+                    `kestrel-node-${node}-1`,
+                    "node",
+                    "-e",
+                    `const D=require("better-sqlite3");const d=new D("/var/lib/kestrel/${node}/store.db",{readonly:true});console.log(JSON.stringify([d.prepare("select * from sessions").all(),d.prepare("select * from reports").all(),d.prepare("select * from captcha_solve").all()]))`,
+                  ]),
+                );
+              if (found.length)
+                throw new Error(`found in: ${found.join(", ")}`);
+              return `none in ${containers.length} containers' logs, Postgres or ${c.nodes.length} node stores`;
+            },
+          );
+      } finally {
+        for (const h of solving) {
+          h.cdp.close();
+          await client.stop(h.session.id).catch(() => undefined);
+        }
+        await fake.close();
+      }
+    }
   } finally {
     for (const h of held) {
       h.cdp.close();
@@ -394,5 +801,8 @@ export function captchaCheckConfigFromEnv(
     environment: base.environment,
     ...(env.ONLY ? { only: env.ONLY.split(",").map(Number) } : {}),
     log,
+    solve: env.SOLVE !== "0",
+    solverPort: Number(env.SOLVER_PORT ?? 7390),
+    solverKeyFile: env.SOLVER_KEY_FILE ?? "/secrets/captcha-solver.key",
   };
 }
