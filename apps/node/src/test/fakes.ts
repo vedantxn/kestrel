@@ -18,6 +18,8 @@ import {
   type RegisterResponse,
   type ReportsRequest,
   type ReportsResponse,
+  type ProbeRequest,
+  type ProbeResponse,
   type RuntimeCaptcha,
   type RuntimeHealth,
   type StartRequest,
@@ -31,7 +33,12 @@ import {
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NodeAgent, type AgentConfig, type ApiClient } from "../agent.js";
+import {
+  NodeAgent,
+  type AgentConfig,
+  type ApiClient,
+  type MicroVmHooks,
+} from "../agent.js";
 import type {
   ContainerInfo,
   DockerDriver,
@@ -245,6 +252,17 @@ export class FakeRuntime implements RuntimeClient {
     if (g.tamper) got = g.tamper(got);
     // What the real client checks before the agent sees it.
     return { meta: RecordingFragments.parse(got.meta), body: got.body };
+  }
+  /** What a probe VM's `/probe` answers: by default every target times out. */
+  probeAnswer: ((req: ProbeRequest) => ProbeResponse) | null = null;
+  async probe(address: string, _t: string, req: ProbeRequest) {
+    this.calls.push({ op: "probe", address });
+    if (!this.alive(address)) throw new Error("connection refused");
+    return (
+      this.probeAnswer?.(req) ?? {
+        results: req.targets.map((t) => ({ name: t.name, result: "timeout" })),
+      }
+    );
   }
 }
 
@@ -492,6 +510,8 @@ export function makeRig(
     skipBoot?: boolean;
     volumes?: boolean;
     log?: Logger;
+    harness?: boolean;
+    microvm?: MicroVmHooks;
   } = {},
 ): Rig {
   const clock = new FakeClock();
@@ -542,6 +562,8 @@ export function makeRig(
       failpoints,
       dockerSpec: SPEC,
       ...(volumes ? { volumes } : {}),
+      ...(opts.harness ? { harness: true } : {}),
+      ...(opts.microvm ? { microvm: opts.microvm } : {}),
     });
   const rig: Rig = {
     agent: build(),

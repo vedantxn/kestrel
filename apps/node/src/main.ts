@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   Failpoints,
   createLogger,
@@ -14,6 +15,7 @@ import { MicroVmDriver, RoutedDriver, exec } from "./microvm.js";
 import { UnixEgressClient } from "./egress-client.js";
 import { Firewall } from "./firewall.js";
 import { GatewayHub } from "./gateway-hub.js";
+import { createHarnessServer, listenHarness } from "./harness.js";
 import { createNodeServer } from "./http.js";
 import { HttpRuntimeClient } from "./runtime-client.js";
 import { Store } from "./store.js";
@@ -25,6 +27,12 @@ if (failpoints.anyActive)
   log.warn(
     { failpoints: failpoints.describe() },
     "FAILPOINTS ARE ACTIVE: this process will fail on purpose",
+  );
+
+const harness = env.KESTREL_HARNESS === "on";
+if (harness)
+  log.warn(
+    "THE HARNESS SURFACE IS ON: probe policies and probe VMs can be made (never in production)",
   );
 
 const secret = readFileSync(env.NODE_SECRET_FILE, "utf8").trim();
@@ -147,6 +155,8 @@ agent = new NodeAgent({
       return undefined;
     }
   },
+  ...(microvm ? { microvm } : {}),
+  harness,
   ...(env.RECORDING === "on"
     ? {
         volumes: new DockerVolumes(env.NODE_ID, {
@@ -191,6 +201,14 @@ const server = createNodeServer(agent, secret, log);
 await new Promise<void>((r) =>
   server.listen(env.LISTEN_PORT, env.LISTEN_HOST, r),
 );
+const harnessServer = harness
+  ? createHarnessServer(agent, secret, log)
+  : undefined;
+if (harnessServer)
+  await listenHarness(
+    harnessServer,
+    env.HARNESS_SOCKET ?? join(dirname(env.AGENT_SOCKET), "harness.sock"),
+  );
 
 // Register with the API, retrying until it is reachable. Sessions already running are unaffected by its absence.
 void (async () => {
@@ -249,6 +267,7 @@ async function shutdown(signal: string): Promise<void> {
   agent.stopLoops();
   await agent.idle();
   server.close();
+  harnessServer?.close();
   await hub.close();
   store.close();
   process.exit(0);

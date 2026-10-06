@@ -14,7 +14,8 @@ export interface NodeConfigForDocker {
   seccompProfile: string | null;
 }
 
-export type Role = "pool" | "session";
+/** A probe is the harness's (G-23): made only when the agent's harness surface is on. */
+export type Role = "pool" | "session" | "probe";
 export const MiB = 1024 * 1024;
 
 /**

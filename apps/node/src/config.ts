@@ -67,6 +67,12 @@ export const Env = z.object({
   GATEWAY_UID: z.coerce.number().int().optional(),
   GATEWAY_GID: z.coerce.number().int().optional(),
   KESTREL_FAILPOINTS: z.string().optional(),
+  /**
+   * The harness's probe controls (docs/harness.md, threat model G-23): "on" only while the
+   * harness runs. Served on HARNESS_SOCKET (default: harness.sock beside AGENT_SOCKET), mode 0600.
+   */
+  KESTREL_HARNESS: z.enum(["on", "off"]).default("off"),
+  HARNESS_SOCKET: z.string().optional(),
   LOG_LEVEL: z.string().default("info"),
 });
 export type Env = z.infer<typeof Env>;

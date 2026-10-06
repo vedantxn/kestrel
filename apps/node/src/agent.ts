@@ -5,7 +5,14 @@ import { open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import {
   CREATION_LABEL,
+  HARNESS_MAX_TTL_MS,
   LIMITS,
+  newId,
+  type MicroVmRuntimeView,
+  type ProbeLease,
+  type ProbeRequest,
+  type ProbeResponse,
+  type ProbeVm,
   NODE_PROTOCOL_VERSION,
   RECORDING_FILE,
   RECORDING_LIMITS,
@@ -147,6 +154,30 @@ export interface AgentDeps {
   volumes?: Volumes;
   /** The host's available memory in MiB, or undefined if unknown (deferred removal checks it). */
   memAvailableMb?: () => number | undefined;
+  /** A node whose browsers are microVMs (ADR 0017): its layout, and probe VMs for the harness. */
+  microvm?: MicroVmHooks;
+  /**
+   * KESTREL_HARNESS=on: the probe controls exist (docs/harness.md). Off by default, and never on
+   * in production; the invariant checker reports it on outside a harness run.
+   */
+  harness?: boolean;
+}
+
+export interface MicroVmHooks {
+  /** For `state()`: where each VM's jail, cgroup and namespace are, and what they should hold (G-25). */
+  describe(): MicroVmRuntimeView;
+  /** A probe VM: a clone of the template rekeyed as a probe, never a session (G-23). */
+  runProbe(spec: Docker.ContainerCreateOptions): Promise<ContainerInfo>;
+}
+
+/** A harness request the agent refuses: the status says why. */
+export class HarnessError extends Error {
+  constructor(
+    readonly status: 400 | 404 | 409,
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 /**
@@ -191,6 +222,16 @@ export class NodeAgent {
   private creating = new Set<string>();
   /** Containers being removed (or frozen for the reaper) whose record may already be gone. */
   private removing = new Set<string>();
+  /** The harness's probe addresses with a policy the agent keeps (G-23; in memory, so a restart drops them). */
+  private probeLeases = new Map<
+    string,
+    { sessionId: string; expiresAt: number }
+  >();
+  /** The harness's probe VMs, by id. */
+  private probeVms = new Map<
+    string,
+    { address: string; token: string; expiresAt: number }
+  >();
   /** Pooled browsers being created, not yet in the store: counted so a second refill cannot over-fill the pool. */
   private spawning = 0;
   /** Of `spawning`, how many are being made with a recording volume. */
@@ -311,6 +352,13 @@ export class NodeAgent {
     creating: string[];
     admitting: boolean;
     failpoints: Record<string, string>;
+    runtime: "docker" | "microvm";
+    microvm?: MicroVmRuntimeView;
+    harness: {
+      enabled: boolean;
+      probePolicies: ProbeLease[];
+      probeVms: ProbeVm[];
+    };
   } {
     return {
       sessions: this.store.allBindings().map((b) => ({
@@ -333,6 +381,17 @@ export class NodeAgent {
       creating: [...this.creating],
       admitting: this.firewallOk,
       failpoints: this.d.failpoints.describe(),
+      runtime: this.d.microvm ? "microvm" : "docker",
+      ...(this.d.microvm ? { microvm: this.d.microvm.describe() } : {}),
+      harness: {
+        enabled: this.d.harness === true,
+        probePolicies: [...this.probeLeases].map(([ip, l]) => ({ ip, ...l })),
+        probeVms: [...this.probeVms].map(([id, v]) => ({
+          id,
+          address: v.address,
+          expiresAt: v.expiresAt,
+        })),
+      },
     };
   }
 
@@ -822,6 +881,16 @@ export class NodeAgent {
         await this.removeContainer(info.id).catch(() => undefined);
         throw new Error("the container has no address on the session network");
       }
+      // A probe's lease on this address (the harness left it behind) must not give a new browser
+      // a way out before it is a session's (R15).
+      if (this.probeLeases.delete(info.address)) {
+        try {
+          await this.d.egress.clearPolicy(info.address);
+        } catch (e) {
+          await this.removeContainer(info.id).catch(() => undefined);
+          throw e;
+        }
+      }
       if (volume) this.volumeOf.set(info.id, volume);
       record(info, token);
       return { info, token };
@@ -1294,6 +1363,7 @@ export class NodeAgent {
   /** Enforce absolute deadlines on this agent's clock. The authority is outside the container. */
   tick(): void {
     const now = this.now();
+    this.expireProbes(now);
     for (const b of this.store.allBindings()) {
       // A teardown that failed (Docker would not remove the container) is not forgotten: try again, at most every 5 s.
       if (
@@ -1476,6 +1546,8 @@ export class NodeAgent {
     for (const b of this.store.allBindings())
       if (b.containerId) known.add(b.containerId);
     for (const q of this.reapQueue) known.add(q.id);
+    for (const id of this.probeVms.keys()) known.add(id);
+    for (const id of this.removing) known.add(id);
     for (const p of this.store.allPool()) {
       // The container list is a snapshot from the start of this pass: a pooled browser made since
       // then has a record but is not in it. Look again before treating it as gone, or its record
@@ -1620,11 +1692,30 @@ export class NodeAgent {
     for (const b of this.store.allBindings())
       if ((b.state === "ready" || b.state === "starting") && b.address)
         want.set(b.address, b);
+    // The harness's probes keep their policy (G-23), unless the address has become a browser's.
+    const browsers = new Set([
+      ...want.keys(),
+      ...this.store.allPool().map((p) => p.address),
+    ]);
+    for (const ip of [...this.probeLeases.keys()])
+      if (browsers.has(ip)) this.probeLeases.delete(ip);
+    const probes = new Map(this.probeLeases);
     // A pooled browser must have no policy (R15).
     for (const [ip, p] of have) {
       const b = want.get(ip);
+      const lease = probes.get(ip);
+      if (lease && p.sessionId === lease.sessionId) continue;
       if (!b || p.sessionId !== b.sessionId)
         await this.d.egress.clearPolicy(ip).catch(() => undefined);
+    }
+    for (const [ip, lease] of probes) {
+      const p = have.get(ip);
+      if (p && p.sessionId === lease.sessionId) continue;
+      if (this.probeLeases.get(ip)?.sessionId !== lease.sessionId) continue;
+      await this.d.egress.setPolicy(ip, {
+        sessionId: lease.sessionId as never,
+        connectionCap: LIMITS.egressConnectionCapPerSession,
+      });
     }
     for (const [ip, b] of want) {
       const p = have.get(ip);
@@ -1652,6 +1743,109 @@ export class NodeAgent {
       }
     }
     if (!health.policiesRestored) await this.d.egress.restored();
+  }
+
+  // --- the harness's probes (G-23; docs/harness.md) ---------------------------------------------
+
+  private requireHarness(): void {
+    if (this.d.harness !== true)
+      throw new HarnessError(404, "the harness surface is off");
+  }
+
+  /** An address on this node's bridge that no browser of the agent's holds. */
+  private probeAddressFree(ip: string): boolean {
+    const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})$/.exec(ip);
+    const bridge = this.d.dockerSpec.bridgeIp;
+    if (!m || ip === bridge || !bridge.startsWith(`${m[1]}.`)) return false;
+    const last = Number(m[2]);
+    if (last < 2 || last > 254) return false;
+    const held = new Set([
+      ...this.store.allBindings().map((b) => b.address),
+      ...this.store.allPool().map((p) => p.address),
+      ...[...this.probeVms.values()].map((v) => v.address),
+    ]);
+    return !held.has(ip);
+  }
+
+  /**
+   * Give a probe's address (the isolation suite's probe container) a policy that reconciliation
+   * keeps, for at most `ttlMs`. Without this the harness had to set the policy behind the agent's
+   * back, and the next reconciliation cleared it as unowned partway through the attacks.
+   */
+  async leaseProbePolicy(ip: string, ttlMs: number): Promise<ProbeLease> {
+    this.requireHarness();
+    if (!this.probeAddressFree(ip))
+      throw new HarnessError(
+        409,
+        `${ip} is not a free address on this node's bridge`,
+      );
+    const lease = {
+      sessionId: newId("ses") as string,
+      expiresAt: this.now() + Math.min(ttlMs, HARNESS_MAX_TTL_MS),
+    };
+    this.probeLeases.set(ip, lease);
+    await this.syncEgress();
+    if (this.probeLeases.get(ip)?.sessionId !== lease.sessionId)
+      throw new HarnessError(409, `${ip} was taken while it was leased`);
+    return { ip, ...lease };
+  }
+
+  /** The probe is done: its address has no way out again. */
+  async releaseProbePolicy(ip: string): Promise<boolean> {
+    this.requireHarness();
+    const had = this.probeLeases.delete(ip);
+    // Through the sync, so a sync already running cannot give the policy back after it is cleared.
+    await this.syncEgress();
+    return had;
+  }
+
+  /** A probe VM (microVM nodes only): a clone of the template with no policy, never a session. */
+  async makeProbeVm(ttlMs: number): Promise<ProbeVm> {
+    this.requireHarness();
+    const vm = this.d.microvm;
+    if (!vm) throw new HarnessError(409, "this node does not run microVMs");
+    const expiresAt = this.now() + Math.min(ttlMs, HARNESS_MAX_TTL_MS);
+    const { info } = await this.createContainer(
+      "probe",
+      false,
+      (made, token) =>
+        void this.probeVms.set(made.id, {
+          address: made.address as string,
+          token,
+          expiresAt,
+        }),
+      (spec) => vm.runProbe(spec),
+    );
+    return { id: info.id, address: info.address as string, expiresAt };
+  }
+
+  async runProbe(id: string, req: ProbeRequest): Promise<ProbeResponse> {
+    this.requireHarness();
+    const vm = this.probeVms.get(id);
+    if (!vm) throw new HarnessError(404, "no such probe VM");
+    return this.d.runtime.probe(vm.address, vm.token, req);
+  }
+
+  async removeProbeVm(id: string): Promise<boolean> {
+    this.requireHarness();
+    if (!this.probeVms.delete(id)) return false;
+    // Reported as retiring while it goes (removeContainer marks it before anything is awaited).
+    await this.removeContainer(id);
+    return true;
+  }
+
+  /** A harness that died leaves nothing behind for long: leases and probe VMs end at their deadline. */
+  private expireProbes(now: number): void {
+    for (const [ip, l] of this.probeLeases)
+      if (now >= l.expiresAt) {
+        this.probeLeases.delete(ip);
+        this.spawn(this.syncEgress());
+      }
+    for (const [id, v] of this.probeVms)
+      if (now >= v.expiresAt) {
+        this.probeVms.delete(id);
+        this.spawn(this.removeContainer(id));
+      }
   }
 
   // --- firewall (N3, G17) ---------------------------------------------------------------------

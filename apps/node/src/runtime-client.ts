@@ -6,9 +6,11 @@ import {
   RecordingFragments,
   RUNTIME_PATHS,
   RUNTIME_PORTS,
+  ProbeResponse,
   RuntimeCaptcha,
   RuntimeHealth,
   type ComputerRequest,
+  type ProbeRequest,
   type ConfigureRequest,
 } from "@kestrel/contracts";
 
@@ -64,6 +66,13 @@ export interface RuntimeClient {
     after: number,
     timeoutMs?: number,
   ): Promise<{ meta: RecordingFragments; body: Buffer }>;
+  /** G-23: raw connections from inside a probe VM (a clone rekeyed as a probe). */
+  probe(
+    address: string,
+    token: string,
+    req: ProbeRequest,
+    timeoutMs?: number,
+  ): Promise<ProbeResponse>;
 }
 
 const MAX_RESPONSE_BYTES = 16 * 1024;
@@ -286,6 +295,23 @@ export class HttpRuntimeClient implements RuntimeClient {
     if (body.length !== expected)
       throw new Error(`runtime ${path}: the body is not the size described`);
     return { meta, body };
+  probe(
+    address: string,
+    token: string,
+    req: ProbeRequest,
+    // The targets run at once, each for at most 10 s.
+    timeoutMs = 15_000,
+  ): Promise<ProbeResponse> {
+    return this.call(
+      address,
+      token,
+      "POST",
+      RUNTIME_PATHS.probe,
+      ProbeResponse,
+      req,
+      timeoutMs,
+      64 * 1024,
+    );
   }
 
   async stopRecording(
