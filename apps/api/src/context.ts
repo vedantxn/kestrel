@@ -26,7 +26,7 @@ export interface Ctx {
   monotonic: () => number;
   /**
    * The deployment's CAPTCHA solver, key included, or undefined. Sent to a node only in the start
-   * of a session created with `captcha.solve`; never stored or returned (T-56).
+   * of a session created with `captcha.solve`; never stored or returned (T-61).
    */
   captchaSolver?: CaptchaSolverConfig | undefined;
 }

@@ -24,7 +24,7 @@ import type { SolvableCaptchaProvider } from "@kestrel/contracts";
  *
  * Only a session that solves ever writes: `inject` fills the widget's response field from the
  * isolated world and calls the widget's callback in the page's own world, which the page can
- * see (that is the trade, documented as T-59).
+ * see (that is the trade, documented as T-64).
  */
 
 /** Commands the probe sends. Tests hold it to these (T-53). */
@@ -525,7 +525,7 @@ export class PageProber {
           ? v.fields
           : 0;
       const name = str(v.callback, 128);
-      // The page's own world: the one step a page can notice (T-59).
+      // The page's own world: the one step a page can notice (T-64).
       const g = await cdp.send<{ result?: { objectId?: unknown } }>(
         "Runtime.evaluate",
         { expression: "globalThis", returnByValue: false, silent: true },
