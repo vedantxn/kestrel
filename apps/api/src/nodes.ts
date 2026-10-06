@@ -303,5 +303,14 @@ async function applyReport(
     // The node ended it on its own (deadline, crash, OOM): record why, then finish.
     await beginStop(tx, uuid, r.endReason ?? "runtime_crash", at);
   }
-  await completeStop(ctx, tx, uuid, at, r.browserSeconds);
+  await completeStop(
+    ctx,
+    tx,
+    uuid,
+    at,
+    r.browserSeconds,
+    r.egressBytesUp !== undefined || r.egressBytesDown !== undefined
+      ? { up: r.egressBytesUp ?? 0, down: r.egressBytesDown ?? 0 }
+      : undefined,
+  );
 }

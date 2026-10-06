@@ -157,12 +157,29 @@ const createInput = {
       server: z.string().max(300),
       username: z.string().max(255).optional(),
       password: z.string().max(255).optional(),
+      provider: z
+        .enum(["generic", "brightdata", "oxylabs", "decodo", "iproyal"])
+        .optional(),
+      country: z.string().max(2).optional(),
+      region: z.string().max(64).optional(),
+      city: z.string().max(64).optional(),
+      sticky: z.string().max(32).optional(),
+      stickyMinutes: z.number().int().optional(),
     })
     .optional()
     .describe(
-      "Send the browser's traffic through your own HTTP proxy, e.g. {server: 'http://proxy.example.com:8080', username, password}. " +
-        "Only http:// proxies; the proxy resolves hostnames. The password is never returned, " +
-        "but anything passed to a tool stays in this conversation's transcript.",
+      "Send the browser's traffic through your own proxy, e.g. {server: 'http://proxy.example.com:8080', username, password}. " +
+        "server may be http://, https:// (TLS to the proxy) or socks5://; the proxy resolves hostnames. " +
+        "For a residential provider, set provider ('brightdata', 'oxylabs', 'decodo' or 'iproyal') and ask for an exit with " +
+        "country (ISO code such as 'DE'), optionally region, city and sticky (a session id that keeps the same exit address). " +
+        "The password is never returned, but anything passed to a tool stays in this conversation's transcript.",
+    ),
+  timezone: z
+    .string()
+    .max(64)
+    .optional()
+    .describe(
+      "The browser's IANA time zone, e.g. 'Europe/Berlin'. Defaults from the proxy's country where that country has one clear zone.",
     ),
   idempotencyKey: z
     .string()

@@ -184,3 +184,146 @@ describe("a session's upstream proxy through the API", () => {
     expect(lines.join("")).not.toContain(PASSWORD);
   });
 });
+
+describe("SOCKS5, TLS, provider adapters and time zones through the API", () => {
+  it("sends the adapted credentials and the scheme to the node, and stores what was asked", async () => {
+    const res = await env.create({
+      proxy: {
+        server: "socks5://gate.decodo.com:7000",
+        username: "acme",
+        password: PASSWORD,
+        provider: "decodo",
+        country: "DE",
+        city: "Munich",
+        sticky: "abc123",
+        stickyMinutes: 30,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.body).not.toContain(PASSWORD);
+    const s = Session.parse(res.json());
+    expect(s.options.proxy).toEqual({
+      server: "socks5://gate.decodo.com:7000",
+      username: "acme",
+      provider: "decodo",
+      country: "DE",
+      city: "Munich",
+      sticky: "abc123",
+      stickyMinutes: 30,
+    });
+    // Germany has one zone: it becomes the session's.
+    expect(s.options.timezone).toBe("Europe/Berlin");
+    const start = env.nodes.a!.startCalls[0]!;
+    expect(start.timezone).toBe("Europe/Berlin");
+    expect(start.network.upstream).toEqual({
+      scheme: "socks5",
+      host: "gate.decodo.com",
+      port: 7000,
+      username:
+        "user-acme-country-de-city-munich-session-abc123-sessionduration-30",
+      password: PASSWORD,
+    });
+    const [row] = await env.db.session.findMany();
+    expect(JSON.stringify(row?.options)).not.toContain(PASSWORD);
+  });
+
+  it("keeps an explicit time zone, and sets none for a country with several", async () => {
+    const tls = { server: "https://proxy.example.com:443" };
+    const a = Session.parse(
+      (
+        await env.create({
+          proxy: { ...tls, country: "DE" },
+          timezone: "America/Chicago",
+        })
+      ).json(),
+    );
+    expect(a.options.timezone).toBe("America/Chicago");
+    const b = Session.parse(
+      (await env.create({ proxy: { ...tls, country: "US" } })).json(),
+    );
+    expect(b.options.timezone).toBeUndefined();
+    expect(env.nodes.a!.startCalls[1]).not.toHaveProperty("timezone");
+    // Without a proxy, a time zone can still be asked for.
+    const c = Session.parse(
+      (await env.create({ timezone: "Asia/Tokyo" })).json(),
+    );
+    expect(c.options.timezone).toBe("Asia/Tokyo");
+  });
+
+  it.each([
+    [{ timezone: "Mars/Olympus" }, "timezone"],
+    [
+      { proxy: { server: "socks5://s.example.com:1080", username: "u" } },
+      "proxy.password",
+    ],
+    [
+      { proxy: { server: "http://p.example.com:8080", country: "XX" } },
+      "proxy.country",
+    ],
+    [
+      {
+        proxy: {
+          server: "http://p.example.com:8080",
+          username: "u",
+          country: "US",
+          city: "Austin",
+        },
+      },
+      "proxy.city",
+    ],
+  ])("refuses %j, naming %s", async (body, field) => {
+    const res = await env.create(body);
+    expect(res.statusCode).toBe(400);
+    expect(JSON.stringify(error(res))).toContain(field);
+    expect(env.nodes.a!.startCalls).toHaveLength(0);
+  });
+
+  it("refuses the start on a node from before time zones (T-47's rule: fail, never ignore)", async () => {
+    const node = env.nodes.a!;
+    const start = node.start.bind(node);
+    node.start = async (req: StartRequest) => {
+      if ("timezone" in req)
+        throw new NodeCallError("node a: bad response (400)", "bad_response");
+      return start(req);
+    };
+    const res = await env.create({ timezone: "Asia/Tokyo" });
+    expect(res.statusCode).toBe(500);
+    const [row] = await env.db.session.findMany();
+    expect(row?.endReason).toBe("node_refused");
+  });
+});
+
+describe("egress bytes per session (G-20)", () => {
+  it("are recorded from the node's removed report and shown in the session's usage", async () => {
+    const s = Session.parse((await env.create()).json());
+    expect(s.usage).toEqual({
+      browserSeconds: 0,
+      egressBytesUp: 0,
+      egressBytesDown: 0,
+    });
+    env.nodes.a!.teardown(s.id, "max_lifetime", 12, {
+      up: 34_567,
+      down: 9_876_543_210,
+    });
+    await env.nodes.a!.flushReports(env.internal);
+    const got = Session.parse(
+      (await env.call("GET", `/v1/sessions/${s.id}`)).json(),
+    );
+    expect(got.status).toBe("timed_out");
+    expect(got.usage).toEqual({
+      browserSeconds: 12,
+      egressBytesUp: 34_567,
+      egressBytesDown: 9_876_543_210,
+    });
+  });
+
+  it("are zero from a node from before byte counters", async () => {
+    const s = Session.parse((await env.create()).json());
+    env.nodes.a!.teardown(s.id, "max_lifetime", 3);
+    await env.nodes.a!.flushReports(env.internal);
+    const got = Session.parse(
+      (await env.call("GET", `/v1/sessions/${s.id}`)).json(),
+    );
+    expect(got.usage).toMatchObject({ egressBytesUp: 0, egressBytesDown: 0 });
+  });
+});

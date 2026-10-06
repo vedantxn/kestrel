@@ -8,6 +8,7 @@ import {
   TOKEN_TTL,
   buildConnectUrl,
   buildLiveViewUrl,
+  resolveTimezone,
   splitProxy,
   uuidToId,
   type UpstreamProxy,
@@ -101,8 +102,8 @@ export async function toApiSession(
         : null,
     usage: {
       browserSeconds: row.browserSeconds,
-      egressBytesUp: 0,
-      egressBytesDown: 0,
+      egressBytesUp: Number(row.egressBytesUp),
+      egressBytesDown: Number(row.egressBytesDown),
     },
     captcha: liveCaptcha(row),
   };
@@ -147,9 +148,12 @@ export async function createSession(
   // The proxy's password goes to the node in the start request and nowhere else: not into the
   // stored options, the idempotency hash or any response (T-45).
   const split = proxy ? splitProxy(proxy) : undefined;
+  // A proxy's exit country sets the default time zone, where the country has one clear zone.
+  const timezone = resolveTimezone(rest.timezone, proxy);
   const options = SessionOptions.parse({
     ...rest,
     ...(split ? { proxy: split.stored } : {}),
+    ...(timezone !== undefined ? { timezone } : {}),
   });
 
   let idemRow: string | undefined;
@@ -323,6 +327,9 @@ async function startOnNode(
       idleTimeoutMs: options.idleTimeout,
       stopOnDisconnect: options.stopOnDisconnect,
       recording: options.recording,
+      // Only when set: a node from before time zones then refuses the start (strict) rather
+      // than run the session in the wrong zone.
+      ...(options.timezone !== undefined ? { timezone: options.timezone } : {}),
     };
 
     let result;

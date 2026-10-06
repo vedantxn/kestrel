@@ -144,6 +144,8 @@ export async function completeStop(
   id: string,
   at: Date,
   browserSeconds?: number,
+  /** G-20: the egress gateway's counts, from the node's `removed` report. */
+  egressBytes?: { up: number; down: number },
 ): Promise<boolean> {
   const row = await tx.session.findUnique({
     where: { id },
@@ -161,7 +163,16 @@ export async function completeStop(
     id,
     from: ["stopping"],
     to: status,
-    data: { endedAt: at, browserSeconds: seconds },
+    data: {
+      endedAt: at,
+      browserSeconds: seconds,
+      ...(egressBytes
+        ? {
+            egressBytesUp: BigInt(egressBytes.up),
+            egressBytesDown: BigInt(egressBytes.down),
+          }
+        : {}),
+    },
     events: [{ type: "session.ended", data: { endReason: reason, status } }],
     at,
   });

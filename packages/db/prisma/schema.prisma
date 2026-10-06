@@ -133,6 +133,9 @@ model Session {
   startPath         String?        @map("start_path")
   deviceScaleFactor Float          @default(1) @map("device_scale_factor")
   browserSeconds    Float          @default(0) @map("browser_seconds")
+  /// Threat model G-20: bytes through the egress gateway, from the browser and to it, reported at removal.
+  egressBytesUp     BigInt         @default(0) @map("egress_bytes_up")
+  egressBytesDown   BigInt         @default(0) @map("egress_bytes_down")
   createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
   readyAt           DateTime?      @map("ready_at") @db.Timestamptz(3)
   stoppingAt        DateTime?      @map("stopping_at") @db.Timestamptz(3)

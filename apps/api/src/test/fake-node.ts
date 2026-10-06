@@ -115,6 +115,8 @@ export class FakeNode {
     sessionId: string,
     reason: EndReason | null,
     browserSeconds = 5,
+    /** G-20: the egress gateway's counts, as a node from after byte counters reports them. */
+    egressBytes?: { up: number; down: number },
   ): void {
     this.held.delete(sessionId);
     this.reports.push({
@@ -124,6 +126,12 @@ export class FakeNode {
       sessionId: sessionId as never,
       endReason: reason,
       browserSeconds,
+      ...(egressBytes
+        ? {
+            egressBytesUp: egressBytes.up,
+            egressBytesDown: egressBytes.down,
+          }
+        : {}),
     });
   }
 
