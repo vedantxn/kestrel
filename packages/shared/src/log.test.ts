@@ -40,6 +40,19 @@ describe("log redaction", () => {
     expect(out).toContain("[redacted]");
   });
 
+  it("never writes a CAPTCHA solver's key, at any depth a start request nests it", () => {
+    const { text, stream } = capture();
+    const log = createLogger("t", "info", stream);
+    const apiKey = "s0lver-key-xyz";
+    log.info({ apiKey }, "depth 0");
+    log.info({ solver: { apiKey } }, "1");
+    log.info({ captcha: { solver: { apiKey } } }, "2");
+    log.info({ req: { captcha: { solver: { apiKey } } } }, "3");
+    log.info({ body: { clientKey: apiKey } }, "service request");
+    log.info({ clientKey: apiKey }, "service request");
+    expect(text()).not.toContain(apiKey);
+  });
+
   it("never writes an upstream proxy's password or Proxy-Authorization", () => {
     const { text, stream } = capture();
     const log = createLogger("t", "info", stream);

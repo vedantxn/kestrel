@@ -22,7 +22,10 @@ import {
   type ReportsResponse,
   type ProbeRequest,
   type ProbeResponse,
+  type CaptchaInjectRequest,
   type RuntimeCaptcha,
+  type RuntimeCaptchaChallenges,
+  type RuntimeCaptchaInject,
   type RuntimeHealth,
   type StartRequest,
 } from "@kestrel/contracts";
@@ -38,6 +41,7 @@ import { join } from "node:path";
 import {
   NodeAgent,
   type AgentConfig,
+  type AgentDeps,
   type ApiClient,
   type MicroVmHooks,
 } from "../agent.js";
@@ -225,6 +229,36 @@ export class FakeRuntime implements RuntimeClient {
     const a = this.captchaAnswers.get(address);
     if (a === "fail") throw new Error("runtime /captcha: timed out");
     return a === undefined ? { watching: true, detections: [] } : a;
+  }
+  /** What `GET /captcha/challenges` answers per address: default none; null is an older runtimed. */
+  challengeAnswers = new Map<
+    string,
+    RuntimeCaptchaChallenges | null | "fail"
+  >();
+  async captchaChallenges(
+    address: string,
+  ): Promise<RuntimeCaptchaChallenges | null> {
+    this.calls.push({ op: "captchaChallenges", address });
+    if (!this.alive(address)) throw new Error("connection refused");
+    const a = this.challengeAnswers.get(address);
+    if (a === "fail") throw new Error("runtime /captcha/challenges: timed out");
+    return a === undefined ? { challenges: [] } : a;
+  }
+  /** Tokens put into pages, and what `/captcha/inject` answers. */
+  injected: { address: string; req: CaptchaInjectRequest }[] = [];
+  injectAnswer: RuntimeCaptchaInject | null = {
+    result: "injected",
+    callback: true,
+  };
+  async captchaInject(
+    address: string,
+    _token: string,
+    req: CaptchaInjectRequest,
+  ): Promise<RuntimeCaptchaInject | null> {
+    this.calls.push({ op: "captchaInject", address });
+    if (!this.alive(address)) throw new Error("connection refused");
+    this.injected.push({ address, req });
+    return this.injectAnswer;
   }
   async stopRecording(address: string): Promise<void> {
     this.calls.push({ op: "stopRecording", address });
@@ -541,6 +575,7 @@ export function makeRig(
     log?: Logger;
     harness?: boolean;
     microvm?: MicroVmHooks;
+    solver?: AgentDeps["solver"];
   } = {},
 ): Rig {
   const clock = new FakeClock();
@@ -593,6 +628,7 @@ export function makeRig(
       ...(volumes ? { volumes } : {}),
       ...(opts.harness ? { harness: true } : {}),
       ...(opts.microvm ? { microvm: opts.microvm } : {}),
+      ...(opts.solver ? { solver: opts.solver } : {}),
     });
   const rig: Rig = {
     agent: build(),

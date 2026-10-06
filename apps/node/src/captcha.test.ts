@@ -1,5 +1,14 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { Report, RuntimeCaptcha } from "@kestrel/contracts";
+import {
+  CAPTCHA_SOLVE_LIMITS,
+  type CaptchaSolverConfig,
+  type Report,
+  type RuntimeCaptcha,
+  type RuntimeCaptchaChallenge,
+} from "@kestrel/contracts";
+import { solverUrlOk } from "./agent.js";
+import { SolverError, type SolveTask } from "./solver.js";
 import { Store } from "./store.js";
 import { bootWithPool, makeRig, startReq, type Rig } from "./test/fakes.js";
 
@@ -200,5 +209,270 @@ describe("CAPTCHA polling on the node", () => {
     r.clock.advance(1_000);
     await r.agent.pollCaptchas();
     expect(r.store.getBinding(id)!.idleAt).toBe(idleAt);
+  });
+});
+
+const KEY = "solver-secret-key-0123456789";
+const SITE_KEY = "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI";
+const challenge = (
+  over: Partial<RuntimeCaptchaChallenge> = {},
+): RuntimeCaptchaChallenge => ({
+  id: "0123456789abcdef",
+  provider: "recaptcha",
+  siteKey: SITE_KEY,
+  pageUrl: "https://shop.example/login",
+  host: "shop.example",
+  invisible: false,
+  ...over,
+});
+
+/** A solver that records what it was asked and answers from `next`. */
+class FakeSolver {
+  asked: { config: CaptchaSolverConfig; task: SolveTask }[] = [];
+  next: () => Promise<string> = async () => "03AF-solved_token";
+  make = (config: CaptchaSolverConfig) => ({
+    solve: (task: SolveTask) => {
+      this.asked.push({ config, task });
+      return this.next();
+    },
+  });
+}
+
+async function solving(
+  solver: FakeSolver,
+  config: CaptchaSolverConfig | null = { service: "2captcha", apiKey: KEY },
+) {
+  const r = makeRig({ poolTarget: 1 }, { solver: solver.make });
+  await bootWithPool(r);
+  const req = startReq(config ? { captcha: { solver: config } } : {});
+  await r.agent.start(req);
+  const b = r.store.getBinding(req.sessionId)!;
+  return { r, id: req.sessionId as string, address: b.address! };
+}
+
+describe("CAPTCHA solving on the node", () => {
+  it("asks the solver with the site key and page, puts the token in, and reports solving then solved", async () => {
+    const solver = new FakeSolver();
+    const { r, address } = await solving(solver);
+    expect(r.runtime.calls.some((c) => c.op === "configure")).toBe(true);
+    r.runtime.challengeAnswers.set(address, { challenges: [challenge()] });
+    r.runtime.captchaAnswers.set(
+      address,
+      showing(["recaptcha", "shop.example"]),
+    );
+    await r.agent.pollCaptchas();
+    await r.agent.idle();
+    expect(solver.asked).toEqual([
+      {
+        config: { service: "2captcha", apiKey: KEY },
+        task: {
+          provider: "recaptcha",
+          siteKey: SITE_KEY,
+          pageUrl: "https://shop.example/login",
+          invisible: false,
+        },
+      },
+    ]);
+    expect(r.runtime.injected).toEqual([
+      { address, req: { id: "0123456789abcdef", token: "03AF-solved_token" } },
+    ]);
+    expect(captchaEvents(r)).toEqual([
+      {
+        type: "captcha.detected",
+        data: {
+          provider: "recaptcha",
+          host: "shop.example",
+          present: ["recaptcha"],
+        },
+      },
+      {
+        type: "captcha.solving",
+        data: { provider: "recaptcha", host: "shop.example" },
+      },
+      {
+        type: "captcha.solved",
+        data: {
+          provider: "recaptcha",
+          host: "shop.example",
+          durationMs: 0,
+          callback: true,
+        },
+      },
+    ]);
+    // Nothing the agent queued or stored carries the key, the site key, the page's path or the token.
+    const stored =
+      JSON.stringify(r.store.pendingReports(10_000)) +
+      JSON.stringify(r.api.allReports) +
+      JSON.stringify(r.store.allBindings());
+    for (const secret of [KEY, SITE_KEY, "/login", "03AF-solved_token"])
+      expect(stored).not.toContain(secret);
+    // The same widget, still present, is not solved again.
+    await r.agent.pollCaptchas();
+    await r.agent.idle();
+    expect(solver.asked).toHaveLength(1);
+  });
+
+  it("solves nothing, and asks runtimed for nothing, for a session that did not ask", async () => {
+    const solver = new FakeSolver();
+    const { r, address } = await solving(solver, null);
+    r.runtime.challengeAnswers.set(address, { challenges: [challenge()] });
+    r.runtime.captchaAnswers.set(
+      address,
+      showing(["recaptcha", "shop.example"]),
+    );
+    await r.agent.pollCaptchas();
+    await r.agent.idle();
+    expect(solver.asked).toEqual([]);
+    expect(r.runtime.calls.some((c) => c.op.startsWith("captchaC"))).toBe(
+      false,
+    );
+    expect(captchaEvents(r).map((e) => e.type)).toEqual(["captcha.detected"]);
+  });
+
+  it.each([
+    [
+      "a provider the platform does not solve",
+      "geetest",
+      undefined,
+      "unsupported",
+    ],
+    ["no details from runtimed", "recaptcha", { challenges: [] }, "no_details"],
+    ["an older runtimed", "recaptcha", null, "runtime_unsupported"],
+    [
+      "a page URL with a query",
+      "recaptcha",
+      {
+        challenges: [challenge({ pageUrl: "https://shop.example/login?s=1" })],
+      },
+      "no_details",
+    ],
+    [
+      "a page URL on another host",
+      "recaptcha",
+      { challenges: [challenge({ pageUrl: "https://evil.example/" })] },
+      "no_details",
+    ],
+  ] as const)(
+    "fails over to a person for %s",
+    async (_why, provider, answer, reason) => {
+      const solver = new FakeSolver();
+      const { r, address } = await solving(solver);
+      if (answer !== undefined)
+        r.runtime.challengeAnswers.set(address, answer as never);
+      r.runtime.captchaAnswers.set(
+        address,
+        showing([provider, "shop.example"]),
+      );
+      await r.agent.pollCaptchas();
+      await r.agent.idle();
+      expect(solver.asked).toEqual([]);
+      expect(captchaEvents(r).at(-1)).toEqual({
+        type: "captcha.failed",
+        data: { provider, host: "shop.example", reason },
+      });
+    },
+  );
+
+  it("reports the solver's failure, and an inject that found no widget", async () => {
+    const solver = new FakeSolver();
+    const { r, address } = await solving(solver);
+    r.runtime.challengeAnswers.set(address, { challenges: [challenge()] });
+    solver.next = () =>
+      Promise.reject(
+        new SolverError("solver_error", "createTask: ERROR_ZERO_BALANCE"),
+      );
+    r.runtime.captchaAnswers.set(
+      address,
+      showing(["recaptcha", "shop.example"]),
+    );
+    await r.agent.pollCaptchas();
+    await r.agent.idle();
+    expect(captchaEvents(r).at(-1)).toMatchObject({
+      type: "captcha.failed",
+      data: { reason: "solver_error" },
+    });
+    // It clears and comes back: tried again, and this time the widget is gone at inject.
+    r.runtime.captchaAnswers.set(address, showing());
+    await r.agent.pollCaptchas();
+    solver.next = async () => "tok";
+    r.runtime.injectAnswer = { result: "gone", callback: false };
+    r.runtime.captchaAnswers.set(
+      address,
+      showing(["recaptcha", "shop.example"]),
+    );
+    await r.agent.pollCaptchas();
+    await r.agent.idle();
+    expect(solver.asked).toHaveLength(2);
+    expect(captchaEvents(r).at(-1)).toMatchObject({
+      type: "captcha.failed",
+      data: { reason: "inject_failed" },
+    });
+  });
+
+  it("stops at the per-session budget of solves", async () => {
+    const solver = new FakeSolver();
+    const { r, address } = await solving(solver);
+    r.runtime.challengeAnswers.set(address, { challenges: [challenge()] });
+    for (let i = 0; i < CAPTCHA_SOLVE_LIMITS.maxSolvesPerSession + 3; i++) {
+      r.clock.advance(20_000); // past the event budget
+      r.runtime.captchaAnswers.set(
+        address,
+        showing(["recaptcha", "shop.example"]),
+      );
+      await r.agent.pollCaptchas();
+      await r.agent.idle();
+      r.clock.advance(20_000);
+      r.runtime.captchaAnswers.set(address, showing());
+      await r.agent.pollCaptchas();
+    }
+    expect(solver.asked).toHaveLength(CAPTCHA_SOLVE_LIMITS.maxSolvesPerSession);
+    expect(
+      captchaEvents(r)
+        .filter((e) => e.type === "captcha.failed")
+        .at(-1),
+    ).toMatchObject({
+      data: { reason: "budget" },
+    });
+  });
+
+  it("after an agent restart, knows a session asked to solve but has no key: no_solver", async () => {
+    const solver = new FakeSolver();
+    const { r, address } = await solving(solver);
+    r.restart();
+    await r.agent.boot();
+    r.runtime.challengeAnswers.set(address, { challenges: [challenge()] });
+    r.runtime.captchaAnswers.set(
+      address,
+      showing(["recaptcha", "shop.example"]),
+    );
+    await r.agent.pollCaptchas();
+    await r.agent.idle();
+    expect(solver.asked).toEqual([]);
+    expect(captchaEvents(r).at(-1)).toMatchObject({
+      type: "captcha.failed",
+      data: { reason: "no_solver" },
+    });
+    // The store never held the key.
+    expect(readFileSync(r.dbPath).includes(KEY)).toBe(false);
+  });
+});
+
+describe("solverUrlOk", () => {
+  it("lets only an origin and path on the reported host go to a solver", () => {
+    expect(solverUrlOk("https://shop.example/login", "shop.example")).toBe(
+      true,
+    );
+    expect(solverUrlOk("http://localhost:8000/a.html", "localhost")).toBe(true);
+    expect(solverUrlOk("https://shop.example/login", null)).toBe(true);
+    for (const [url, host] of [
+      ["https://shop.example/login?x=1", "shop.example"],
+      ["https://shop.example/login#f", "shop.example"],
+      ["https://u:p@shop.example/", "shop.example"],
+      ["https://other.example/", "shop.example"],
+      ["file:///etc/passwd", null],
+      ["javascript:alert(1)", null],
+      ["https://shop.example/a b", "shop.example"],
+    ] as const)
+      expect(solverUrlOk(url, host)).toBe(false);
   });
 });

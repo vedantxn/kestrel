@@ -1,4 +1,7 @@
 import {
+  RuntimeCaptchaChallenges,
+  RuntimeCaptchaInject,
+  type CaptchaInjectRequest,
   ComputerResponse,
   ConfigureResponse,
   RECORDING_FRAGMENTS_HEADER,
@@ -48,6 +51,22 @@ export interface RuntimeClient {
     token: string,
     timeoutMs?: number,
   ): Promise<RuntimeCaptcha | null>;
+  /**
+   * What a solver needs (sessions configured with `captchaSolve`). Null when the browser's
+   * `runtimed` predates solving (it answers 404).
+   */
+  captchaChallenges(
+    address: string,
+    token: string,
+    timeoutMs?: number,
+  ): Promise<RuntimeCaptchaChallenges | null>;
+  /** Put a solver's token into the page. Null when the `runtimed` predates solving. */
+  captchaInject(
+    address: string,
+    token: string,
+    req: CaptchaInjectRequest,
+    timeoutMs?: number,
+  ): Promise<RuntimeCaptchaInject | null>;
   /** W3: let the recorder write its last fragment before the container is removed. */
   stopRecording(
     address: string,
@@ -184,6 +203,51 @@ export class HttpRuntimeClient implements RuntimeClient {
         timeoutMs,
         MAX_RESPONSE_BYTES,
         true,
+      );
+    } catch (e) {
+      if (e instanceof RuntimeHttpError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  async captchaChallenges(
+    address: string,
+    token: string,
+    timeoutMs = 2000,
+  ): Promise<RuntimeCaptchaChallenges | null> {
+    try {
+      return await this.call(
+        address,
+        token,
+        "GET",
+        RUNTIME_PATHS.captchaChallenges,
+        RuntimeCaptchaChallenges,
+        undefined,
+        timeoutMs,
+        MAX_RESPONSE_BYTES,
+        true,
+      );
+    } catch (e) {
+      if (e instanceof RuntimeHttpError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  async captchaInject(
+    address: string,
+    token: string,
+    req: CaptchaInjectRequest,
+    timeoutMs = 10_000,
+  ): Promise<RuntimeCaptchaInject | null> {
+    try {
+      return await this.call(
+        address,
+        token,
+        "POST",
+        RUNTIME_PATHS.captchaInject,
+        RuntimeCaptchaInject,
+        req,
+        timeoutMs,
       );
     } catch (e) {
       if (e instanceof RuntimeHttpError && e.status === 404) return null;

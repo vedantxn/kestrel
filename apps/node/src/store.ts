@@ -88,6 +88,8 @@ CREATE TABLE IF NOT EXISTS egress_bytes (
   seen_up INTEGER NOT NULL,
   seen_down INTEGER NOT NULL
 );
+-- Sessions created with captcha.solve. The solver's key is never stored: only that solving was asked.
+CREATE TABLE IF NOT EXISTS captcha_solve (session_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS recordings (
   session_id TEXT PRIMARY KEY,
   volume TEXT NOT NULL,
@@ -260,6 +262,9 @@ export class Store {
     this.db
       .prepare("DELETE FROM egress_bytes WHERE session_id = ?")
       .run(sessionId);
+    this.db
+      .prepare("DELETE FROM captcha_solve WHERE session_id = ?")
+      .run(sessionId);
   }
 
   // --- egress bytes (threat model G-20) --------------------------------------------------------
@@ -330,6 +335,23 @@ export class Store {
   }
 
   // --- CAPTCHAs (docs/lld/captcha.md) --------------------------------------------------------
+
+  /** Remember that a session asked to solve CAPTCHAs (its solver's key stays in memory only). */
+  setSolves(sessionId: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO captcha_solve(session_id) VALUES(?) ON CONFLICT DO NOTHING",
+      )
+      .run(sessionId);
+  }
+
+  solves(sessionId: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 FROM captcha_solve WHERE session_id = ?")
+        .get(sessionId) !== undefined
+    );
+  }
 
   /** The providers last reported for a session. */
   getCaptcha(sessionId: string): CaptchaProvider[] {

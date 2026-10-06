@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   CREATION_LABEL,
   HARNESS_MAX_TTL_MS,
+  CAPTCHA_SOLVE_LIMITS,
   LIMITS,
   newId,
   type MicroVmRuntimeView,
@@ -19,8 +20,11 @@ import {
   RUNTIME_PORTS,
   TIMINGS,
   captchaSet,
+  isSolvable,
   type Attachment,
   type CaptchaProvider,
+  type CaptchaSolveFailure,
+  type CaptchaSolverConfig,
   type Report,
   type EgressPolicy,
   type StartNetwork,
@@ -60,6 +64,7 @@ import type { Firewall } from "./firewall.js";
 import type { GatewayHub } from "./gateway-hub.js";
 import { RecordingPuller } from "./recording-pull.js";
 import type { RuntimeClient } from "./runtime-client.js";
+import { SolverError, createSolver, type CaptchaSolver } from "./solver.js";
 import type { Binding, Store } from "./store.js";
 
 /** The agent's calls to the API's internal listener (C4's repair path). */
@@ -161,6 +166,8 @@ export interface AgentDeps {
    * in production; the invariant checker reports it on outside a harness run.
    */
   harness?: boolean;
+  /** A solver for a session's solver service (`docs/lld/captcha.md`); tests give a fake. */
+  solver?: (config: CaptchaSolverConfig) => CaptchaSolver;
 }
 
 export interface MicroVmHooks {
@@ -179,6 +186,9 @@ export class HarnessError extends Error {
     super(message);
   }
 }
+
+/** Solves running at once on this node: each holds a solver request and a browser call open. */
+const MAX_CONCURRENT_SOLVES = 8;
 
 /**
  * How long a start may wait for pooled browsers already on their way. A new container would join
@@ -553,6 +563,11 @@ export class NodeAgent {
       stopReason: null,
       startPath: null,
     });
+    if (req.captcha) {
+      // The key stays in memory: a restarted agent knows only that solving was asked (T-54).
+      this.store.setSolves(id);
+      this.solverConfigs.set(id, req.captcha.solver);
+    }
     await this.d.failpoints.hit("node.start.after_binding");
 
     const p = this.doStart(id, req, t0);
@@ -629,6 +644,7 @@ export class NodeAgent {
           recording,
           recordingSink: this.pulls ? "pull" : "volume",
           ...(req.timezone !== undefined ? { timezone: req.timezone } : {}),
+          captchaSolve: req.captcha !== undefined,
         });
         // The container is untrusted: check that what it reports is what was asked (A6).
         if (
@@ -2162,7 +2178,13 @@ export class NodeAgent {
           !this.captchaUnsupported.has(b.containerId),
       );
     const live = new Set(this.store.allBindings().map((b) => b.sessionId));
-    for (const m of [this.captchaFailures, this.captchaBudget])
+    for (const m of [
+      this.captchaFailures,
+      this.captchaBudget,
+      this.solverConfigs,
+      this.solveAttempted,
+      this.solvesUsed,
+    ])
       for (const id of m.keys()) if (!live.has(id)) m.delete(id);
     for (let i = 0; i < ready.length; i += 16)
       await Promise.all(ready.slice(i, i + 16).map((b) => this.pollCaptcha(b)));
@@ -2197,7 +2219,7 @@ export class NodeAgent {
       if (!hosts.has(d.provider)) hosts.set(d.provider, d.host);
     const next = captchaSet(hosts.keys());
     const prev = this.store.getCaptcha(id);
-    if (next.join() === prev.join()) return;
+    if (next.join() === prev.join()) return this.solveNew(b, hosts);
 
     const budget = this.captchaBudget.get(id) ?? { tokens: 6, at: now };
     budget.tokens = Math.min(6, budget.tokens + (now - budget.at) / 10_000);
@@ -2244,11 +2266,152 @@ export class NodeAgent {
     if (!this.store.recordCaptcha(id, next, events)) return;
     budget.tokens -= 1;
     void this.flushSoon();
+    this.solveNew(b, hosts);
+  }
+
+  // --- CAPTCHA solving (docs/lld/captcha.md, "Solving") ---------------------------------------
+
+  /** The solver service of each session that asked to solve, key included: memory only. */
+  private solverConfigs = new Map<string, CaptchaSolverConfig>();
+  /** Providers already tried while they stay present; one that clears may be tried again. */
+  private solveAttempted = new Map<string, Set<CaptchaProvider>>();
+  /** Solves asked for per session (the operator pays for each, T-55). */
+  private solvesUsed = new Map<string, number>();
+  private solving = new Set<string>();
+
+  /**
+   * For a session that solves, try each provider that is present (as last reported) and not yet
+   * tried, one at a time per session. The detection events go first: a solve starts only from
+   * what has been recorded.
+   */
+  private solveNew(
+    b: Binding,
+    hosts: Map<CaptchaProvider, string | null>,
+  ): void {
+    const id = b.sessionId;
+    if (!this.store.solves(id)) return;
+    const present = this.store.getCaptcha(id);
+    const tried = this.solveAttempted.get(id) ?? new Set<CaptchaProvider>();
+    for (const p of tried) if (!present.includes(p)) tried.delete(p);
+    this.solveAttempted.set(id, tried);
+    if (this.solving.has(id) || this.solving.size >= MAX_CONCURRENT_SOLVES)
+      return;
+    const provider = present.find((p) => !tried.has(p));
+    if (!provider) return;
+    tried.add(provider);
+    this.solving.add(id);
+    this.spawn(
+      this.solve(b, provider, hosts.get(provider) ?? null).finally(() =>
+        this.solving.delete(id),
+      ),
+    );
+  }
+
+  private async solve(
+    b: Binding,
+    provider: CaptchaProvider,
+    host: string | null,
+  ): Promise<void> {
+    const id = b.sessionId;
+    const at = () => new Date(this.now()).toISOString();
+    const event = (e: Extract<Report, { kind: "event" }>["event"]) => {
+      this.store.enqueueEvent((rid) => ({
+        id: rid,
+        at: at(),
+        kind: "event",
+        sessionId: id as never,
+        event: e,
+      }));
+      void this.flushSoon();
+    };
+    const failed = (reason: CaptchaSolveFailure) => {
+      // Logged without the page, site key, token or key: the provider and the reason only.
+      this.d.log.info(
+        { sessionId: id, provider, reason },
+        "captcha not solved",
+      );
+      event({ type: "captcha.failed", data: { provider, host, reason } });
+    };
+    if (!isSolvable(provider)) return failed("unsupported");
+    const config = this.solverConfigs.get(id);
+    if (!config) return failed("no_solver");
+    const used = this.solvesUsed.get(id) ?? 0;
+    if (used >= CAPTCHA_SOLVE_LIMITS.maxSolvesPerSession)
+      return failed("budget");
+    const address = b.address as string;
+    const token = b.controlToken as string;
+    const t0 = this.now();
+    const signal = AbortSignal.timeout(CAPTCHA_SOLVE_LIMITS.solveTimeoutMs);
+    try {
+      // runtimed is untrusted: its answer is schema-checked, and the URL checked again here.
+      const answer = await this.d.runtime.captchaChallenges(address, token);
+      if (answer === null) return failed("runtime_unsupported");
+      const c =
+        answer.challenges.find(
+          (x) => x.provider === provider && x.host === host,
+        ) ?? answer.challenges.find((x) => x.provider === provider);
+      if (!c || !solverUrlOk(c.pageUrl, c.host)) return failed("no_details");
+      this.solvesUsed.set(id, used + 1);
+      event({ type: "captcha.solving", data: { provider, host: c.host } });
+      const solver = (this.d.solver ?? createSolver)(config);
+      const solved = await solver.solve(
+        {
+          provider: c.provider,
+          siteKey: c.siteKey,
+          pageUrl: c.pageUrl,
+          invisible: c.invisible,
+          ...(c.action ? { action: c.action } : {}),
+          ...(c.cdata ? { cdata: c.cdata } : {}),
+        },
+        signal,
+      );
+      const r = await this.d.runtime.captchaInject(address, token, {
+        id: c.id,
+        token: solved,
+      });
+      if (r === null) return failed("runtime_unsupported");
+      if (r.result !== "injected") return failed("inject_failed");
+      event({
+        type: "captcha.solved",
+        data: {
+          provider: c.provider,
+          host: c.host,
+          durationMs: Math.max(0, Math.round(this.now() - t0)),
+          callback: r.callback,
+        },
+      });
+    } catch (e) {
+      if (e instanceof SolverError) return failed(e.kind);
+      if (signal.aborted) return failed("timeout");
+      // The browser went away or answered nonsense while solving.
+      return failed("inject_failed");
+    }
   }
 
   stopLoops(): void {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
+  }
+}
+
+/**
+ * What may go to a solver service: an http(s) URL with no credentials, query or fragment, on the
+ * host detection reported (runtimed chose it, so it is checked here too).
+ */
+export function solverUrlOk(url: string, host: string | null): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      (u.protocol === "https:" || u.protocol === "http:") &&
+      !u.username &&
+      !u.password &&
+      !u.search &&
+      !u.hash &&
+      url === `${u.origin}${u.pathname}` &&
+      (host === null || u.hostname === host)
+    );
+  } catch {
+    return false;
   }
 }
 
