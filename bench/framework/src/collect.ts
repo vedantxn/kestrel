@@ -1,8 +1,19 @@
 import { readFileSync } from "node:fs";
 import { request } from "node:http";
-import { uuidToId } from "@kestrel/contracts";
+import {
+  AGENT_STATE_PATH,
+  AgentState,
+  CREATION_LABEL,
+  uuidToId,
+} from "@kestrel/contracts";
 import { createPrisma } from "@kestrel/db";
 import Docker from "dockerode";
+import {
+  collectVmHosts,
+  readHugePages,
+  realHost,
+  type HostReader,
+} from "./collect-vm.js";
 import type {
   AgentView,
   DockerContainer,
@@ -85,6 +96,7 @@ export function mapContainer(i: Docker.ContainerInspectInfo): DockerContainer {
     id: i.Id,
     node: i.Config?.Labels?.["kestrel.node"] ?? null,
     role: i.Config?.Labels?.["kestrel.role"] ?? null,
+    creation: i.Config?.Labels?.[CREATION_LABEL] ?? null,
     running: Boolean(i.State?.Running),
     address:
       Object.values(i.NetworkSettings?.Networks ?? {})[0]?.IPAddress || null,
@@ -109,20 +121,40 @@ export function mapContainer(i: Docker.ContainerInspectInfo): DockerContainer {
   };
 }
 
+/** A node agent's account of itself (`GET /v1/state`), checked against its contract. */
+export async function agentState(
+  n: HostConfig["nodes"][number],
+): Promise<AgentState> {
+  const secret = readFileSync(n.secretFile, "utf8").trim();
+  return AgentState.parse(
+    await getJson(`http://127.0.0.1:${n.agentPort}${AGENT_STATE_PATH}`, {
+      authorization: `Bearer ${secret}`,
+    }),
+  );
+}
+
+export interface CollectOptions {
+  failpointsExpected?: boolean;
+  /** The agents' probe controls are on because this run turned them on. */
+  harnessExpected?: boolean;
+  /** Where microVM nodes are read from (tests replace it). */
+  host?: HostReader;
+}
+
 export async function collectSnapshot(
   cfg: HostConfig = DEFAULT_HOST,
-  opts: { failpointsExpected?: boolean } = {},
+  opts: CollectOptions = {},
 ): Promise<Snapshot> {
-  const docker = new Docker({
+  const dockerClient = new Docker({
     socketPath: cfg.dockerSocket ?? "/var/run/docker.sock",
   });
-  const listed = await docker.listContainers({
+  const listed = await dockerClient.listContainers({
     all: true,
     filters: { label: ["kestrel.node"] },
   });
   const containers = await Promise.all(
     listed.map(async (c) =>
-      mapContainer(await docker.getContainer(c.Id).inspect()),
+      mapContainer(await dockerClient.getContainer(c.Id).inspect()),
     ),
   );
 
@@ -168,33 +200,23 @@ export async function collectSnapshot(
   }))) as { failpoints?: Record<string, string> };
   failpoints.push({ process: "api", active: apiHealth.failpoints ?? {} });
 
+  const microvmNodes: Parameters<typeof collectVmHosts>[1] = [];
   for (const n of cfg.nodes) {
-    const secret = readFileSync(n.secretFile, "utf8").trim();
-    const st = (await getJson(`http://127.0.0.1:${n.agentPort}/v1/state`, {
-      authorization: `Bearer ${secret}`,
-    })) as {
-      sessions: {
-        sessionId: string;
-        state: string;
-        address: string | null;
-        containerId: string | null;
-      }[];
-      pool: { containerId: string; address: string }[];
-      retiring?: string[];
-      pendingReports: number;
-      slotsTotal: number;
-      poolHeadroom?: number;
-      failpoints: Record<string, string>;
-    };
+    const st = await agentState(n);
     agents.push({
       node: n.id,
       slotsTotal: st.slotsTotal,
-      poolHeadroom: st.poolHeadroom ?? 0,
+      poolHeadroom: st.poolHeadroom,
       sessions: st.sessions,
       pool: st.pool,
-      retiring: st.retiring ?? [],
+      retiring: st.retiring,
+      creating: st.creating,
       pendingReports: st.pendingReports,
+      runtime: st.runtime,
+      harness: st.harness,
     });
+    if (st.runtime === "microvm" && st.microvm)
+      microvmNodes.push({ node: n.id, layout: st.microvm });
     failpoints.push({ process: `node-${n.id}`, active: st.failpoints });
 
     const pol = (await unixGet(n.egressSocket, "/v1/policies")) as {
@@ -230,8 +252,52 @@ export async function collectSnapshot(
     firewall.push({ node: n.id, ok: fw.ok, problems: fw.problems });
   }
 
+  // Docker and the host were read before the agents: something made and removed in between is
+  // in the listing and in no agent's account. Look again before calling it leaked.
+  const host = opts.host ?? realHost;
+  const owned = new Set(
+    agents.flatMap((a) => [
+      ...a.sessions.map((b) => b.containerId),
+      ...a.pool.map((p) => p.containerId),
+      ...(a.retiring ?? []),
+      ...(a.harness?.probeVms ?? []).map((v) => v.id),
+    ]),
+  );
+  const creating = new Set(agents.flatMap((a) => a.creating ?? []));
+  const unowned = (id: string, creation: string | null | undefined) =>
+    !owned.has(id) && !(creation && creating.has(creation));
+  const docker: DockerContainer[] = [];
+  for (const c of containers) {
+    if (
+      unowned(c.id, c.creation) &&
+      !(await dockerClient
+        .getContainer(c.id)
+        .inspect()
+        .then(
+          () => true,
+          () => false,
+        ))
+    )
+      continue;
+    docker.push(c);
+  }
+  let vms = await collectVmHosts(host, microvmNodes);
+  if (vms.some((h) => h.vms.some((v) => unowned(v.id, v.meta?.creation)))) {
+    const again = new Set(
+      (await collectVmHosts(host, microvmNodes)).flatMap((h) =>
+        h.vms.map((v) => v.id),
+      ),
+    );
+    vms = vms.map((h) => ({
+      ...h,
+      vms: h.vms.filter(
+        (v) => !unowned(v.id, v.meta?.creation) || again.has(v.id),
+      ),
+    }));
+  }
+
   return {
-    docker: containers,
+    docker,
     api,
     agents,
     egress,
@@ -239,6 +305,9 @@ export async function collectSnapshot(
     firewall,
     failpoints,
     failpointsExpected: Boolean(opts.failpointsExpected),
+    harnessExpected: Boolean(opts.harnessExpected),
+    vms,
+    hugepages: microvmNodes.length ? await readHugePages(host) : null,
   };
 }
 
@@ -249,18 +318,13 @@ export async function collectSnapshot(
 export async function settledInvariants(
   check: (s: Snapshot) => { rule: string; detail: string }[],
   cfg: HostConfig = DEFAULT_HOST,
-  opts: { timeoutMs?: number; failpointsExpected?: boolean } = {},
+  opts: CollectOptions & { timeoutMs?: number } = {},
 ): Promise<{ ok: boolean; violations: { rule: string; detail: string }[] }> {
   const until = Date.now() + (opts.timeoutMs ?? 30_000);
   let v: { rule: string; detail: string }[];
   for (;;) {
     try {
-      v = check(
-        await collectSnapshot(
-          cfg,
-          opts.failpointsExpected ? { failpointsExpected: true } : {},
-        ),
-      );
+      v = check(await collectSnapshot(cfg, opts));
     } catch (e) {
       v = [
         {
