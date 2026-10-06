@@ -48,6 +48,11 @@ export const RUNTIME_PATHS = {
    * `runtimed` from before CAPTCHA detection answers 404, which means not supported.
    */
   captcha: "/captcha",
+  /**
+   * `POST` (`ProbeRequest`), only on a clone re-keyed with `probe: true` (the harness's probe VM,
+   * threat model G-23): raw connections from inside the guest. 404 on every other browser.
+   */
+  probe: "/probe",
 } as const;
 
 /** `GET /health`. A pooled container is "hot" only when this says `ready`. */
@@ -94,12 +99,62 @@ export type ConfigureResponse = z.infer<typeof ConfigureResponse>;
  * would share its JavaScript random state with every other clone.
  */
 export const RekeyRequest = z
-  .object({ token: z.string().regex(/^[0-9a-f]{32,128}$/) })
+  .object({
+    token: z.string().regex(/^[0-9a-f]{32,128}$/),
+    /**
+     * The harness's probe VM (G-23): this clone never becomes a session. It refuses `/configure`
+     * and serves `/probe`. Sent only by an agent whose harness surface is on (KESTREL_HARNESS=on,
+     * docs/harness.md); a runtimed from before it refuses the field.
+     */
+    probe: z.literal(true).optional(),
+  })
   .strict();
 export type RekeyRequest = z.infer<typeof RekeyRequest>;
 
 export const RekeyResponse = z.object({ ok: z.literal(true) });
 export type RekeyResponse = z.infer<typeof RekeyResponse>;
+
+/**
+ * `POST /probe` (G-23). Each target is one attempt from inside the guest, with no proxy: a TCP
+ * connection (optionally sending bytes and reading the first line of the answer), or a DNS query
+ * over UDP. What a probe reports is read back from a guest, so the agent and the harness validate
+ * it like any other answer from a browser.
+ */
+export const ProbeTarget = z.strictObject({
+  name: z.string().min(1).max(200),
+  /** An address literal: the probe never resolves a name. */
+  host: z
+    .string()
+    .max(64)
+    .regex(/^(\d{1,3}(\.\d{1,3}){3}|[0-9a-f:.]+)$/i),
+  port: z.number().int().min(1).max(65535),
+  proto: z.enum(["tcp", "udp-dns"]).default("tcp"),
+  /** TCP only: written once connected (latin1); the first line of the answer is returned. */
+  send: z.string().max(4096).optional(),
+  timeoutMs: z.number().int().min(100).max(10_000).default(3000),
+});
+export type ProbeTarget = z.input<typeof ProbeTarget>;
+
+export const ProbeRequest = z.strictObject({
+  targets: z.array(ProbeTarget).min(1).max(64),
+});
+export type ProbeRequest = z.input<typeof ProbeRequest>;
+
+export const ProbeResult = z.strictObject({
+  name: z.string().max(200),
+  /** "connected", "answered" (a DNS reply came back), "timeout", or an error code (ECONNREFUSED, ...). */
+  result: z.string().max(64),
+  /** The first line of what came back after `send`. */
+  head: z.string().max(512).optional(),
+  /** The `x-kestrel-egress-denied` reason, if the answer carried one. */
+  denied: z.string().max(64).nullable().optional(),
+});
+export type ProbeResult = z.infer<typeof ProbeResult>;
+
+export const ProbeResponse = z.strictObject({
+  results: z.array(ProbeResult).max(64),
+});
+export type ProbeResponse = z.infer<typeof ProbeResponse>;
 
 /**
  * The module interface (drafted). `runtimed` has a small core (launch and supervise Chrome and

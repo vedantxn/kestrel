@@ -4,6 +4,7 @@ export * from "./connect.js";
 export * from "./egress-control.js";
 export * from "./errors.js";
 export * from "./events.js";
+export * from "./harness.js";
 export * from "./host-pattern.js";
 export * from "./ids.js";
 export * from "./mp4.js";
@@ -17,5 +18,5 @@ export * from "./timings.js";
 export * from "./tokens.js";
 
 /** Bumped on any change to a frozen contract, with the affected consumers listed in the commit. */
-export const CONTRACTS_VERSION = "0.1.8";
+export const CONTRACTS_VERSION = "0.1.9";
 export * from "./computer.js";
