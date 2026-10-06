@@ -496,6 +496,7 @@ export class NodeAgent {
           sessionProof: proof as never,
           viewport: req.viewport,
           recording,
+          recordingSink: "volume",
         });
         // The container is untrusted: check that what it reports is what was asked (A6).
         if (

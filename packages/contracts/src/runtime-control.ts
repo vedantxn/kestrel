@@ -31,6 +31,13 @@ export const RUNTIME_PATHS = {
   /** W3: finish the recording so its last fragment is written; the agent calls it before removal. */
   recordingStop: "/recording/stop",
   /**
+   * W3 in a microVM (`recordingSink: "pull"`, docs/lld/microvm-recording.md). `GET ?after=<seq>`:
+   * the completed fragments after `seq`, oldest first, as one binary body described by the
+   * `x-kestrel-recording` header (`RecordingFragments`). Asking for `after=N` also acknowledges
+   * every fragment up to N, which the guest then frees. 404 when this browser has no pull sink.
+   */
+  recordingFragments: "/recording/fragments",
+  /**
    * V7. A browser restored from a snapshot starts with the template's control token, the same in
    * every clone: the agent replaces it with the container's own before anything else. Accepted
    * once, authenticated by the template token; the template token is refused from then on.
@@ -61,8 +68,15 @@ export type RuntimeHealth = z.infer<typeof RuntimeHealth>;
 export const ConfigureRequest = z.object({
   sessionProof: SessionProof,
   viewport: Viewport,
-  /** W3. Start recording the display once configured; needs the recording volume at RECORDING_DIR. */
+  /** W3. Start recording the display once configured. */
   recording: z.boolean().default(false),
+  /**
+   * Where the recording goes. `volume`: a file in the recording volume the agent mounted at
+   * RECORDING_DIR (a container). `pull`: fragments held in the guest's memory until the agent
+   * pulls them (`GET /recording/fragments`), for a microVM, which has no volume. A runtimed from
+   * before this field ignores it and records only to a volume.
+   */
+  recordingSink: z.enum(["volume", "pull"]).default("volume"),
 });
 export type ConfigureRequest = z.infer<typeof ConfigureRequest>;
 
@@ -114,4 +128,48 @@ export const RECORDING_LIMITS = {
   framerate: 10,
   /** Kept on the node this long after the session ends. */
   retentionMs: 24 * 60 * 60_000,
+  /**
+   * The pull sink (microVMs). A fragment, and so any one box in it, is at most this: the recorder
+   * cuts fragments at 4 MiB (`-frag_size`), and one frame more is well under the rest.
+   */
+  fragmentBytes: 8 * 1024 * 1024,
+  /** One `GET /recording/fragments` answer carries at most this many bytes, and fragments. */
+  pullBytes: 8 * 1024 * 1024,
+  pullFragments: 64,
+  /**
+   * Completed fragments the guest holds for the agent. Past this it stops reading the encoder,
+   * which then drops frames (the video freezes) instead of the guest running out of memory.
+   */
+  guestBufferBytes: 32 * 1024 * 1024,
 } as const;
+
+/** The response header describing a `GET /recording/fragments` body. */
+export const RECORDING_FRAGMENTS_HEADER = "x-kestrel-recording";
+
+/**
+ * What the `x-kestrel-recording` header holds: the fragments in the body, in order and back to
+ * back, and whether the recording has ended with nothing left after them. Hostile input to the
+ * agent, which also checks that the sequence numbers follow on from what it asked for, that the
+ * sizes add up to the body, and every fragment's boxes (`checkMp4Fragment`).
+ */
+export const RecordingFragments = z
+  .object({
+    state: z.enum(["idle", "recording", "stopped", "failed"]),
+    fragments: z
+      .array(
+        z
+          .object({
+            seq: z.number().int().positive(),
+            bytes: z
+              .number()
+              .int()
+              .positive()
+              .max(RECORDING_LIMITS.fragmentBytes),
+          })
+          .strict(),
+      )
+      .max(RECORDING_LIMITS.pullFragments),
+    done: z.boolean(),
+  })
+  .strict();
+export type RecordingFragments = z.infer<typeof RecordingFragments>;
