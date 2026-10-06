@@ -238,11 +238,16 @@ export const CaptchaToken = z
   .max(CAPTCHA_SOLVE_LIMITS.tokenMaxLength)
   .regex(/^[A-Za-z0-9._:+/=-]+$/, "a token");
 
-/** The solver services a deployment can use (`docs/lld/captcha.md`, "Solver services"). */
+/**
+ * The solver services a deployment can use (`docs/lld/captcha.md`, "Solver services"). All speak
+ * the `createTask` / `getTaskResult` protocol; `custom` is any service that speaks it with
+ * Anti-Captcha's task names, at a URL the operator gives.
+ */
 export const CAPTCHA_SOLVER_SERVICES = [
   "capsolver",
   "2captcha",
   "anticaptcha",
+  "custom",
 ] as const;
 export const CaptchaSolverService = z.enum(CAPTCHA_SOLVER_SERVICES);
 export type CaptchaSolverService = z.infer<typeof CaptchaSolverService>;
@@ -251,19 +256,24 @@ export type CaptchaSolverService = z.infer<typeof CaptchaSolverService>;
  * Internal (C4): the deployment's solver, sent to the node in a start that asked for solving.
  * The key is a secret: never stored by the API or the node, logged or returned (T-54).
  */
-export const CaptchaSolverConfig = z.strictObject({
-  service: CaptchaSolverService,
-  /** The service's API base, when the operator overrides the service's own. */
-  url: z
-    .url({ protocol: /^https?$/ })
-    .max(300)
-    .optional(),
-  apiKey: z
-    .string()
-    .min(1)
-    .max(256)
-    .regex(/^[\x21-\x7e]+$/, "printable ASCII"),
-});
+export const CaptchaSolverConfig = z
+  .strictObject({
+    service: CaptchaSolverService,
+    /** The service's API base: the operator's choice, required for `custom`. */
+    url: z
+      .url({ protocol: /^https?$/ })
+      .max(300)
+      .optional(),
+    apiKey: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[\x21-\x7e]+$/, "printable ASCII"),
+  })
+  .refine((c) => c.service !== "custom" || c.url !== undefined, {
+    message: "a custom solver service needs a url",
+    path: ["url"],
+  });
 export type CaptchaSolverConfig = z.infer<typeof CaptchaSolverConfig>;
 
 /** runtimed's handle for a challenge. */

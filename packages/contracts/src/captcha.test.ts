@@ -277,6 +277,7 @@ describe("CAPTCHA solving contracts", () => {
       { ...solver, apiKey: "has space" },
       { ...solver, url: "file:///etc/passwd" },
       { ...solver, extra: 1 },
+      { ...solver, service: "custom" },
     ])
       expect(
         StartRequest.safeParse({ ...base, captcha: { solver: bad } }).success,
