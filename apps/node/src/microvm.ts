@@ -761,11 +761,27 @@ export class MicroVmDriver implements DockerDriver {
         this.procs.kill(pid);
         for (let i = 0; i < 500 && this.procs.alive(pid); i++) await sleep(2);
       }
-      if (m?.handlerPid) this.procs.kill(m.handlerPid);
+      if (m?.handlerPid) {
+        this.procs.kill(m.handlerPid);
+        for (let i = 0; i < 500 && this.procs.alive(m.handlerPid); i++)
+          await sleep(2);
+      }
       await rm(join(this.jail, id), { recursive: true, force: true });
-      await rmdir(join("/sys/fs/cgroup", this.c.cgroupParent, id)).catch(
-        () => undefined,
-      );
+      // A cgroup cannot go while a process is still leaving it (EBUSY), and a kill is not an exit:
+      // without the retries a removed VM left its cgroup behind (found by the G-25 checker on AWS).
+      const cg = join("/sys/fs/cgroup", this.c.cgroupParent, id);
+      for (let i = 0; i < 50; i++) {
+        const err = await rmdir(cg).then(
+          () => null,
+          (e: NodeJS.ErrnoException) => e,
+        );
+        if (!err || err.code === "ENOENT") break;
+        if (err.code !== "EBUSY") {
+          this.d.log.warn({ vm: id, err: err.code }, "microvm: cgroup left");
+          break;
+        }
+        await sleep(20);
+      }
       if (m) await this.netns.release(m.octet);
       await rm(this.metaPath(id), { force: true });
     } finally {
