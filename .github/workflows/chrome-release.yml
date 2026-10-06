@@ -1,0 +1,64 @@
+# Threat model G-15, HLD 8.5: once a week, compare the pinned Chrome (runtime/CHROME_VERSION) with
+# Chrome's Stable release and keep one issue open while the pin is behind. The issue says whether
+# the gap crosses a security release and by when the image must be rebuilt (seven days after it).
+# The procedure is docs/runtime.md, "Updating Chrome". Only the built-in token is used.
+name: Chrome release check
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: chrome-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      # One file with no dependencies: Node 24 runs it from source, so no install is needed.
+      - name: Compare the pinned Chrome with Stable
+        run: node bench/framework/src/chrome-check.ts --markdown "$RUNNER_TEMP/chrome.md" --json "$RUNNER_TEMP/chrome.json"
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: chrome-release
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/chrome.json"
+          body="$RUNNER_TEMP/chrome.md"
+          behind=$(jq -r .behind "$report")
+          title=$(jq -r .title "$report")
+          {
+            echo
+            echo "_Updated by the [Chrome release check](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) on $(date -u +%F)._"
+          } >> "$body"
+          cat "$body" >> "$GITHUB_STEP_SUMMARY"
+          gh label create "$LABEL" --color B60205 --description "The pinned Chrome is behind Stable (G-15)" --force >/dev/null
+          issue=$(gh issue list --label "$LABEL" --state open --json number --jq '.[0].number // empty')
+          if [ "$behind" = true ]; then
+            if [ -z "$issue" ]; then
+              gh issue create --title "$title" --label "$LABEL" --body-file "$body"
+            else
+              old=$(gh issue view "$issue" --json title --jq .title)
+              gh issue edit "$issue" --title "$title" --body-file "$body" >/dev/null
+              # A comment notifies watchers when the situation changes, not on every run.
+              if [ "$old" != "$title" ]; then gh issue comment "$issue" --body "Now: $title"; fi
+              echo "updated #$issue"
+            fi
+          elif [ -n "$issue" ]; then
+            gh issue close "$issue" --comment "The pinned Chrome is current with Stable ($(jq -r .pinned "$report"))."
+          else
+            echo "up to date; no issue open"
+          fi

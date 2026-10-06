@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# How far the pinned Chrome (runtime/CHROME_VERSION) is behind Stable, and whether the gap crosses
+# a security release (threat model G-15, HLD 8.5). Reads only public endpoints; needs Node 24.
+#
+#   bin/chrome-check [--markdown FILE] [--json FILE]
+#
+# The procedure for updating Chrome is in docs/runtime.md, "Updating Chrome".
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+exec node "$ROOT/bench/framework/src/chrome-check.ts" "$@"
