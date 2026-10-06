@@ -123,6 +123,7 @@ export function fakeSession(overrides: Partial<Session> = {}): Session {
       network: {},
       recording: false,
       metadata: {},
+      captcha: { solve: false },
     },
     nodeId: "a",
     startPath: "hot",

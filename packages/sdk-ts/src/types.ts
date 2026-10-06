@@ -55,12 +55,50 @@ export type CaptchaProvider =
   | "turnstile"
   | "cloudflare_challenge"
   | "arkose"
-  | "datadome";
+  | "datadome"
+  | "perimeterx"
+  | "geetest"
+  | "aws_waf";
+
+/** Why a solve did not put a token in the page. Hand the CAPTCHA to a person. */
+export type CaptchaSolveFailure =
+  | "unsupported"
+  | "no_details"
+  | "solver_error"
+  | "solver_unreachable"
+  | "timeout"
+  | "inject_failed"
+  | "budget"
+  | "no_solver"
+  | "runtime_unsupported";
+
+/**
+ * The latest solve of a CAPTCHA still present (sessions created with `captcha.solve`). `solved`
+ * means a token was put into the page; the site may still refuse it.
+ */
+export interface CaptchaSolveState {
+  provider: CaptchaProvider;
+  status: "solving" | "solved" | "failed";
+  at: string;
+  reason: CaptchaSolveFailure | null;
+}
 
 export interface SessionCaptcha {
   providers: CaptchaProvider[];
   /** When the current, unbroken presence began. */
   since: string;
+  /** Sessions created with `captcha.solve`: the latest solve of a CAPTCHA still present. */
+  solve: CaptchaSolveState | null;
+}
+
+/**
+ * `solve: true` sends reCAPTCHA, hCaptcha and Turnstile widgets that show to the deployment's
+ * CAPTCHA solver service and puts the token into the page. Refused when the deployment has no
+ * solver. The page's URL (without query or fragment) and the widget's site key go to that third
+ * party, and the page can tell its callback was called by something other than the widget.
+ */
+export interface CaptchaOptions {
+  solve: boolean;
 }
 
 /**
@@ -123,6 +161,7 @@ export interface SessionOptions {
   proxy?: SessionProxy | undefined;
   /** The browser's IANA time zone, if one was set or derived from the proxy's exit country. */
   timezone?: string | undefined;
+  captcha: CaptchaOptions;
 }
 
 /** What `sessions.create` accepts. Every field is optional. */
@@ -139,6 +178,8 @@ export interface CreateSessionRequest {
   proxy?: ProxyConfig | undefined;
   /** The browser's IANA time zone, e.g. `Europe/Berlin`. Defaults from the proxy's `country` where it has one clear zone. */
   timezone?: string | undefined;
+  /** `{ solve: true }`: solve CAPTCHAs with the deployment's solver service. Default off. */
+  captcha?: { solve?: boolean | undefined } | undefined;
   /**
    * Repeating a create with the same key returns the original session. The SDK makes one
    * up for every call that does not pass one, so its own retries never create two sessions.
@@ -172,7 +213,8 @@ export interface Session {
   };
   /**
    * A CAPTCHA from a known provider is showing on a page, or null. It may already be solved: a
-   * solved checkbox stays until the page moves on. Hand a person a control live-view link.
+   * solved checkbox stays until the page moves on. Unless `captcha.solve` says `solving` or
+   * `solved`, hand a person a control live-view link.
    */
   captcha: SessionCaptcha | null;
 }
@@ -256,6 +298,31 @@ export type EventBody =
   | {
       type: "captcha.cleared";
       data: { provider: CaptchaProvider; present: CaptchaProvider[] };
+    }
+  | {
+      type: "captcha.solving";
+      data: {
+        provider: "recaptcha" | "hcaptcha" | "turnstile";
+        host: string | null;
+      };
+    }
+  | {
+      type: "captcha.solved";
+      data: {
+        provider: "recaptcha" | "hcaptcha" | "turnstile";
+        host: string | null;
+        durationMs: number;
+        /** Whether the widget's callback was found and called. */
+        callback: boolean;
+      };
+    }
+  | {
+      type: "captcha.failed";
+      data: {
+        provider: CaptchaProvider;
+        host: string | null;
+        reason: CaptchaSolveFailure;
+      };
     };
 
 /**

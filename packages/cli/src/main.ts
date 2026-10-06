@@ -36,6 +36,10 @@ Commands:
                   [--timezone Area/City]
                                 the browser's time zone; defaults from
                                 --proxy-country where it has one clear zone
+                  [--solve-captchas]
+                                send reCAPTCHA, hCaptcha and Turnstile to the
+                                deployment's solver service (its page URL and
+                                site key go to that third party)
   sessions list [--status s] [--limit n] [--cursor c]
   sessions get <id>
   sessions stop <id>
@@ -96,6 +100,7 @@ const COMMANDS: Record<string, Command> = {
       "proxy-sticky": { type: "string" },
       "proxy-sticky-minutes": { type: "string" },
       timezone: { type: "string" },
+      "solve-captchas": { type: "boolean" },
     },
     args: [],
     async run(k, _args, v, io) {
@@ -113,6 +118,7 @@ const COMMANDS: Record<string, Command> = {
         };
       req.proxy = proxy(v, io);
       if (typeof v.timezone === "string") req.timezone = v.timezone;
+      if (v["solve-captchas"] === true) req.captcha = { solve: true };
       const s = await k.sessions.create(req, { signal: io.signal });
       if (v.json) return json(io, s);
       io.stdout(details(s));
@@ -453,6 +459,7 @@ function details(s: Session): string {
         : "-",
     ],
     ["timezone", s.options.timezone ?? "-"],
+    ["solve captchas", s.options.captcha?.solve ? "yes" : "no"],
     ["browser seconds", String(s.usage.browserSeconds)],
     [
       "egress bytes",
@@ -461,7 +468,11 @@ function details(s: Session): string {
     [
       "captcha",
       s.captcha
-        ? `${s.captcha.providers.join(", ")} (since ${s.captcha.since})`
+        ? `${s.captcha.providers.join(", ")} (since ${s.captcha.since})` +
+          (s.captcha.solve
+            ? `; ${s.captcha.solve.provider} ${s.captcha.solve.status}` +
+              (s.captcha.solve.reason ? ` (${s.captcha.solve.reason})` : "")
+            : "")
         : "-",
     ],
   ];

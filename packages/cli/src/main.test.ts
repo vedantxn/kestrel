@@ -28,6 +28,7 @@ function session(overrides: Partial<Session> = {}): Session {
       network: {},
       recording: false,
       metadata: { run: "nightly" },
+      captcha: { solve: false },
     },
     nodeId: "a",
     startPath: "hot",
@@ -248,11 +249,30 @@ describe("sessions", () => {
         captcha: {
           providers: ["recaptcha", "turnstile"],
           since: "2026-10-05T10:00:00.000Z",
+          solve: null,
         },
       }),
     }));
     expect(r.stdout).toMatch(
       /^captcha\s+recaptcha, turnstile \(since 2026-10-05T10:00:00.000Z\)$/m,
+    );
+    const failed = await cli(["sessions", "get", ID], () => ({
+      status: 200,
+      body: session({
+        captcha: {
+          providers: ["geetest"],
+          since: "2026-10-05T10:00:00.000Z",
+          solve: {
+            provider: "geetest",
+            status: "failed",
+            at: "2026-10-05T10:00:01.000Z",
+            reason: "unsupported",
+          },
+        },
+      }),
+    }));
+    expect(failed.stdout).toMatch(
+      /^captcha\s+geetest \(since 2026-10-05T10:00:00.000Z\); geetest failed \(unsupported\)$/m,
     );
     const none = await cli(["sessions", "get", ID], () => ({
       status: 200,
@@ -345,6 +365,23 @@ describe("recording, live view and screenshots", () => {
     }));
     expect(r.calls[0]!.body).toMatchObject({ recording: true });
     expect(r.stdout).toMatch(/^recording\s+yes$/m);
+  });
+
+  it("create --solve-captchas asks for solving; without it, nothing is sent", async () => {
+    const r = await cli(["sessions", "create", "--solve-captchas"], () => ({
+      status: 201,
+      body: session({
+        options: { ...session().options, captcha: { solve: true } },
+      }),
+    }));
+    expect(r.calls[0]!.body).toMatchObject({ captcha: { solve: true } });
+    expect(r.stdout).toMatch(/^solve captchas\s+yes$/m);
+    const plain = await cli(["sessions", "create"], () => ({
+      status: 201,
+      body: session(),
+    }));
+    expect(plain.calls[0]!.body).not.toHaveProperty("captcha");
+    expect(plain.stdout).toMatch(/^solve captchas\s+no$/m);
   });
 
   it("live prints a view URL, or a control URL with --control and --ttl", async () => {
