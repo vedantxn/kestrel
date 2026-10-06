@@ -73,6 +73,7 @@ describe("session options", () => {
       network: {},
       metadata: {},
       recording: false,
+      captcha: { solve: false },
     });
   });
 

@@ -54,6 +54,13 @@ export const RUNTIME_PATHS = {
    * threat model G-23): raw connections from inside the guest. 404 on every other browser.
    */
   probe: "/probe",
+  /**
+   * `GET`: what a solver needs (`RuntimeCaptchaChallenges`), answered only once configured with
+   * `captchaSolve` (409 otherwise). An older `runtimed` answers 404.
+   */
+  captchaChallenges: "/captcha/challenges",
+  /** `POST` a `CaptchaInjectRequest`: put the token in the page (`RuntimeCaptchaInject`). */
+  captchaInject: "/captcha/inject",
 } as const;
 
 /** `GET /health`. A pooled container is "hot" only when this says `ready`. */
@@ -85,6 +92,11 @@ export const ConfigureRequest = z.object({
   recordingSink: z.enum(["volume", "pull"]).default("volume"),
   /** Override the time zone every page, frame and worker sees, for the session's life. */
   timezone: Timezone.optional(),
+  /**
+   * The session solves CAPTCHAs (`docs/lld/captcha.md`): runtimed answers `/captcha/challenges`
+   * and `/captcha/inject`. Without it, nothing of a page's URL or site keys leaves runtimed.
+   */
+  captchaSolve: z.boolean().default(false),
 });
 export type ConfigureRequest = z.infer<typeof ConfigureRequest>;
 

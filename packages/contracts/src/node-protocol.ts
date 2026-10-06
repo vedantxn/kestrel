@@ -2,6 +2,7 @@ import { z } from "zod";
 import { EventBody, NODE_REPORTABLE_EVENT_TYPES } from "./events.js";
 import { NodeId, ProjectId, SessionId } from "./ids.js";
 import { Timezone } from "./geo.js";
+import { CaptchaSolverConfig } from "./captcha.js";
 import { UpstreamProxy } from "./proxy.js";
 import { EndReason, NetworkPolicy, Viewport } from "./session.js";
 
@@ -65,6 +66,11 @@ export const StartRequest = z.strictObject({
    * before time zones refuses such a start (strict) rather than running it in the wrong zone.
    */
   timezone: Timezone.optional(),
+  /**
+   * Only for a session created with `captcha.solve`: the deployment's solver, key included. A
+   * node from before solving refuses the start rather than drop it. The node keeps it in memory.
+   */
+  captcha: z.strictObject({ solver: CaptchaSolverConfig }).optional(),
 });
 export type StartRequest = z.infer<typeof StartRequest>;
 

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { LIMITS } from "./timings.js";
 import { HostPattern } from "./host-pattern.js";
 import { NodeId, SessionId } from "./ids.js";
-import { SessionCaptcha } from "./captcha.js";
+import { CaptchaOptions, SessionCaptcha } from "./captcha.js";
 import { PlainText } from "./plain-text.js";
 import { Timezone } from "./geo.js";
 import { ProxyConfig, SessionProxy } from "./proxy.js";
@@ -176,6 +176,7 @@ export const SessionOptions = z
     timezone: Timezone.optional().describe(
       "The browser's time zone, as pages see it in `Date` and `Intl`. Defaults to the zone of the proxy's exit `country` where that country has one clear zone; otherwise the host's (UTC).",
     ),
+    captcha: CaptchaOptions.default({ solve: false }),
   })
   .meta({ id: "SessionOptions" });
 export type SessionOptions = z.infer<typeof SessionOptions>;

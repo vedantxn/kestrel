@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { CaptchaClearedData, CaptchaDetectedData } from "./captcha.js";
+import {
+  CaptchaClearedData,
+  CaptchaDetectedData,
+  CaptchaFailedData,
+  CaptchaSolvedData,
+  CaptchaSolvingData,
+} from "./captcha.js";
 import { EventId, NodeId, SessionId } from "./ids.js";
 import { EndReason, SessionStatus, StartPath } from "./session.js";
 
@@ -88,6 +94,21 @@ export const EventBody = z.discriminatedUnion("type", [
     type: z.literal("captcha.cleared"),
     data: CaptchaClearedData,
   }),
+  /** Sessions with `captcha.solve`: the deployment's solver service was asked. */
+  z.object({
+    type: z.literal("captcha.solving"),
+    data: CaptchaSolvingData,
+  }),
+  /** The token is in the page. The site may still refuse it. */
+  z.object({
+    type: z.literal("captcha.solved"),
+    data: CaptchaSolvedData,
+  }),
+  /** No token was put in: hand the CAPTCHA to a person. */
+  z.object({
+    type: z.literal("captcha.failed"),
+    data: CaptchaFailedData,
+  }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 export type EventType = EventBody["type"];
@@ -100,6 +121,9 @@ export const NODE_REPORTABLE_EVENT_TYPES = [
   "runtime.crashed",
   "captcha.detected",
   "captcha.cleared",
+  "captcha.solving",
+  "captcha.solved",
+  "captcha.failed",
 ] as const satisfies readonly EventType[];
 
 export const SessionEvent = z
