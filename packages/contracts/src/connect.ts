@@ -33,8 +33,18 @@ export const CONNECT_LIMITS = {
   pauseAtBufferedBytes: 8 * MiB,
   /** ...and resume when it drains below this. */
   resumeAtBufferedBytes: 1 * MiB,
-  /** Across all connections on a gateway; the connection that pushes it over is closed. */
+  /**
+   * Across all connections on a gateway. When a message would push it over, connections of
+   * sessions holding more than their share are closed first (4008); the arriving connection is
+   * closed only if its own session is over its share, or nothing else can give way.
+   */
   globalBufferBudgetBytes: 1024 * MiB,
+  /**
+   * A session's share of the global budget (threat model G-03). A session holding more than this
+   * stops being read on the side that sent, until it drains below half. A gateway that knows its
+   * node's slot count uses the global budget divided by the slots instead of this default.
+   */
+  sessionBufferShareBytes: 256 * MiB,
   /** A side paused this long is closed as too slow. */
   maxPausedMs: 30_000,
 } as const;
