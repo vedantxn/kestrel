@@ -46,6 +46,24 @@ const stop = async (r: Rig, sessionId: string) => {
 const ops = (r: Rig) => r.runtime.calls.map((c) => c.op);
 
 describe("recording in a microVM: the agent pulls fragments (W3)", () => {
+  it("removes pooled browsers with a volume, left from recording in containers, when it boots pulling", async () => {
+    const r = makeRig({ poolTarget: 2, recordingPool: 1 }, { volumes: true });
+    await bootWithPool(r);
+    expect(r.volumes!.vols.size).toBe(1);
+    r.config.recordingSink = "pull";
+    await r.restart().boot();
+    await r.agent.idle();
+    expect(r.volumes!.vols.size).toBe(0);
+    const left = r.store.allPool().map((p) => p.containerId);
+    for (const id of left)
+      expect(r.docker.specs.get(id)?.HostConfig?.Mounts ?? []).toEqual([]);
+    const { res, b } = await recording(r);
+    expect(res).toMatchObject({ result: "ready" });
+    expect(r.runtime.configured.get(b.address!)).toMatchObject({
+      recordingSink: "pull",
+    });
+  });
+
   it("needs no volume on any browser: a recording session takes a hot VM and is told to keep fragments for the agent", async () => {
     const r = vmRig({ poolTarget: 2, recordingPool: 1 });
     await bootWithPool(r);

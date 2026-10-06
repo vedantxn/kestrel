@@ -438,7 +438,23 @@ export class NodeAgent {
       this.c.poolTarget,
       this.pulls ? 0 : (this.c.recordingPool ?? (this.d.volumes ? 1 : 0)),
     );
-    const hot = this.store.allPool().filter((p) => p.state === "hot");
+    let hot = this.store.allPool().filter((p) => p.state === "hot");
+    // A node that pulls recordings out of VMs never pools a browser with a volume. One that has
+    // one is a container left from recording in containers (MICROVM_RECORDING=docker): a session
+    // given it would be told to keep fragments for a pull it may not know, so it goes.
+    if (this.pulls) {
+      for (const p of hot) {
+        const vol =
+          this.volumeOf.get(p.containerId) ??
+          (await this.d.docker.inspect(p.containerId))?.labels[
+            "kestrel.volume"
+          ];
+        if (!vol || !this.store.takePool(p.containerId)) continue;
+        this.volumeOf.delete(p.containerId);
+        await this.removeWithVolume(p.containerId, vol);
+      }
+      hot = this.store.allPool().filter((p) => p.state === "hot");
+    }
     for (const p of this.c.poolTarget === 0 ? hot : hot.slice(keep)) {
       if (!this.store.takePool(p.containerId)) continue;
       const vol = this.volumeOf.get(p.containerId);
