@@ -22,12 +22,74 @@ const SESSION = newId("ses");
 const PUBLIC = "93.184.216.34";
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Poll until `cond` holds. Tests wait for what they expect to happen, never for a fixed time, so a
+ * loaded machine makes them slower, not wrong.
+ */
+async function until(cond: () => boolean | Promise<boolean>, ms = 20_000) {
+  const end = Date.now() + ms;
+  while (!(await cond())) {
+    if (Date.now() > end) throw new Error("timed out waiting");
+    await wait(10);
+  }
+}
+
+/** Answers `.test` names. `hold()` makes every resolution wait until `release()`. */
 class SlowResolver implements Resolver {
-  delayMs = 0;
+  inFlight = 0;
+  maxInFlight = 0;
+  private gate: Promise<void> | null = null;
+  private open: (() => void) | null = null;
+  hold(): void {
+    this.gate = new Promise((r) => (this.open = r));
+  }
+  release(): void {
+    this.open?.();
+    this.gate = null;
+  }
   async resolve4(name: string) {
-    if (this.delayMs) await wait(this.delayMs);
+    this.inFlight++;
+    this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    try {
+      if (this.gate) await this.gate;
+    } finally {
+      this.inFlight--;
+    }
     return name.endsWith(".test") ? [PUBLIC] : [];
   }
+}
+
+/** Send a request and resolve with the status of the answer's head; the socket is then closed. */
+function head(port: number, bytes: string): Promise<number> {
+  return new Promise((resolve) => {
+    const s = connect({ host: "127.0.0.1", port });
+    let buf = "";
+    s.on("data", (d) => {
+      buf += d.toString("latin1");
+      if (buf.includes("\r\n\r\n")) {
+        s.destroy();
+        resolve(status(buf));
+      }
+    });
+    s.on("error", () => resolve(0));
+    s.on("close", () => resolve(status(buf) || 0));
+    s.write(bytes);
+  });
+}
+
+/** Open sockets that the proxy must close by itself; resolves when it has closed every one. */
+function allClosedByProxy(socks: Socket[]): Promise<void> {
+  return Promise.all(
+    socks.map(
+      (s) =>
+        new Promise<void>((r) => {
+          if (s.destroyed) return r();
+          s.once("close", () => r());
+          // Read whatever comes, so the proxy's close is seen.
+          s.resume();
+        }),
+    ),
+  ).then(() => undefined);
 }
 
 interface Rig {
@@ -119,7 +181,7 @@ async function makeRig(
 function raw(
   port: number,
   bytes: string,
-  ms = 1500,
+  ms = 15_000,
 ): Promise<{ text: string; closed: boolean }> {
   return new Promise((resolve) => {
     const s = connect({ host: "127.0.0.1", port });
@@ -174,37 +236,45 @@ describe("a hostile destination cannot hurt the gateway", () => {
     };
     const r = await raw(rig.port, getReq());
     expect(r.closed).toBe(true);
-    await wait(50);
-    expect(rig.policies.get("127.0.0.1")?.active).toBe(0);
+    await until(() => rig.policies.get("127.0.0.1")?.active === 0);
   });
 });
 
 describe("the connection cap counts requests in flight (N11)", () => {
   it("holds exactly the cap when many CONNECTs arrive at once, even while resolving", async () => {
     rig = await makeRig({ cap: 5 });
-    rig.resolver.delayMs = 100;
-    const results = await Promise.all(
-      Array.from(
-        { length: 60 },
-        () =>
-          new Promise<number>((resolve) => {
-            const s = connect({ host: "127.0.0.1", port: rig.port });
-            let buf = "";
-            s.on("data", (d) => {
-              buf += d.toString();
-              if (buf.includes("\r\n\r\n")) resolve(status(buf));
-            });
-            s.on("error", () => resolve(0));
-            s.write(
-              "CONNECT public.test:443 HTTP/1.1\r\nHost: public.test:443\r\n\r\n",
-            );
-            setTimeout(() => resolve(-1), 3000);
-          }),
-      ),
+    // Every resolution waits, so the five admitted are still resolving while the rest arrive.
+    rig.resolver.hold();
+    const results: number[] = [];
+    const socks: Socket[] = [];
+    for (let i = 0; i < 60; i++) {
+      const s = connect({ host: "127.0.0.1", port: rig.port });
+      socks.push(s);
+      let buf = "";
+      s.on("data", (d) => {
+        buf += d.toString();
+        if (buf.includes("\r\n\r\n") && !s.readableEnded) {
+          results.push(status(buf));
+          buf = "";
+        }
+      });
+      s.on("error", () => undefined);
+      s.write(
+        "CONNECT public.test:443 HTTP/1.1\r\nHost: public.test:443\r\n\r\n",
+      );
+    }
+    await until(
+      () =>
+        results.filter((s) => s === 503).length === 55 &&
+        rig.resolver.inFlight === 5,
     );
+    expect(rig.policies.get("127.0.0.1")?.active).toBe(5);
+    rig.resolver.release();
+    await until(() => results.length === 60);
     expect(results.filter((s) => s === 200)).toHaveLength(5);
     expect(results.filter((s) => s === 503)).toHaveLength(55);
     expect(rig.policies.get("127.0.0.1")?.active).toBe(5);
+    socks.forEach((s) => s.destroy());
   });
 
   it("gives the slot back when a tunnel closes, and when a dial fails", async () => {
@@ -218,8 +288,7 @@ describe("the connection cap counts requests in flight (N11)", () => {
     });
     expect(rig.policies.get("127.0.0.1")?.active).toBe(1);
     s.destroy();
-    await wait(80);
-    expect(rig.policies.get("127.0.0.1")?.active).toBe(0);
+    await until(() => rig.policies.get("127.0.0.1")?.active === 0);
     // a failing dial
     const failing = new EgressProxy({
       policies: rig.policies,
@@ -265,9 +334,8 @@ describe("sockets are not leaked", () => {
       );
       socks.push(s);
     }
-    await wait(300);
-    expect(await rig.open()).toBe(0);
-    socks.forEach((s) => s.destroy());
+    await allClosedByProxy(socks);
+    await until(async () => (await rig.open()) === 0);
   });
 
   it("a malformed request is answered and closed", async () => {
@@ -279,14 +347,12 @@ describe("sockets are not leaked", () => {
       s.write("FOO / HTTP/9\r\n\r\n");
       socks.push(s);
     }
-    await wait(300);
-    expect(await rig.open()).toBe(0);
-    socks.forEach((s) => s.destroy());
+    await allClosedByProxy(socks);
+    await until(async () => (await rig.open()) === 0);
   });
 
   it("drops connections that never finish a request, or never send one", async () => {
-    // Long enough that the first look cannot race the check that drops them.
-    rig = await makeRig({ preRequestTimeoutMs: 400 });
+    rig = await makeRig({ preRequestTimeoutMs: 150 });
     const socks: Socket[] = [];
     for (let i = 0; i < 30; i++) {
       const s = connect({ host: "127.0.0.1", port: rig.port });
@@ -297,11 +363,10 @@ describe("sockets are not leaked", () => {
         ); // headers never end
       socks.push(s);
     }
-    await wait(100);
-    expect(await rig.open()).toBeGreaterThan(0);
-    await wait(2200);
-    expect(await rig.open()).toBe(0);
-    socks.forEach((s) => s.destroy());
+    // The clients never close or finish: every socket closing is the proxy's doing.
+    await allClosedByProxy(socks);
+    await until(async () => (await rig.open()) === 0);
+    expect(rig.dialed).toBe(0);
   });
 });
 
@@ -332,25 +397,25 @@ describe("request smuggling (framing)", () => {
       "POST http://public.test/x HTTP/1.1\r\nHost: public.test\r\nContent-Length: 5\r\n\r\nhello",
     );
     expect(status(r.text)).toBe(200);
-    await wait(20);
-    expect(got).toContain("hello");
+    await until(() => got.includes("hello"));
   });
 });
 
 describe("the policy is checked again after every wait", () => {
   it("a decision made under a policy that was replaced while resolving is refused", async () => {
     rig = await makeRig();
-    rig.resolver.delayMs = 150;
+    rig.resolver.hold();
     const pending = raw(
       rig.port,
       "CONNECT public.test:443 HTTP/1.1\r\nHost: public.test:443\r\n\r\n",
     );
-    await wait(40);
+    await until(() => rig.resolver.inFlight === 1);
     rig.policies.delete("127.0.0.1");
     rig.policies.set("127.0.0.1", {
       sessionId: newId("ses") as never,
       connectionCap: 5,
     });
+    rig.resolver.release();
     const r = await pending;
     expect(status(r.text)).toBe(403);
     expect(rig.dialed).toBe(0);
@@ -359,18 +424,25 @@ describe("the policy is checked again after every wait", () => {
 
   it("limits how many names are resolved at once across all sessions", async () => {
     rig = await makeRig();
-    rig.resolver.delayMs = 300;
-    const results = await Promise.all(
-      Array.from({ length: 90 }, (_, i) =>
-        raw(
-          rig.port,
-          `CONNECT h${i}.test:443 HTTP/1.1\r\nHost: h${i}.test:443\r\n\r\n`,
-          1200,
-        ).then((r) => status(r.text)),
-      ),
+    // Hold every resolution: 64 wait in the resolver, the rest are refused at once.
+    rig.resolver.hold();
+    const results: number[] = [];
+    const all = Array.from({ length: 90 }, (_, i) =>
+      head(
+        rig.port,
+        `CONNECT h${i}.test:443 HTTP/1.1\r\nHost: h${i}.test:443\r\n\r\n`,
+      ).then((s) => results.push(s)),
     );
-    expect(results.filter((s) => s === 503).length).toBeGreaterThanOrEqual(20);
-    expect(results.filter((s) => s === 200).length).toBeGreaterThanOrEqual(60);
+    await until(
+      () =>
+        rig.resolver.inFlight === 64 &&
+        results.filter((s) => s === 503).length === 26,
+    );
+    expect(rig.resolver.maxInFlight).toBe(64);
+    rig.resolver.release();
+    await Promise.all(all);
+    expect(results.filter((s) => s === 200)).toHaveLength(64);
+    expect(results.filter((s) => s === 503)).toHaveLength(26);
   });
 });
 
