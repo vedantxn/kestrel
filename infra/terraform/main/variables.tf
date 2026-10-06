@@ -59,6 +59,12 @@ variable "runner_proxy_port" {
   default     = 0
 }
 
+variable "runner_proxy_port_count" {
+  description = "How many consecutive ports from runner_proxy_port the runner accepts: 1 for the HTTP test proxy, 5 for HTTP, SOCKS5 and two TLS test proxies (docs/lld/upstream-proxy.md)."
+  type        = number
+  default     = 1
+}
+
 variable "runner_instance_type" {
   description = "Fixed-performance, so results repeat (HLD 13.3: no burstable CPU credits)."
   type        = string

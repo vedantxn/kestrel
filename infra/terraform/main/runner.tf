@@ -23,13 +23,14 @@ resource "aws_vpc_security_group_egress_rule" "runner_all" {
 
 # The upstream-proxy check (docs/lld/upstream-proxy.md) runs a test proxy here: a separate
 # machine with its own public address, which the egress gateway's block list allows and which
-# is clearly not the host's. Only the host's Elastic IP may reach it, on that one port.
+# is clearly not the host's. Only the host's Elastic IP may reach it, on those ports (HTTP, SOCKS5
+# and TLS test proxies listen on consecutive ones).
 resource "aws_vpc_security_group_ingress_rule" "runner_proxy" {
   count             = var.enable_runner && var.runner_proxy_port > 0 ? 1 : 0
   security_group_id = aws_security_group.runner[0].id
   ip_protocol       = "tcp"
   from_port         = var.runner_proxy_port
-  to_port           = var.runner_proxy_port
+  to_port           = var.runner_proxy_port + var.runner_proxy_port_count - 1
   cidr_ipv4         = "${data.aws_eip.host.public_ip}/32"
 }
 
