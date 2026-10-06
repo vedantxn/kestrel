@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EventBody, NODE_REPORTABLE_EVENT_TYPES } from "./events.js";
 import { NodeId, ProjectId, SessionId } from "./ids.js";
+import { Timezone } from "./geo.js";
 import { UpstreamProxy } from "./proxy.js";
 import { EndReason, NetworkPolicy, Viewport } from "./session.js";
 
@@ -59,6 +60,11 @@ export const StartRequest = z.strictObject({
   stopOnDisconnect: z.boolean(),
   /** W3. Record the display; a node that cannot record starts the session anyway. */
   recording: z.boolean().default(false),
+  /**
+   * The browser's time zone (docs/lld/upstream-proxy.md). Sent only when set, so a node from
+   * before time zones refuses such a start (strict) rather than running it in the wrong zone.
+   */
+  timezone: Timezone.optional(),
 });
 export type StartRequest = z.infer<typeof StartRequest>;
 
@@ -150,6 +156,8 @@ export type HeartbeatResponse = z.infer<typeof HeartbeatResponse>;
 
 // --- reports (G15) ------------------------------------------------------------------------
 
+const EgressBytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
 const ReportCommon = {
   id: z.string().min(1).max(64),
   at: z.iso.datetime({ offset: true }),
@@ -178,6 +186,9 @@ export const Report = z.union([
     sessionId: SessionId,
     endReason: EndReason.nullable(),
     browserSeconds: z.number().nonnegative(),
+    /** G-20: bytes through the egress gateway, from the browser and to it. Absent from older nodes. */
+    egressBytesUp: EgressBytes.optional(),
+    egressBytesDown: EgressBytes.optional(),
   }),
 ]);
 export type Report = z.infer<typeof Report>;

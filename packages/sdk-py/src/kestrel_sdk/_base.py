@@ -76,6 +76,7 @@ def create_body(
     metadata: Mapping[str, str] | None,
     recording: bool | None,
     proxy: ProxyConfig | Mapping[str, Any] | None,
+    timezone: str | None,
     wait_for_capacity_ms: int | None,
     idempotency_key: str | None,
 ) -> dict[str, Any]:
@@ -91,6 +92,7 @@ def create_body(
         "metadata": dict(metadata) if metadata is not None else None,
         "recording": recording,
         "proxy": proxy.to_dict() if isinstance(proxy, ProxyConfig) else proxy,
+        "timezone": timezone,
         "waitForCapacityMs": wait_for_capacity_ms,
         "idempotencyKey": idempotency_key or str(uuid.uuid4()),
     }

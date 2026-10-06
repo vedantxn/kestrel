@@ -4,6 +4,7 @@ import { HostPattern } from "./host-pattern.js";
 import { NodeId, SessionId } from "./ids.js";
 import { SessionCaptcha } from "./captcha.js";
 import { PlainText } from "./plain-text.js";
+import { Timezone } from "./geo.js";
 import { ProxyConfig, SessionProxy } from "./proxy.js";
 
 // --- Status and end reason (HLD 8.1) ---------------------------------------------------
@@ -172,6 +173,9 @@ export const SessionOptions = z
       ),
     metadata: Metadata.default({}),
     proxy: SessionProxy.optional(),
+    timezone: Timezone.optional().describe(
+      "The browser's time zone, as pages see it in `Date` and `Intl`. Defaults to the zone of the proxy's exit `country` where that country has one clear zone; otherwise the host's (UTC).",
+    ),
   })
   .meta({ id: "SessionOptions" });
 export type SessionOptions = z.infer<typeof SessionOptions>;
@@ -206,6 +210,22 @@ export type StartPath = z.infer<typeof StartPath>;
 
 const IsoTime = z.iso.datetime({ offset: true });
 
+const Bytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+/** Filled in when the session ends. The byte counts close threat-model gap G-20. */
+export const SessionUsage = z
+  .object({
+    browserSeconds: z.number().nonnegative(),
+    egressBytesUp: Bytes.describe(
+      "Bytes the browser sent out through the egress gateway (request bodies and tunnelled TLS), counted outside the browser.",
+    ),
+    egressBytesDown: Bytes.describe(
+      "Bytes the browser received through the egress gateway.",
+    ),
+  })
+  .meta({ id: "SessionUsage" });
+export type SessionUsage = z.infer<typeof SessionUsage>;
+
 export const Session = z
   .object({
     id: SessionId,
@@ -225,7 +245,7 @@ export const Session = z
     options: SessionOptions,
     nodeId: NodeId.nullable(),
     startPath: StartPath.nullable(),
-    usage: z.object({ browserSeconds: z.number().nonnegative() }),
+    usage: SessionUsage,
     captcha: SessionCaptcha.nullable(),
   })
   .meta({ id: "Session" });

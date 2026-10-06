@@ -530,6 +530,9 @@ export class NodeAgent {
       return { result: "refused", reason: "stop already received" };
     if (this.sessionCount() >= this.c.slotsTotal)
       return { result: "refused", reason: "no slot" };
+    // Until time zones are applied, a start that asks for one is refused, not run in the wrong zone.
+    if (req.timezone !== undefined)
+      return { result: "refused", reason: "time zones are not supported" };
 
     const t0 = this.now();
     this.store.insertBinding({

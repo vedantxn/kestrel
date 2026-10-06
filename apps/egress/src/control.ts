@@ -156,6 +156,11 @@ export class ControlServer {
             return this.send(res, 400, {
               error: parsed.error.issues[0]?.message ?? "invalid policy",
             });
+          // Until TLS and SOCKS5 chaining land, such an upstream is refused, never chained as HTTP (T-47).
+          if (parsed.data.upstream?.scheme)
+            return this.send(res, 400, {
+              error: "this gateway chains http:// proxies only",
+            });
           this.policies.set(ip, parsed.data);
           this.metrics.policies.set(this.policies.size);
           // The acknowledgement tells the agent this gateway applied the upstream (T-47).

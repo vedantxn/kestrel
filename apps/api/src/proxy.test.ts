@@ -112,7 +112,7 @@ describe("a session's upstream proxy through the API", () => {
   });
 
   it.each([
-    [{ server: "socks5://p.example.com:1080" }, "proxy.server"],
+    [{ server: "socks4://p.example.com:1080" }, "proxy.server"],
     [{ server: "http://p.example.com:25" }, "proxy.server"],
     [{ server: "http://10.0.0.1" }, "proxy.server"],
     [

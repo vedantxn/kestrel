@@ -21,8 +21,9 @@ export const EGRESS_DENY_REASONS = [
   // Upstream proxies (docs/lld/upstream-proxy.md)
   "upstream_blocked", // the proxy's address is not public, is the host's own, or its port is a bad port
   "upstream_unreachable", // the proxy did not resolve, refused or timed out, or closed before replying
-  "upstream_auth_failed", // the proxy answered 407
-  "upstream_refused", // any other non-2xx, or a malformed or oversized reply
+  "upstream_auth_failed", // the proxy refused the credentials: HTTP 407, or SOCKS5 authentication failed
+  "upstream_refused", // any other non-2xx or SOCKS5 failure reply, or a malformed or oversized reply
+  "upstream_tls_failed", // https:// proxy: the TLS handshake failed, or the certificate did not verify for the proxy's name
 ] as const;
 export const EgressDenyReason = z.enum(EGRESS_DENY_REASONS);
 export type EgressDenyReason = z.infer<typeof EgressDenyReason>;

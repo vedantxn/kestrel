@@ -99,7 +99,11 @@ export async function toApiSession(
       row.startPath === "hot" || row.startPath === "cold"
         ? row.startPath
         : null,
-    usage: { browserSeconds: row.browserSeconds },
+    usage: {
+      browserSeconds: row.browserSeconds,
+      egressBytesUp: 0,
+      egressBytesDown: 0,
+    },
     captcha: liveCaptcha(row),
   };
 }

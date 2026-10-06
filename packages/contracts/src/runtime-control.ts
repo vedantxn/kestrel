@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SessionProof } from "./tokens.js";
+import { Timezone } from "./geo.js";
 import { Viewport } from "./session.js";
 
 /**
@@ -82,6 +83,8 @@ export const ConfigureRequest = z.object({
    * before this field ignores it and records only to a volume.
    */
   recordingSink: z.enum(["volume", "pull"]).default("volume"),
+  /** Override the time zone every page, frame and worker sees, for the session's life. */
+  timezone: Timezone.optional(),
 });
 export type ConfigureRequest = z.infer<typeof ConfigureRequest>;
 
@@ -90,6 +93,11 @@ export const ConfigureResponse = z.object({
   viewport: Viewport,
   deviceScaleFactor: z.number().positive(),
   chromeVersion: z.string(),
+  /**
+   * The time zone override in force, or null for none. A `runtimed` from before time zones
+   * leaves it out, and the agent then does not use it for a session that asked for one.
+   */
+  timezone: z.string().max(64).nullable().optional(),
 });
 export type ConfigureResponse = z.infer<typeof ConfigureResponse>;
 

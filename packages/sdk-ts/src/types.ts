@@ -63,21 +63,45 @@ export interface SessionCaptcha {
   since: string;
 }
 
+/**
+ * How to write `country`, `region`, `city` and `sticky` into the proxy's credentials.
+ * `generic` (the default) sends them unchanged.
+ */
+export type ProxyProvider =
+  "generic" | "brightdata" | "oxylabs" | "decodo" | "iproyal";
+
+/** Where a session's traffic should exit, in provider-neutral terms. */
+export interface ProxyExit {
+  provider?: ProxyProvider | undefined;
+  /** ISO 3166-1 alpha-2, uppercase. With `generic` it only declares where the proxy exits. */
+  country?: string | undefined;
+  /** Region or state, in the provider's spelling. Needs `country` and a provider. */
+  region?: string | undefined;
+  /** City, in the provider's spelling. Needs `country` and a provider. */
+  city?: string | undefined;
+  /** A sticky-session id (letters and digits): the same exit address while it is reused. */
+  sticky?: string | undefined;
+  /** How long a sticky exit is kept, where the provider supports it. */
+  stickyMinutes?: number | undefined;
+}
+
 /** A session's upstream proxy as stored and returned. The password is never returned. */
-export interface SessionProxy {
-  /** `http://host:port`. */
+export interface SessionProxy extends ProxyExit {
+  /** `http://host:port`, `https://host:port` or `socks5://host:port`. */
   server: string;
+  /** The username as given, before any provider adapter. */
   username?: string | undefined;
 }
 
 /**
- * Send a session's traffic through your own HTTP proxy. `http://` proxies only; the proxy
- * resolves hostnames. The password is write-only: the API never stores or returns it.
+ * Send a session's traffic through your own proxy: `http://`, `https://` (TLS to the proxy) or
+ * `socks5://`. The proxy resolves hostnames. The password is write-only: the API never stores
+ * or returns it.
  */
-export interface ProxyConfig {
-  /** `http://host:port`, with an explicit port and no credentials, path or query. */
+export interface ProxyConfig extends ProxyExit {
+  /** `scheme://host:port`, with an explicit port and no credentials, path or query. */
   server: string;
-  /** For HTTP Basic authentication to the proxy. */
+  /** For authentication to the proxy (HTTP Basic, or SOCKS5 username and password). */
   username?: string | undefined;
   password?: string | undefined;
 }
@@ -97,6 +121,8 @@ export interface SessionOptions {
   metadata: Record<string, string>;
   /** The session's upstream proxy, if it has one. */
   proxy?: SessionProxy | undefined;
+  /** The browser's IANA time zone, if one was set or derived from the proxy's exit country. */
+  timezone?: string | undefined;
 }
 
 /** What `sessions.create` accepts. Every field is optional. */
@@ -109,8 +135,10 @@ export interface CreateSessionRequest {
   /** Record the browser's display to video. Default false. */
   recording?: boolean | undefined;
   metadata?: Record<string, string> | undefined;
-  /** Send the session's traffic through your own HTTP proxy. */
+  /** Send the session's traffic through your own proxy. */
   proxy?: ProxyConfig | undefined;
+  /** The browser's IANA time zone, e.g. `Europe/Berlin`. Defaults from the proxy's `country` where it has one clear zone. */
+  timezone?: string | undefined;
   /**
    * Repeating a create with the same key returns the original session. The SDK makes one
    * up for every call that does not pass one, so its own retries never create two sessions.
@@ -134,7 +162,14 @@ export interface Session {
   options: SessionOptions;
   nodeId: string | null;
   startPath: "hot" | "cold" | null;
-  usage: { browserSeconds: number };
+  /** Filled in when the session ends. */
+  usage: {
+    browserSeconds: number;
+    /** Bytes the browser sent through the egress gateway. */
+    egressBytesUp: number;
+    /** Bytes the browser received through the egress gateway. */
+    egressBytesDown: number;
+  };
   /**
    * A CAPTCHA from a known provider is showing on a page, or null. It may already be solved: a
    * solved checkbox stays until the page moves on. Hand a person a control live-view link.
@@ -170,7 +205,8 @@ export type EgressDenyReason =
   | "upstream_blocked"
   | "upstream_unreachable"
   | "upstream_auth_failed"
-  | "upstream_refused";
+  | "upstream_refused"
+  | "upstream_tls_failed";
 
 /** An event's type and payload. */
 export type EventBody =

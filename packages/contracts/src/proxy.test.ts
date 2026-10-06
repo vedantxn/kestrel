@@ -17,22 +17,43 @@ const prj = "prj_01h0000000000000000000000a";
 describe("proxy server", () => {
   it("accepts http://host:port with a hostname or IPv4 address", () => {
     expect(parseProxyServer("http://proxy.example.com:3128")).toEqual({
+      scheme: "http",
       host: "proxy.example.com",
       port: 3128,
     });
     expect(parseProxyServer("http://1.2.3.4:8080")).toEqual({
+      scheme: "http",
       host: "1.2.3.4",
       port: 8080,
     });
     expect(parseProxyServer("HTTP://Proxy.Example.COM:22225/")).toEqual({
+      scheme: "http",
       host: "proxy.example.com",
       port: 22225,
     });
   });
 
+  it("accepts https:// (TLS to the proxy) and socks5://", () => {
+    expect(parseProxyServer("https://proxy.example.com:443")).toEqual({
+      scheme: "https",
+      host: "proxy.example.com",
+      port: 443,
+    });
+    expect(parseProxyServer("SOCKS5://1.2.3.4:1080")).toEqual({
+      scheme: "socks5",
+      host: "1.2.3.4",
+      port: 1080,
+    });
+  });
+
   it.each([
-    "https://proxy.example.com:3128",
-    "socks5://proxy.example.com:1080",
+    "socks4://proxy.example.com:1080",
+    "socks5h://proxy.example.com:1080",
+    "socks://proxy.example.com:1080",
+    "ftp://proxy.example.com:3128",
+    "https://proxy.example.com",
+    "socks5://proxy.example.com:25",
+    "socks5://user:pw@proxy.example.com:1080",
     "proxy.example.com:3128",
     "http://proxy.example.com",
     "http://proxy.example.com:0",
@@ -58,12 +79,14 @@ describe("proxy server", () => {
     expect(ProxyConfig.safeParse({ server }).success).toBe(false);
   });
 
-  it("says why a non-http scheme is refused", () => {
-    const r = ProxyConfig.safeParse({ server: "socks5://p.example.com:1080" });
+  it("says why an unsupported scheme is refused", () => {
+    const r = ProxyConfig.safeParse({ server: "socks4://p.example.com:1080" });
     expect(r.success).toBe(false);
     expect(JSON.stringify(r.error?.issues)).toContain(
-      "only http:// proxies are supported",
+      "only http://, https:// and socks5:// proxies are supported",
     );
+    const h = ProxyConfig.safeParse({ server: "socks5h://p.example.com:1080" });
+    expect(JSON.stringify(h.error?.issues)).toContain("use socks5://");
   });
 
   it("allows common proxy ports", () => {
@@ -177,6 +200,18 @@ describe("internal schemas fail closed (T-47)", () => {
     expect(EgressPolicy.safeParse({ sessionId: ses, extra: 1 }).success).toBe(
       false,
     );
+  });
+
+  it("a node or gateway from before TLS and SOCKS5 refuses those upstreams", () => {
+    // Its UpstreamProxy had no `scheme`, and was strict.
+    const before = UpstreamProxy.omit({ scheme: true });
+    expect(before.safeParse(upstream).success).toBe(true);
+    expect(before.safeParse({ ...upstream, scheme: "socks5" }).success).toBe(
+      false,
+    );
+    expect(
+      UpstreamProxy.safeParse({ ...upstream, scheme: "http" }).success,
+    ).toBe(false);
   });
 
   it("an upstream host must already be canonical", () => {

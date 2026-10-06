@@ -87,7 +87,7 @@ describe("SDK types", () => {
       options: C.SessionOptions.parse({}),
       nodeId: "a",
       startPath: "hot",
-      usage: { browserSeconds: 0 },
+      usage: { browserSeconds: 0, egressBytesUp: 0, egressBytesDown: 0 },
       captcha: null,
     });
     expect(parsed.options.timeout).toBe(C.LIMITS.defaultSessionTimeoutMs);

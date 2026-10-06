@@ -60,6 +60,21 @@ EventType = Literal[
     "captcha.cleared",
 ]
 
+EgressDenyReason = Literal[
+    "blocked_address",
+    "port_not_allowed",
+    "not_in_allow_list",
+    "in_deny_list",
+    "resolve_failed",
+    "connection_cap",
+    "no_policy",
+    "upstream_blocked",
+    "upstream_unreachable",
+    "upstream_auth_failed",
+    "upstream_refused",
+    "upstream_tls_failed",
+]
+
 CaptchaProvider = Literal[
     "recaptcha",
     "hcaptcha",
@@ -127,27 +142,58 @@ class NetworkPolicy:
         return out
 
 
+ProxyProvider = Literal["generic", "brightdata", "oxylabs", "decodo", "iproyal"]
+
+_EXIT_FIELDS = (
+    ("provider", "provider"),
+    ("country", "country"),
+    ("region", "region"),
+    ("city", "city"),
+    ("sticky", "sticky"),
+    ("sticky_minutes", "stickyMinutes"),
+)
+
+
 @dataclass(frozen=True)
 class SessionProxy:
-    """A session's upstream proxy as stored and returned. The password is never returned."""
+    """A session's upstream proxy as stored and returned: the username as given (before any
+    provider adapter) and the exit asked for. The password is never returned."""
 
     server: str
     username: str | None = None
+    provider: ProxyProvider | None = None
+    country: str | None = None
+    region: str | None = None
+    city: str | None = None
+    sticky: str | None = None
+    sticky_minutes: int | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> SessionProxy:
-        return cls(server=d["server"], username=d.get("username"))
+        return cls(
+            server=d["server"],
+            username=d.get("username"),
+            **{py: d.get(js) for py, js in _EXIT_FIELDS},
+        )
 
 
 @dataclass(frozen=True)
 class ProxyConfig:
-    """Send a session's traffic through your own HTTP proxy: ``server`` is
-    ``http://host:port``. The password is write-only (the API never stores or returns it) and
-    is kept out of ``repr()``, so it stays out of logs."""
+    """Send a session's traffic through your own proxy: ``server`` is ``http://host:port``,
+    ``https://host:port`` (TLS to the proxy) or ``socks5://host:port``. ``provider`` with
+    ``country``, ``region``, ``city`` and ``sticky`` asks a residential provider for an exit
+    in its own username format. The password is write-only (the API never stores or returns
+    it) and is kept out of ``repr()``, so it stays out of logs."""
 
     server: str
     username: str | None = None
     password: str | None = field(default=None, repr=False)
+    provider: ProxyProvider | None = None
+    country: str | None = None
+    region: str | None = None
+    city: str | None = None
+    sticky: str | None = None
+    sticky_minutes: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"server": self.server}
@@ -155,6 +201,9 @@ class ProxyConfig:
             out["username"] = self.username
         if self.password is not None:
             out["password"] = self.password
+        for py, js in _EXIT_FIELDS:
+            if getattr(self, py) is not None:
+                out[js] = getattr(self, py)
         return out
 
 
@@ -170,6 +219,7 @@ class SessionOptions:
     recording: bool
     metadata: dict[str, str]
     proxy: SessionProxy | None = None
+    timezone: str | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> SessionOptions:
@@ -182,12 +232,18 @@ class SessionOptions:
             recording=bool(d.get("recording", False)),
             metadata=dict(d.get("metadata") or {}),
             proxy=SessionProxy.from_dict(d["proxy"]) if d.get("proxy") else None,
+            timezone=d.get("timezone"),
         )
 
 
 @dataclass(frozen=True)
 class Usage:
+    """Filled in when the session ends. Bytes are counted at the egress gateway: ``up`` is
+    what the browser sent, ``down`` what it received."""
+
     browser_seconds: float
+    egress_bytes_up: int = 0
+    egress_bytes_down: int = 0
 
 
 @dataclass(frozen=True)
@@ -238,7 +294,11 @@ class Session:
             options=SessionOptions.from_dict(d["options"]),
             node_id=d.get("nodeId"),
             start_path=d.get("startPath"),
-            usage=Usage(browser_seconds=d["usage"]["browserSeconds"]),
+            usage=Usage(
+                browser_seconds=d["usage"]["browserSeconds"],
+                egress_bytes_up=d["usage"].get("egressBytesUp", 0),
+                egress_bytes_down=d["usage"].get("egressBytesDown", 0),
+            ),
             captcha=SessionCaptcha.from_dict(d["captcha"]) if d.get("captcha") else None,
             raw=dict(d),
         )

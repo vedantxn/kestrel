@@ -38,7 +38,9 @@ from kestrel_sdk._types import (
     SESSION_STATUSES,
     TERMINAL_STATUSES,
     CaptchaProvider,
+    EgressDenyReason,
     EndReason,
+    ProxyProvider,
     ErrorCode,
     EventType,
 )
@@ -79,7 +81,7 @@ def params(fn: Any, *skip: str) -> set[str]:
         (SessionProxy, SCHEMAS["SessionProxy"]),
         (SessionCaptcha, SCHEMAS["SessionCaptcha"]),
         (ProxyConfig, SCHEMAS["ProxyConfig"]),
-        (Usage, SCHEMAS["Session"]["properties"]["usage"]),
+        (Usage, SCHEMAS["SessionUsage"]),
         (SessionToken, SCHEMAS["SessionToken"]),
         (ComputerResponse, SCHEMAS["ComputerResponse"]),
     ],
@@ -106,6 +108,15 @@ def test_enums() -> None:
     assert set(get_args(ErrorCode)) == enum(SCHEMAS["Error"]["properties"]["code"])
     assert TERMINAL_STATUSES <= set(SESSION_STATUSES)
     assert set(get_args(CaptchaProvider)) == set(SCHEMAS["CaptchaProvider"]["enum"])
+    assert set(get_args(ProxyProvider)) == enum(SCHEMAS["ProxyConfig"]["properties"]["provider"])
+    denied = next(
+        v
+        for v in SCHEMAS["SessionEvent"]["oneOf"]
+        if v["properties"]["type"]["const"] == "egress.denied"
+    )
+    assert set(get_args(EgressDenyReason)) == enum(
+        denied["properties"]["data"]["properties"]["reason"]
+    )
 
 
 @pytest.mark.parametrize("resource", [Sessions, AsyncSessions])

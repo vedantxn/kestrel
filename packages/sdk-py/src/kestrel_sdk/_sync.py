@@ -98,6 +98,7 @@ class Sessions:
         metadata: Mapping[str, str] | None = None,
         recording: bool | None = None,
         proxy: ProxyConfig | Mapping[str, Any] | None = None,
+        timezone: str | None = None,
         wait_for_capacity_ms: int | None = None,
         idempotency_key: str | None = None,
     ) -> Session:
@@ -112,6 +113,7 @@ class Sessions:
             metadata=metadata,
             recording=recording,
             proxy=proxy,
+            timezone=timezone,
             wait_for_capacity_ms=wait_for_capacity_ms,
             idempotency_key=idempotency_key,
         )

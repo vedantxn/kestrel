@@ -20,6 +20,8 @@ export const EGRESS_PATHS = {
   denials: "/v1/denials", // GET ?after=<seq>
   /** POST: the agent has pushed every policy it holds; until then the gateway reports `policiesRestored: false`. */
   restored: "/v1/restored",
+  /** GET: bytes relayed per session since this process started (threat model G-20). */
+  usage: "/v1/usage",
 } as const;
 
 /**
@@ -94,3 +96,33 @@ export const DenialsResponse = z.object({
   denials: z.array(EgressDenial),
 });
 export type DenialsResponse = z.infer<typeof DenialsResponse>;
+
+/**
+ * Threat model G-20: bytes relayed for a session by this process, counted at the browser's side
+ * of the gateway. `up` is what the browser sent, `down` what it received. Counts start at zero
+ * when the process starts (a new `epoch`), so the agent adds them to what it already holds.
+ */
+const ByteCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+export const EgressSessionBytes = z.object({
+  sessionId: SessionId,
+  up: ByteCount,
+  down: ByteCount,
+});
+export type EgressSessionBytes = z.infer<typeof EgressSessionBytes>;
+
+/** `GET /v1/usage`: one entry per session with a policy. */
+export const EgressUsageResponse = z.object({
+  epoch: z.string().max(64),
+  sessions: z.array(EgressSessionBytes).max(10_000),
+});
+export type EgressUsageResponse = z.infer<typeof EgressUsageResponse>;
+
+/**
+ * The answer to `DELETE /v1/policies/{ip}` when a policy was cleared: its session's final
+ * counts, which the gateway then forgets. 204 when there was no policy, and from a gateway
+ * from before byte counters.
+ */
+export const EgressClearAck = EgressSessionBytes.extend({
+  epoch: z.string().max(64),
+});
+export type EgressClearAck = z.infer<typeof EgressClearAck>;
