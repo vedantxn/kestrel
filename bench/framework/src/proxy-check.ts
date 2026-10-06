@@ -12,7 +12,11 @@ import { SELF_HOST } from "./test-proxy.js";
  * `proxy` must exit from the test proxy's address (the runner's), on every node and over both
  * http and https; a wrong password, a blocked proxy address and an unreachable proxy must be
  * refused and reported, never answered from the host's own address; an egress gateway restart
- * must keep the proxy; and the password must appear nowhere it should not.
+ * must keep the proxy; and the password must appear nowhere it should not. Then the same for
+ * SOCKS5 and TLS-to-the-proxy test proxies (checks 9, 10, when given), that each provider
+ * adapter's credentials reach the proxy as documented (11), that pages, tabs and workers see the
+ * session's time zone on every node (12), and that a known download is counted in the session's
+ * usage (13, threat model G-20).
  */
 export interface ProxyCheckConfig {
   apiUrl: string;
@@ -27,6 +31,12 @@ export interface ProxyCheckConfig {
   hostIp: string;
   /** A proxy address nothing answers on (a port the runner's firewall drops). */
   unreachableProxy: string;
+  /** `socks5://<runner>:<port>`: the test proxy in MODE=socks5, same credentials. Check 9. */
+  socksProxyServer?: string | undefined;
+  /** `https://<name>:<port>`: the test proxy in MODE=https with a certificate the gateway trusts. Check 10. */
+  tlsProxyServer?: string | undefined;
+  /** `https://<runner ip>:<port>`: a TLS test proxy whose certificate the gateway must refuse. Check 10. */
+  untrustedTlsProxy?: string | undefined;
   nodes: string[];
   environment: Record<string, string | number>;
   only?: number[];
@@ -52,10 +62,12 @@ const sh = (cmd: string, args: string[], env?: NodeJS.ProcessEnv) =>
 async function open(
   client: KestrelClient,
   proxy: ProxyConfig | undefined,
+  extra: { timezone?: string } = {},
 ): Promise<{ session: Session; browser: Browser; page: Page }> {
   const { session } = await client.create({
     waitForCapacityMs: 30_000,
     ...(proxy ? { proxy } : {}),
+    ...extra,
   });
   let browser: Browser;
   try {
@@ -375,6 +387,226 @@ export async function runProxyCheck(c: ProxyCheckConfig): Promise<Report> {
       },
     );
 
+  /** A plain-HTTP page at the test proxy's own name: what the proxy saw (test-proxy.ts). */
+  const who = async (page: Page): Promise<Record<string, unknown>> => {
+    const res = await page.goto(`http://${SELF_HOST}/who`, { timeout: 30_000 });
+    const text = ((await page.textContent("body")) ?? "").trim();
+    if (!res || res.status() !== 200)
+      throw new Error(`/who: status ${res?.status()}: ${text.slice(0, 120)}`);
+    return JSON.parse(text) as Record<string, unknown>;
+  };
+
+  /** Exit from the runner on every node, over https and http, through `server`. */
+  const exitsEverywhere = async (
+    p: ProxyConfig,
+    via: string,
+  ): Promise<string> => {
+    const held: Awaited<ReturnType<typeof open>>[] = [];
+    const seen: string[] = [];
+    try {
+      for (let i = 0; i < 12 && c.nodes.some((n) => !seen.includes(n)); i++) {
+        const h = await open(client, p);
+        held.push(h);
+        const node = h.session.nodeId ?? "?";
+        if (seen.includes(node)) continue;
+        for (const scheme of ["https", "http"] as const) {
+          const r = await exitIp(h.page, scheme);
+          neverTheHost(r, `node ${node} over ${via}`);
+          if (!("ip" in r) || r.ip !== c.expectExitIp)
+            throw new Error(
+              `node ${node} ${scheme}: ${JSON.stringify(r)}, expected ${c.expectExitIp}`,
+            );
+        }
+        const w = await who(h.page);
+        if (w.via !== via)
+          throw new Error(`node ${node}: the proxy saw ${JSON.stringify(w)}`);
+        seen.push(node);
+      }
+      const missing = c.nodes.filter((n) => !seen.includes(n));
+      if (missing.length)
+        throw new Error(`no session landed on ${missing.join(", ")}`);
+      return `nodes ${seen.join(", ")}: https, http and plain-HTTP /who through ${via}`;
+    } finally {
+      for (const h of held) await close(client, h);
+    }
+  };
+
+  if (want(9))
+    await check(
+      "9",
+      "SOCKS5: sessions on every node exit from the proxy, a wrong password is refused and reported",
+      async () => {
+        if (!c.socksProxyServer) return "skipped: SOCKS_PROXY_SERVER not set";
+        const socks = { ...proxy, server: c.socksProxyServer };
+        const out = [await exitsEverywhere(socks, "socks5")];
+        const h = await open(client, { ...socks, password: wrongPassword });
+        try {
+          const r = await exitIp(h.page, "https", 15_000);
+          neverTheHost(r, "a wrong-password SOCKS5 session");
+          if ("ip" in r) throw new Error(`navigation succeeded: ${r.ip}`);
+          out.push(await denial(client, h.session.id, "upstream_auth_failed"));
+        } finally {
+          await close(client, h);
+        }
+        return out.join("; ");
+      },
+    );
+
+  if (want(10))
+    await check(
+      "10",
+      "TLS to the proxy: a trusted https:// proxy is used on every node; an untrusted one is refused, never bypassed",
+      async () => {
+        const out: string[] = [];
+        if (c.tlsProxyServer)
+          out.push(
+            await exitsEverywhere(
+              { ...proxy, server: c.tlsProxyServer },
+              "https",
+            ),
+          );
+        else out.push("trusted: skipped (TLS_PROXY_SERVER not set)");
+        if (c.untrustedTlsProxy) {
+          const h = await open(client, {
+            ...proxy,
+            server: c.untrustedTlsProxy,
+          });
+          try {
+            const r = await exitIp(h.page, "https", 15_000);
+            neverTheHost(r, "an untrusted-TLS-proxy session");
+            if ("ip" in r) throw new Error(`navigation succeeded: ${r.ip}`);
+            out.push(
+              `untrusted: ${await denial(client, h.session.id, "upstream_tls_failed")}`,
+            );
+          } finally {
+            await close(client, h);
+          }
+        } else out.push("untrusted: skipped (TLS_UNTRUSTED_PROXY not set)");
+        return out.join("; ");
+      },
+    );
+
+  if (want(11))
+    await check(
+      "11",
+      "provider adapters: the proxy receives each provider's documented credential format",
+      async () => {
+        const out: string[] = [];
+        for (const a of adapterCases(c.proxyUsername)) {
+          const h = await open(client, {
+            ...proxy,
+            ...a.request,
+            username: a.request.username ?? c.proxyUsername,
+          });
+          try {
+            const w = await who(h.page);
+            if (
+              w.username !== a.username ||
+              w.passwordExtra !== a.passwordExtra
+            )
+              throw new Error(
+                `${a.provider}: the proxy saw ${JSON.stringify(w)}, expected ${JSON.stringify({ username: a.username, passwordExtra: a.passwordExtra })}`,
+              );
+            const shown = h.session.options.proxy;
+            if (shown?.username !== (a.request.username ?? c.proxyUsername))
+              throw new Error(
+                `${a.provider}: options.proxy is ${JSON.stringify(shown)}`,
+              );
+            out.push(`${a.provider}: ${a.username}${a.passwordExtra}`);
+          } finally {
+            await close(client, h);
+          }
+        }
+        return out.join("; ");
+      },
+    );
+
+  if (want(12))
+    await check(
+      "12",
+      "time zone: pages, new tabs and workers on every node see the exit country's zone, or the one asked for",
+      async () => {
+        const held: Awaited<ReturnType<typeof open>>[] = [];
+        const seen: string[] = [];
+        const out: string[] = [];
+        try {
+          for (
+            let i = 0;
+            i < 12 && c.nodes.some((n) => !seen.includes(n));
+            i++
+          ) {
+            const h = await open(client, { ...proxy, country: "DE" });
+            held.push(h);
+            const node = h.session.nodeId ?? "?";
+            if (seen.includes(node)) continue;
+            if (h.session.options.timezone !== "Europe/Berlin")
+              throw new Error(
+                `node ${node}: options.timezone is ${h.session.options.timezone}`,
+              );
+            await who(h.page);
+            const zones = await readZones(h.page);
+            const tab = await h.page.context().newPage();
+            await tab.goto(`http://${SELF_HOST}/who`, { timeout: 30_000 });
+            zones.newTab = await tab.evaluate(
+              () => Intl.DateTimeFormat().resolvedOptions().timeZone,
+            );
+            await tab.close();
+            for (const [where, z] of Object.entries(zones))
+              if (!sameZone(z, "Europe/Berlin"))
+                throw new Error(`node ${node} ${where}: ${z}`);
+            out.push(`node ${node}: ${JSON.stringify(zones)}`);
+            seen.push(node);
+          }
+          const missing = c.nodes.filter((n) => !seen.includes(n));
+          if (missing.length)
+            throw new Error(`no session landed on ${missing.join(", ")}`);
+          const t = await open(client, undefined, { timezone: "Asia/Tokyo" });
+          held.push(t);
+          const z = await t.page.evaluate(
+            () => Intl.DateTimeFormat().resolvedOptions().timeZone,
+          );
+          if (!sameZone(z, "Asia/Tokyo"))
+            throw new Error(`explicit Asia/Tokyo: the page sees ${z}`);
+          out.push(`explicit, no proxy: ${z}`);
+          return out.join("; ");
+        } finally {
+          for (const h of held) await close(client, h);
+        }
+      },
+    );
+
+  if (want(13))
+    await check(
+      "13",
+      "byte counters: a known download is counted for its session, roughly, and reaches usage when it ends",
+      async () => {
+        const n = 5_000_000;
+        const h = await open(client, proxy);
+        try {
+          await who(h.page);
+          const got = await h.page.evaluate(
+            async (size) =>
+              (await (await fetch(`/bytes/${size}`)).arrayBuffer()).byteLength,
+            n,
+          );
+          if (got !== n) throw new Error(`downloaded ${got} bytes, not ${n}`);
+          // Some traffic through a tunnel too, so bytes go up as well as down.
+          const r = await exitIp(h.page, "https");
+          if (!("ip" in r)) throw new Error(`https: ${r.error}`);
+        } finally {
+          await close(client, h);
+        }
+        const ended = await client.waitFor(
+          h.session.id,
+          ["stopped", "failed", "timed_out"],
+          30_000,
+        );
+        const verdict = bytesVerdict(ended.usage, n);
+        if (verdict) throw new Error(verdict);
+        return `downloaded ${n}; usage ${JSON.stringify(ended.usage)}`;
+      },
+    );
+
   if (want(7))
     await check(
       "7",
@@ -457,9 +689,135 @@ export function proxyCheckConfigFromEnv(
     expectExitIp: need("EXPECT_EXIT_IP"),
     hostIp: need("PUBLIC_IP"),
     unreachableProxy: need("UNREACHABLE_PROXY"),
+    socksProxyServer: env.SOCKS_PROXY_SERVER || undefined,
+    tlsProxyServer: env.TLS_PROXY_SERVER || undefined,
+    untrustedTlsProxy: env.TLS_UNTRUSTED_PROXY || undefined,
     nodes: (env.NODES ?? "a,b").split(","),
     environment: base.environment,
     ...(env.ONLY ? { only: env.ONLY.split(",").map(Number) } : {}),
     log,
   };
+}
+
+// --- helpers, unit-tested in proxy-check.test.ts -------------------------------------------------
+
+/** The zones a page and a dedicated worker it starts see. */
+async function readZones(page: Page): Promise<Record<string, string>> {
+  return (await page.evaluate(`(async () => {
+    const main = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const worker = await new Promise((resolve) => {
+      const src = "postMessage(Intl.DateTimeFormat().resolvedOptions().timeZone)";
+      const w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+      w.onmessage = (e) => resolve(String(e.data));
+      setTimeout(() => resolve("no answer from the worker"), 5000);
+    });
+    return { main, worker };
+  })()`)) as Record<string, string>;
+}
+
+/**
+ * Chrome's ICU may name a zone by an older alias (`Asia/Calcutta` for `Asia/Kolkata`): the same
+ * zone either way.
+ */
+const ZONE_ALIASES: Record<string, string> = {
+  "Asia/Kolkata": "Asia/Calcutta",
+  "Europe/Kyiv": "Europe/Kiev",
+  "Asia/Ho_Chi_Minh": "Asia/Saigon",
+  "Asia/Kathmandu": "Asia/Katmandu",
+};
+
+export function sameZone(seen: string, want: string): boolean {
+  const canon = (z: string): string => {
+    try {
+      return new Intl.DateTimeFormat("en-US", { timeZone: z }).resolvedOptions()
+        .timeZone;
+    } catch {
+      return z;
+    }
+  };
+  const a = ZONE_ALIASES[seen] ?? seen;
+  const b = ZONE_ALIASES[want] ?? want;
+  return seen === want || a === b || canon(a) === canon(b);
+}
+
+/**
+ * What the egress gateway counted for a session that downloaded `n` bytes over plain HTTP and made
+ * one HTTPS request: at least `n` down and at most 10% more plus 1 MB (heads, TLS, Chrome's own
+ * requests), and something up. Null when it fits, else why not.
+ */
+export function bytesVerdict(
+  usage: { egressBytesUp: number; egressBytesDown: number },
+  n: number,
+): string | null {
+  const most = Math.round(n * 1.1) + 1_000_000;
+  if (usage.egressBytesDown < n)
+    return `egressBytesDown ${usage.egressBytesDown} is less than the ${n} downloaded`;
+  if (usage.egressBytesDown > most)
+    return `egressBytesDown ${usage.egressBytesDown} is more than ${most} for ${n} downloaded`;
+  if (usage.egressBytesUp <= 0) return "egressBytesUp is 0";
+  return null;
+}
+
+/**
+ * One exit request per provider, and what the test proxy must receive for it, written out by
+ * hand from each provider's documentation (the citations are in
+ * packages/contracts/src/proxy-providers.ts). The test proxy accepts any username containing the
+ * configured one, and a password that is the configured one or extends it with `_`.
+ */
+export function adapterCases(user: string): {
+  provider: string;
+  request: Partial<ProxyConfig>;
+  username: string;
+  passwordExtra: string;
+}[] {
+  return [
+    {
+      provider: "decodo",
+      request: {
+        provider: "decodo",
+        country: "US",
+        region: "texas",
+        city: "austin",
+        sticky: "bench1",
+        stickyMinutes: 10,
+      },
+      username: `user-${user}-country-us-state-us_texas-city-austin-session-bench1-sessionduration-10`,
+      passwordExtra: "",
+    },
+    {
+      provider: "oxylabs",
+      request: {
+        provider: "oxylabs",
+        country: "DE",
+        city: "berlin",
+        sticky: "bench2",
+        stickyMinutes: 5,
+      },
+      username: `customer-${user}-cc-DE-city-berlin-sessid-bench2-sesstime-5`,
+      passwordExtra: "",
+    },
+    {
+      provider: "brightdata",
+      request: {
+        provider: "brightdata",
+        username: `brd-customer-${user}-zone-bench`,
+        country: "FR",
+        city: "Paris",
+        sticky: "bench3",
+      },
+      username: `brd-customer-${user}-zone-bench-country-fr-city-paris-session-bench3`,
+      passwordExtra: "",
+    },
+    {
+      provider: "iproyal",
+      request: {
+        provider: "iproyal",
+        country: "GB",
+        sticky: "bench004",
+        stickyMinutes: 15,
+      },
+      username: user,
+      passwordExtra: "_country-gb_session-bench004_lifetime-15m",
+    },
+  ];
 }

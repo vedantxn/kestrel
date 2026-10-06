@@ -55,6 +55,8 @@ services:
       PROXY_PORT: "3128"
       CONTROL_SOCKET: /run/kestrel/a/egress.sock
       BLOCKED_ADDRESSES: ${PUBLIC_IP}
+      # Extra CAs trusted for https:// upstream proxies (a file under /run/kestrel); empty: none.
+      PROXY_CA_FILE: ${PROXY_CA_FILE:-}
       METRICS_PORT: "7301"
     volumes:
       - /run/kestrel:/run/kestrel
@@ -135,6 +137,8 @@ services:
       PROXY_PORT: "3128"
       CONTROL_SOCKET: /run/kestrel/b/egress.sock
       BLOCKED_ADDRESSES: ${PUBLIC_IP}
+      # Extra CAs trusted for https:// upstream proxies (a file under /run/kestrel); empty: none.
+      PROXY_CA_FILE: ${PROXY_CA_FILE:-}
       METRICS_PORT: "7302"
     volumes:
       - /run/kestrel:/run/kestrel
