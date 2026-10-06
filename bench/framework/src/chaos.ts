@@ -5,6 +5,8 @@ import WebSocket from "ws";
 import type { Session } from "@kestrel/contracts";
 import { ApiError, type KestrelClient } from "./client.js";
 import { settledInvariants, type HostConfig } from "./collect.js";
+import { classify, listProcesses, realHost } from "./collect-vm.js";
+import { nodeRuntimes, sessionsOn } from "./placement.js";
 import { PlaywrightDriver } from "./driver.js";
 import { checkInvariants } from "./invariants.js";
 import { runLifecycle } from "./lifecycle.js";
@@ -20,11 +22,19 @@ export interface ChaosEnv {
   testPageUrl: string;
   publicHostname: string;
   log: (m: string) => void;
+  /** Set by the runner for a case that needs a runtime: the node it runs against. */
+  node?: string;
 }
 
 export interface ChaosCase {
   id: string;
   name: string;
+  /**
+   * The runtime the case is about: it runs against a node of that runtime and is skipped (and
+   * says so) when the deployment has none. A case that reaches into a container with `docker exec`
+   * is a Docker case; one that kills a VM's processes is a microVM case (G-25).
+   */
+  requires?: "docker" | "microvm";
   /** Returns a short description of what was observed. */
   run(env: ChaosEnv): Promise<string>;
 }
@@ -95,7 +105,7 @@ interface Held {
   page: Page;
 }
 
-/** Sessions with a real client attached, each having loaded the test page. */
+/** Sessions with a real client attached, each having loaded the test page (on `env.node`, if set). */
 async function hold(
   env: ChaosEnv,
   n: number,
@@ -103,10 +113,14 @@ async function hold(
 ): Promise<Held[]> {
   const out: Held[] = [];
   for (let i = 0; i < n; i++) {
-    const { session } = await env.client.create({
-      waitForCapacityMs: 20_000,
-      ...opts,
-    });
+    const session = env.node
+      ? (await sessionsOn(env.client, env.node, 1, opts))[0]!
+      : (
+          await env.client.create({
+            waitForCapacityMs: 20_000,
+            ...opts,
+          })
+        ).session;
     const browser = await chromium.connectOverCDP(
       session.connectUrl as string,
       { timeout: 30_000 },
@@ -187,6 +201,54 @@ async function inContainer(id: string, script: string): Promise<string> {
     );
     child.stdin?.end(script);
   });
+}
+
+/** A VM's processes on the host, found by their command lines (the harness shares the host's PIDs). */
+async function vmProcesses(
+  id: string,
+): Promise<{ vmm?: number; handler?: number }> {
+  const out: { vmm?: number; handler?: number } = {};
+  for (const p of await listProcesses(realHost)) {
+    const c = classify(p);
+    if (c?.id === id) out[c.kind] = p.pid;
+  }
+  return out;
+}
+
+/** Is a container, or a VM, gone from the host? */
+async function removed(id: string): Promise<boolean> {
+  if (!id.startsWith("vm-"))
+    return !(await sh(`docker inspect ${id}`)).out.includes('"Running"');
+  const p = await vmProcesses(id);
+  return p.vmm === undefined && p.handler === undefined;
+}
+
+function kill9(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
+  }
+}
+
+/** The VM serving a held session, and its processes. */
+async function vmOf(
+  env: ChaosEnv,
+  h: Held,
+): Promise<{ id: string; vmm: number; handler?: number }> {
+  const where = await containerOf(env, h.session.id);
+  expect(where, "could not find the session's browser");
+  expect(
+    where.id.startsWith("vm-"),
+    `the session's browser is not a VM (${where.id.slice(0, 12)})`,
+  );
+  const p = await vmProcesses(where.id);
+  expect(p.vmm, `no VMM process for ${where.id.slice(0, 15)}`);
+  return {
+    id: where.id,
+    vmm: p.vmm,
+    ...(p.handler ? { handler: p.handler } : {}),
+  };
 }
 
 const KILL_BY = (pattern: string) =>
@@ -279,6 +341,7 @@ export const CASES: ChaosCase[] = [
   {
     id: "kill-chrome",
     name: "Kill Chrome inside a session",
+    requires: "docker",
     async run(env) {
       const [a] = await hold(env, 1);
       const where = await containerOf(env, a!.session.id);
@@ -295,6 +358,7 @@ export const CASES: ChaosCase[] = [
   {
     id: "kill-runtimed",
     name: "Kill runtimed inside a session",
+    requires: "docker",
     async run(env) {
       const [a] = await hold(env, 1);
       const where = await containerOf(env, a!.session.id);
@@ -311,6 +375,7 @@ export const CASES: ChaosCase[] = [
   {
     id: "remove-container",
     name: "Force-remove a session's container",
+    requires: "docker",
     async run(env) {
       const [a] = await hold(env, 1);
       const where = await containerOf(env, a!.session.id);
@@ -348,6 +413,7 @@ export const CASES: ChaosCase[] = [
   {
     id: "disk-cpu",
     name: "A session fills its profile space and spins its CPU",
+    requires: "docker",
     async run(env) {
       const [a] = await hold(env, 1);
       const where = await containerOf(env, a!.session.id);
@@ -517,8 +583,7 @@ export const CASES: ChaosCase[] = [
         await until(
           "the container to be removed",
           10_000,
-          async () =>
-            !(await sh(`docker inspect ${where.id}`)).out.includes('"Running"'),
+          () => removed(where.id),
           500,
         );
         const s = await env.client.waitFor(session.id, [...TERMINAL], 20_000);
@@ -717,6 +782,90 @@ export const CASES: ChaosCase[] = [
       return "its session ended node_lost; capacity stayed fenced until it cleaned up and its fence lifted";
     },
   },
+  // --- microVM nodes (threat model G-25) ---------------------------------------------------------
+  {
+    id: "kill-vmm",
+    name: "Kill a session's VMM (Firecracker)",
+    requires: "microvm",
+    async run(env) {
+      const [a] = await hold(env, 1);
+      const vm = await vmOf(env, a!);
+      kill9(vm.vmm);
+      const s = await expectEnds(env, a!.session.id, [
+        "browser_crash",
+        "runtime_crash",
+      ]);
+      await a!.browser.close().catch(() => undefined);
+      await until("the VM's processes to be gone", 20_000, () =>
+        removed(vm.id),
+      );
+      return `${s.status}/${s.endReason}; ${await neighbourWorks(env)}`;
+    },
+  },
+  {
+    id: "kill-uffd-handler",
+    name: "Kill a session's page-fault handler",
+    requires: "microvm",
+    async run(env) {
+      const [a] = await hold(env, 1);
+      const vm = await vmOf(env, a!);
+      expect(
+        vm.handler,
+        "the VM has no page-fault handler (is the node on 4 KiB pages?)",
+      );
+      kill9(vm.handler);
+      // The guest hangs at its next page fault: the agent must notice the handler, not wait for the VMM.
+      const s = await expectEnds(env, a!.session.id, [
+        "browser_crash",
+        "runtime_crash",
+      ]);
+      await a!.browser.close().catch(() => undefined);
+      await until("the VMM to be killed and removed", 20_000, () =>
+        removed(vm.id),
+      );
+      return `${s.status}/${s.endReason}, its VMM ended too; ${await neighbourWorks(env)}`;
+    },
+  },
+  {
+    id: "restart-agent-vms",
+    name: "Restart the node agent with VMs running",
+    requires: "microvm",
+    async run(env) {
+      const held = await hold(env, 2);
+      const before = await Promise.all(held.map((h) => vmOf(env, h)));
+      await sh(`docker restart kestrel-node-${env.node}-1`);
+      await sleep(25_000);
+      const results = await Promise.all(held.map((h) => usable(h)));
+      const states = await Promise.all(
+        held.map((h) => env.client.get(h.session.id)),
+      );
+      const after = await Promise.all(before.map((v) => vmProcesses(v.id)));
+      const lost = states.filter(
+        (s) => s.status !== "ready" && s.status !== "active",
+      );
+      await createsWork(env);
+      await release(held, env.client);
+      expect(
+        lost.length === 0,
+        `${lost.length} session(s) lost across the agent restart: ${lost.map((s) => `${s.status}/${s.endReason}`).join(",")}`,
+      );
+      expect(
+        after.every((p, i) => p.vmm === before[i]!.vmm),
+        "a VM was not the same VM after the restart (its VMM changed or is gone)",
+      );
+      expect(
+        results.every(Boolean),
+        "a held session stopped answering after the restart",
+      );
+      await until(
+        "the VMs to be removed after their sessions",
+        20_000,
+        async () =>
+          (await Promise.all(before.map((v) => removed(v.id)))).every(Boolean),
+      );
+      return "2 VMs kept running as the same processes with their clients attached, and were removed after";
+    },
+  },
   {
     id: "restart-docker",
     name: "Restart the Docker daemon",
@@ -764,10 +913,25 @@ export async function runChaos(
   const results: { id: string; name: string; pass: boolean; detail: string }[] =
     [];
   const failpointsExpected = false;
+  const runtimes = await nodeRuntimes(env.host);
   for (const c of CASES.filter((x) => !opts.only || opts.only.includes(x.id))) {
+    const node = c.requires
+      ? [...runtimes].find(([, r]) => r === c.requires)?.[0]
+      : undefined;
+    if (c.requires && !node) {
+      results.push({
+        id: c.id,
+        name: c.name,
+        pass: true,
+        detail: `skipped: no ${c.requires} node in this deployment`,
+      });
+      env.log(`chaos: ${c.id} skipped (no ${c.requires} node)`);
+      continue;
+    }
+    const caseEnv: ChaosEnv = node ? { ...env, node } : env;
     for (let round = 1; round <= (opts.repeat ?? 1); round++) {
       const label = `${c.id}${(opts.repeat ?? 1) > 1 ? ` #${round}` : ""}`;
-      env.log(`chaos: ${label}`);
+      env.log(`chaos: ${label}${node ? ` (node ${node})` : ""}`);
       let detail: string;
       let pass = true;
       await sh(
@@ -775,7 +939,7 @@ export async function runChaos(
       );
       await apiHealthy(env, 90_000).catch(() => undefined);
       try {
-        detail = await c.run(env);
+        detail = await c.run(caseEnv);
       } catch (e) {
         pass = false;
         detail = (e as Error).message;
@@ -784,6 +948,8 @@ export async function runChaos(
       const inv = await settledInvariants(checkInvariants, env.host, {
         timeoutMs: 60_000,
         failpointsExpected,
+        // infra/host/bench.sh runs the agents with their probe controls on.
+        harnessExpected: true,
       });
       if (!inv.ok) {
         pass = false;
