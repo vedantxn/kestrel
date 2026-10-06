@@ -28,7 +28,7 @@ import {
   type TokenVerifier,
 } from "@kestrel/shared";
 import WebSocket, { WebSocketServer } from "ws";
-import { BufferBudget, FailureLimiter } from "./budget.js";
+import { BufferBudget, FailureLimiter, sessionShare } from "./budget.js";
 import type { GatewayMetrics } from "./metrics.js";
 import { Relay, type Limits } from "./relay.js";
 import type { RouteEntry, RouteTable } from "./routes.js";
@@ -46,6 +46,11 @@ export interface GatewayOptions {
   /** Null serves plain HTTP: for tests only. */
   tls: TlsMaterial | null;
   limits?: Partial<Limits>;
+  /**
+   * The node's slot count. Each session's share of the buffer budget is the budget divided by
+   * it, unless `limits.sessionBufferShareBytes` is given (threat model G-03).
+   */
+  slots?: number;
   clock?: Clock;
   /** Called with the full attachment snapshot whenever it changes (G12). */
   onAttachments?: (attachments: Attachment[]) => void;
@@ -90,8 +95,18 @@ export class Gateway {
 
   constructor(private readonly o: GatewayOptions) {
     this.limits = { ...CONNECT_LIMITS, ...o.limits } as Limits;
+    this.limits.sessionBufferShareBytes = sessionShare({
+      globalBytes: this.limits.globalBufferBudgetBytes,
+      defaultBytes: CONNECT_LIMITS.sessionBufferShareBytes,
+      slots: o.slots,
+      configuredBytes: o.limits?.sessionBufferShareBytes,
+    });
     this.clock = o.clock ?? systemClock;
-    this.budget = new BufferBudget(this.limits.globalBufferBudgetBytes);
+    this.budget = new BufferBudget(
+      this.limits.globalBufferBudgetBytes,
+      this.limits.sessionBufferShareBytes,
+    );
+    o.metrics.share.set(this.budget.shareBytes);
     this.failures = new FailureLimiter(o.authFailuresPerMinute ?? 30);
     this.wss = new WebSocketServer({
       noServer: true,
@@ -200,6 +215,46 @@ export class Gateway {
         connections: [...s].filter((r) => !this.passive.has(r)).length,
       }))
       .filter((a) => a.connections > 0);
+  }
+
+  /** Point-in-time buffer figures for `/metrics` (C6, G-03). */
+  updateBufferMetrics(): void {
+    this.o.metrics.buffered.set(this.budget.usedBytes);
+    this.o.metrics.largestSession.set(this.budget.largestSessionBytes);
+    this.o.metrics.overShare.set(this.budget.sessionsOverShare().length);
+  }
+
+  /**
+   * C6, G-03. Room in the budget for a message a session's connection is about to queue. When
+   * the global budget is full, the session that is over its own share gives way: the arriving
+   * connection if its session is over its share, else connections of the sessions furthest over
+   * theirs, the fullest first, until the message fits. A session within its share is refused
+   * only if nothing else can give way (more sessions than slots, or a share set too high).
+   */
+  private admit(sessionId: string, bytes: number): boolean {
+    const b = this.budget;
+    if (b.reserve(sessionId, bytes)) return true;
+    const refuse = (reason: string): boolean => {
+      this.o.metrics.budgetCloses.inc({ reason });
+      return false;
+    };
+    if (b.sessionBytes(sessionId) + bytes > b.shareBytes)
+      return refuse("over_share");
+    for (const victim of b.sessionsOverShare()) {
+      const relays = [...(this.relays.get(victim) ?? [])]
+        .filter((r) => r.queuedBytes > 0)
+        .sort((x, y) => y.queuedBytes - x.queuedBytes);
+      for (const r of relays) {
+        this.o.log.warn(
+          { session: victim, queuedBytes: r.queuedBytes, for: sessionId },
+          "closing a connection over its session's buffer share",
+        );
+        r.evict();
+        this.o.metrics.budgetCloses.inc({ reason: "evicted" });
+        if (b.reserve(sessionId, bytes)) return true;
+      }
+    }
+    return refuse("global");
   }
 
   /** Close every connection of a session, e.g. because its route is gone. */
@@ -572,8 +627,11 @@ export class Gateway {
     this.relays.set(sessionId, set);
     const relay = new Relay(client, upstream, {
       limits: this.limits,
+      sessionId,
       budget: this.budget,
+      admit: (n) => this.admit(sessionId, n),
       onBytes: (dir, n) => this.o.metrics.bytes.inc({ direction: dir }, n),
+      onPause: (reason) => this.o.metrics.pauses.inc({ reason }),
       onClosed: (code) => {
         set.delete(relay);
         if (set.size === 0) this.relays.delete(sessionId);

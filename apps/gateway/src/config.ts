@@ -22,6 +22,10 @@ export const Env = z.object({
   METRICS_PORT: z.coerce.number().int().default(7201),
   /** Share the port with a replacement process (W4). Linux only. */
   REUSE_PORT: z.enum(["1", "true"]).optional(),
+  /** The node's slot count: each session's share of the buffer budget is the budget divided by it (G-03). */
+  SLOTS: z.coerce.number().int().positive().optional(),
+  /** Overrides that share, in bytes. */
+  SESSION_BUFFER_SHARE_BYTES: z.coerce.number().int().positive().optional(),
   DRAIN_SECONDS: z.coerce.number().int().min(0).default(300),
   LOG_LEVEL: z.string().default("info"),
 });

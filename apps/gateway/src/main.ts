@@ -34,6 +34,10 @@ const gateway = new Gateway({
   log,
   metrics,
   tls,
+  ...(env.SLOTS ? { slots: env.SLOTS } : {}),
+  ...(env.SESSION_BUFFER_SHARE_BYTES
+    ? { limits: { sessionBufferShareBytes: env.SESSION_BUFFER_SHARE_BYTES } }
+    : {}),
   onAttachments: (a) => agent?.sendAttachments(a),
 });
 
@@ -62,7 +66,7 @@ tlsWatcher?.watch((m) => gateway.setTls(m));
 const internal = createServer(async (req, res) => {
   if (req.url === "/metrics") {
     metrics.routes.set(table.size);
-    metrics.buffered.set(gateway.budget.usedBytes);
+    gateway.updateBufferMetrics();
     res.setHeader("content-type", metrics.registry.contentType);
     return res.end(await metrics.registry.metrics());
   }
@@ -88,7 +92,12 @@ const internal = createServer(async (req, res) => {
 });
 internal.listen(env.METRICS_PORT, env.METRICS_HOST);
 log.info(
-  { port: addr.port, node: env.NODE_ID, tls: Boolean(tls) },
+  {
+    port: addr.port,
+    node: env.NODE_ID,
+    tls: Boolean(tls),
+    sessionShareBytes: gateway.budget.shareBytes,
+  },
   "gateway started",
 );
 

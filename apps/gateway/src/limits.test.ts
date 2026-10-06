@@ -156,6 +156,188 @@ describe("backpressure and shared budget (C5, C6)", () => {
   });
 });
 
+describe("a session's share of the budget (G-03)", () => {
+  const KiB = 1024;
+  const MiB = 1024 * KiB;
+  const metric = async (
+    c: { get(): Promise<{ values: { labels: object; value: number }[] }> },
+    labels: Record<string, string>,
+  ): Promise<number> =>
+    (await c.get()).values.find(
+      (v) => JSON.stringify(v.labels) === JSON.stringify(labels),
+    )?.value ?? 0;
+
+  /**
+   * A greedy session's client writes into a browser that never reads, stopping just short of the
+   * global budget (a careful attacker would), then a calm session asks for a large reply.
+   */
+  async function greedyThenCalm(share: number) {
+    rig = await makeRig({
+      limits: {
+        globalBufferBudgetBytes: 1 * MiB,
+        sessionBufferShareBytes: share,
+        // Only the budget is under test: no per-connection pause, no ping, no early 4009.
+        pauseAtBufferedBytes: 64 * MiB,
+        maxPausedMs: 20_000,
+        pingIntervalMs: 60_000,
+      },
+    });
+    const greedy = await rig.addSession();
+    const calm = await rig.addSession();
+    greedy.container.mode = "stall";
+    const wg = await opened(await rig.connect(greedy));
+    const wc = await opened(await rig.connect(calm));
+    const chunk = "g".repeat(100 * KiB);
+    const until = Date.now() + 1500;
+    while (Date.now() < until) {
+      if (rig.gateway.budget.usedBytes + 3 * chunk.length > 1 * MiB) break;
+      wg.send(chunk);
+      await pause(5);
+    }
+    await pause(200);
+    const greedyHeld = rig.gateway.budget.sessionBytes(greedy.id);
+    const greedyClosed = closeOf(wg);
+    wc.send(rpc(7, "Test.big", { size: 500 * KiB }));
+    const reply = await nextMessage(wc).then(
+      (m) => JSON.parse(m) as { id: number },
+      () => null,
+    );
+    return { wg, wc, greedy, greedyHeld, greedyClosed, reply };
+  }
+
+  it("pauses a greedy session at its share, so another session still gets a large reply", async () => {
+    const r = await greedyThenCalm(256 * KiB);
+    // Back-pressure, not closure: the greedy session is held near its share and stays open.
+    expect(r.greedyHeld).toBeGreaterThan(256 * KiB);
+    expect(r.greedyHeld).toBeLessThanOrEqual(256 * KiB + 2 * 100 * KiB);
+    expect(r.wg.readyState).toBe(WebSocket.OPEN);
+    expect(r.reply?.id).toBe(7);
+    expect(r.wc.readyState).toBe(WebSocket.OPEN);
+    expect(
+      await metric(rig.metrics.pauses, { reason: "share" }),
+    ).toBeGreaterThan(0);
+    rig.gateway.updateBufferMetrics();
+    expect(await metric(rig.metrics.overShare, {})).toBe(1);
+    r.wg.close();
+    r.wc.close();
+  });
+
+  it("without a share, the same greedy session gets the calm one closed (the gap G-03 closes)", async () => {
+    const r = await greedyThenCalm(1 * MiB);
+    expect(r.greedyHeld).toBeGreaterThan(600 * KiB);
+    expect(r.reply).toBeNull();
+    expect(r.wc.readyState).not.toBe(WebSocket.OPEN);
+    r.wg.close();
+  });
+
+  it("when the budget is full, closes the session over its share to make room for one within it", async () => {
+    rig = await makeRig({
+      limits: {
+        globalBufferBudgetBytes: 4 * MiB,
+        sessionBufferShareBytes: 1 * MiB,
+        pauseAtBufferedBytes: 64 * MiB,
+        maxPausedMs: 20_000,
+        pingIntervalMs: 60_000,
+      },
+    });
+    const greedy = await rig.addSession();
+    const calm = await rig.addSession();
+    greedy.container.mode = "stall";
+    const wg = await opened(await rig.connect(greedy));
+    const wc = await opened(await rig.connect(calm));
+    // One message over the share is let in while the budget has room, and then holds it.
+    wg.send("h".repeat(3.5 * MiB));
+    const until = Date.now() + 3000;
+    while (
+      rig.gateway.budget.sessionBytes(greedy.id) < 3.5 * MiB &&
+      Date.now() < until
+    )
+      await pause(10);
+    expect(rig.gateway.budget.sessionBytes(greedy.id)).toBe(3.5 * MiB);
+    const greedyClosed = closeOf(wg);
+    wc.send(rpc(8, "Test.big", { size: 800 * KiB }));
+    expect(JSON.parse(await nextMessage(wc)).id).toBe(8);
+    expect((await greedyClosed).code).toBe(CLOSE_CODES.limitExceeded);
+    expect(await metric(rig.metrics.budgetCloses, { reason: "evicted" })).toBe(
+      1,
+    );
+    await pause(100);
+    expect(rig.gateway.budget.sessionBytes(greedy.id)).toBe(0);
+    wc.close();
+  });
+
+  it("closes the arriving connection when its own session is over its share and the budget is full", async () => {
+    rig = await makeRig({
+      limits: {
+        globalBufferBudgetBytes: 4 * MiB,
+        sessionBufferShareBytes: 1 * MiB,
+        pauseAtBufferedBytes: 64 * MiB,
+        maxPausedMs: 20_000,
+        pingIntervalMs: 60_000,
+      },
+    });
+    const greedy = await rig.addSession();
+    greedy.container.mode = "stall";
+    const wg = await opened(await rig.connect(greedy));
+    const closed = closeOf(wg);
+    wg.send("i".repeat(3 * MiB)); // over its share, within the budget: let in, then paused
+    const until = Date.now() + 3000;
+    while (
+      rig.gateway.budget.sessionBytes(greedy.id) < 3 * MiB &&
+      Date.now() < until
+    )
+      await pause(10);
+    // A second connection of the same session is not paused yet; its message would overflow.
+    const wg2 = await opened(await rig.connect(greedy));
+    const closed2 = closeOf(wg2);
+    wg2.send("j".repeat(1.5 * MiB));
+    expect((await closed2).code).toBe(CLOSE_CODES.limitExceeded);
+    expect(
+      await metric(rig.metrics.budgetCloses, { reason: "over_share" }),
+    ).toBe(1);
+    expect(wg.readyState).toBe(WebSocket.OPEN);
+    wg.terminate(); // a paused side would read our close only once resumed
+    await closed;
+  });
+
+  it("a session holding large partial messages does not stop another from working", async () => {
+    rig = await makeRig({ limits: { pingIntervalMs: 60_000 } });
+    const hog = await rig.addSession();
+    const calm = await rig.addSession();
+    const wh = await opened(await rig.connect(hog));
+    const wc = await opened(await rig.connect(calm));
+    // The first fragments of messages that never finish (the threat model's chaos case for G-03).
+    for (let i = 0; i < 8; i++)
+      wh.send(Buffer.alloc(1 * MiB, 1), { fin: false, binary: true });
+    await pause(100);
+    for (let i = 0; i < 5; i++) {
+      wc.send(rpc(i, "Calm"));
+      expect(JSON.parse(await nextMessage(wc)).id).toBe(i);
+    }
+    expect(wh.readyState).toBe(WebSocket.OPEN);
+    wh.terminate();
+    wc.close();
+  });
+
+  it("takes the share from the slot count unless one is configured", async () => {
+    rig = await makeRig({
+      slots: 4,
+      limits: { globalBufferBudgetBytes: 8 * MiB },
+    });
+    expect(rig.gateway.budget.shareBytes).toBe(2 * MiB);
+    expect(await metric(rig.metrics.share, {})).toBe(2 * MiB);
+    await rig.close();
+    rig = await makeRig({
+      slots: 4,
+      limits: {
+        globalBufferBudgetBytes: 8 * MiB,
+        sessionBufferShareBytes: 3 * MiB,
+      },
+    });
+    expect(rig.gateway.budget.shareBytes).toBe(3 * MiB);
+  });
+});
+
 describe("attachments, revocation and expiry (G12)", () => {
   it("reports attachment snapshots as connections come and go", async () => {
     rig = await makeRig();

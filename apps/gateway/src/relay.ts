@@ -7,12 +7,25 @@ export type Limits = { -readonly [K in keyof typeof CONNECT_LIMITS]: number };
 
 export interface RelayOptions {
   limits: Limits;
+  /** The session this connection belongs to: its share of the budget is counted across all its connections (G-03). */
+  sessionId: string;
   budget: BufferBudget;
+  /**
+   * Make room in the budget for a message about to be queued, charged to this session. It may
+   * close other sessions' connections to do so (`Gateway.admit`). False: this connection is closed.
+   * Without it, the budget's global limit alone decides.
+   */
+  admit?: (bytes: number) => boolean;
   /** Poll interval for resuming a paused side. */
   pollMs?: number;
   onBytes?: (direction: "up" | "down", bytes: number) => void;
+  /** A side stopped being read: its peer's buffer is full, or its session is over its share. */
+  onPause?: (reason: PauseReason) => void;
   onClosed: (clientCode: number) => void;
 }
+
+export type PauseReason = "buffer" | "share";
+type Direction = "up" | "down";
 
 const byteLength = (d: RawData): number =>
   Array.isArray(d)
@@ -35,17 +48,23 @@ function sendable(code: number): number {
 }
 
 /**
- * C5, C6. Relays whole messages between a client and its container, in both directions, with
+ * C5, C6, G-03. Relays whole messages between a client and its container, in both directions, with
  * compression off and the CDP payload never parsed.
  *
  * Backpressure: if one side's send buffer passes the high mark, the *other* side is paused (its
  * socket stops being read, so TCP pushes back on whoever is sending) until the buffer drains
- * below the low mark. A side paused for too long is closed as too slow (4009). Pings are not
- * counted against a paused side.
+ * below the low mark. The same happens when the whole session holds more than its share of the
+ * gateway's budget (G-03): the side that sent is paused until the session is back to half its
+ * share. A side paused for too long is closed as too slow (4009). Pings are not counted against
+ * a paused side.
  */
 export class Relay {
   private closed = false;
-  private paused = new Map<WebSocket, number>();
+  private paused = new Map<WebSocket, { since: number; share: boolean }>();
+  /** Bytes this relay has charged to the budget and not yet released, by the direction they travel. */
+  private queued: Record<Direction, number> = { up: 0, down: 0 };
+  /** A direction whose socket has been torn down: its charge was released at once, so late callbacks release nothing. */
+  private dropped: Record<Direction, boolean> = { up: false, down: false };
   private pollTimer: NodeJS.Timeout | undefined;
   private pingTimer: NodeJS.Timeout | undefined;
   private missed = new Map<WebSocket, number>();
@@ -72,8 +91,12 @@ export class Relay {
     this.pingTimer.unref();
   }
 
-  /** Close both sides, telling the client why. Safe to call more than once. */
-  shutdown(clientCode: number, reason: string): void {
+  /**
+   * Close both sides, telling the client why. Safe to call more than once. With `drop`, the
+   * client is cut rather than closed, so what is queued for it is freed at once: for a client
+   * that is not reading, a close code would sit behind that data anyway.
+   */
+  shutdown(clientCode: number, reason: string, drop = false): void {
     if (this.closed) return;
     this.closed = true;
     this.stopTimers();
@@ -81,17 +104,48 @@ export class Relay {
     // A side we paused cannot complete the close handshake unless we read its reply.
     for (const side of this.paused.keys()) side.resume();
     this.paused.clear();
-    try {
-      this.client.close(code, reason.slice(0, 120));
-    } catch {
+    if (drop) {
       this.client.terminate();
+      this.releaseQueued("down");
+    } else {
+      try {
+        this.client.close(code, reason.slice(0, 120));
+      } catch {
+        this.client.terminate();
+      }
     }
     this.upstream.terminate();
+    this.releaseQueued("up");
     this.o.onClosed(clientCode);
+  }
+
+  /**
+   * G-03: closed so another session can have budget. Whatever this connection holds is released
+   * now, and the client is dropped if it has data still waiting for it.
+   */
+  evict(): void {
+    this.shutdown(
+      CLOSE_CODES.limitExceeded,
+      "gateway buffer budget: session over its share",
+      this.client.bufferedAmount > 0,
+    );
+    this.releaseQueued("down");
   }
 
   get isClosed(): boolean {
     return this.closed;
+  }
+
+  /** Bytes this connection holds in the budget. */
+  get queuedBytes(): number {
+    return this.queued.up + this.queued.down;
+  }
+
+  private releaseQueued(dir: Direction): void {
+    if (this.dropped[dir]) return;
+    this.dropped[dir] = true;
+    this.o.budget.release(this.o.sessionId, this.queued[dir]);
+    this.queued[dir] = 0;
   }
 
   private stopTimers(): void {
@@ -104,11 +158,16 @@ export class Relay {
     if (this.closed) return;
     this.closed = true;
     this.stopTimers();
+    for (const side of this.paused.keys()) side.resume();
+    this.paused.clear();
     if (side === this.client) {
       // The client went away. The session lives on; just let go of our connection to the container.
       this.upstream.terminate();
+      this.releaseQueued("up");
+      this.releaseQueued("down");
       this.o.onClosed(code);
     } else {
+      this.releaseQueued("up");
       // The container side closed. Pass a normal close through; anything abnormal is an error to the client.
       try {
         this.client.close(
@@ -124,44 +183,56 @@ export class Relay {
     }
   }
 
-  private pipe(from: WebSocket, to: WebSocket, dir: "up" | "down"): void {
+  private pipe(from: WebSocket, to: WebSocket, dir: Direction): void {
+    const session = this.o.sessionId;
     from.on("message", (data: RawData, isBinary: boolean) => {
       if (this.closed) return;
       const size = byteLength(data);
-      if (!this.o.budget.reserve(size)) {
+      const admitted = this.o.admit
+        ? this.o.admit(size)
+        : this.o.budget.reserve(session, size);
+      if (!admitted) {
         this.shutdown(
           CLOSE_CODES.limitExceeded,
           "gateway buffer budget exceeded",
         );
         return;
       }
+      this.queued[dir] += size;
       this.o.onBytes?.(dir, size);
       to.send(data, { binary: isBinary }, (err) => {
-        this.o.budget.release(size);
+        if (!this.dropped[dir]) {
+          this.queued[dir] -= size;
+          this.o.budget.release(session, size);
+        }
         if (err) this.shutdown(1011, "send failed");
       });
       if (to.bufferedAmount > this.o.limits.pauseAtBufferedBytes)
-        this.pause(from, to);
+        this.pause(from, "buffer");
+      else if (this.o.budget.overShare(session)) this.pause(from, "share");
     });
   }
 
-  private pause(from: WebSocket, to: WebSocket): void {
-    if (this.paused.has(from)) return;
+  private pause(from: WebSocket, reason: PauseReason): void {
+    const already = this.paused.get(from);
+    if (already) {
+      if (reason === "share") already.share = true;
+      return;
+    }
     from.pause();
-    this.paused.set(from, Date.now());
+    this.paused.set(from, { since: Date.now(), share: reason === "share" });
+    this.o.onPause?.(reason);
     if (this.pollTimer) return;
     this.pollTimer = setInterval(() => {
-      for (const [side, since] of this.paused) {
-        const target =
-          side === from
-            ? to
-            : side === this.client
-              ? this.upstream
-              : this.client;
-        if (target.bufferedAmount < this.o.limits.resumeAtBufferedBytes) {
+      for (const [side, p] of this.paused) {
+        const target = side === this.client ? this.upstream : this.client;
+        const drained =
+          target.bufferedAmount < this.o.limits.resumeAtBufferedBytes &&
+          (!p.share || this.o.budget.canResume(this.o.sessionId));
+        if (drained) {
           side.resume();
           this.paused.delete(side);
-        } else if (Date.now() - since > this.o.limits.maxPausedMs) {
+        } else if (Date.now() - p.since > this.o.limits.maxPausedMs) {
           this.shutdown(CLOSE_CODES.tooSlow, "too slow");
           return;
         }

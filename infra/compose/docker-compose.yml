@@ -115,6 +115,8 @@ services:
       TOKEN_PUBLIC_KEY_FILE: /secrets/token-public.pem
       AGENT_SOCKET: /run/kestrel/a/agent.sock
       METRICS_PORT: "7201"
+      # Each session's share of the buffer budget is the budget divided by the node's slots (G-03).
+      SLOTS: ${SLOTS_A:-5}
       REUSE_PORT: "1"
     volumes:
       - /run/kestrel:/run/kestrel
@@ -192,6 +194,7 @@ services:
       TOKEN_PUBLIC_KEY_FILE: /secrets/token-public.pem
       AGENT_SOCKET: /run/kestrel/b/agent.sock
       METRICS_PORT: "7202"
+      SLOTS: ${SLOTS_B:-2}
       REUSE_PORT: "1"
     volumes:
       - /run/kestrel:/run/kestrel
