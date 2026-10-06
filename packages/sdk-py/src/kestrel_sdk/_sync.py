@@ -13,6 +13,7 @@ from . import _base
 from ._errors import KestrelConnectionError, KestrelError, SessionEndedError
 from ._types import (
     TERMINAL_STATUSES,
+    CaptchaOptions,
     ComputerActionName,
     ComputerResponse,
     NetworkPolicy,
@@ -99,6 +100,7 @@ class Sessions:
         recording: bool | None = None,
         proxy: ProxyConfig | Mapping[str, Any] | None = None,
         timezone: str | None = None,
+        captcha: CaptchaOptions | Mapping[str, Any] | None = None,
         wait_for_capacity_ms: int | None = None,
         idempotency_key: str | None = None,
     ) -> Session:
@@ -114,6 +116,7 @@ class Sessions:
             recording=recording,
             proxy=proxy,
             timezone=timezone,
+            captcha=captcha,
             wait_for_capacity_ms=wait_for_capacity_ms,
             idempotency_key=idempotency_key,
         )

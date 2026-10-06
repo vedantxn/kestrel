@@ -58,6 +58,9 @@ EventType = Literal[
     "node.lost",
     "captcha.detected",
     "captcha.cleared",
+    "captcha.solving",
+    "captcha.solved",
+    "captcha.failed",
 ]
 
 EgressDenyReason = Literal[
@@ -82,6 +85,22 @@ CaptchaProvider = Literal[
     "cloudflare_challenge",
     "arkose",
     "datadome",
+    "perimeterx",
+    "geetest",
+    "aws_waf",
+]
+
+# Why a solve did not put a token in the page: hand the CAPTCHA to a person.
+CaptchaSolveFailure = Literal[
+    "unsupported",
+    "no_details",
+    "solver_error",
+    "solver_unreachable",
+    "timeout",
+    "inject_failed",
+    "budget",
+    "no_solver",
+    "runtime_unsupported",
 ]
 
 # `cdp` re-issues a connect URL; `view` opens live view; `control` opens it with input.
@@ -208,6 +227,24 @@ class ProxyConfig:
 
 
 @dataclass(frozen=True)
+class CaptchaOptions:
+    """``solve=True`` sends reCAPTCHA, hCaptcha and Turnstile widgets that show to the
+    deployment's CAPTCHA solver service and puts the token into the page. Refused when the
+    deployment has no solver. The page's URL (without query or fragment) and the widget's site
+    key go to that third party, and the page can tell its callback was called by something other
+    than the widget."""
+
+    solve: bool = False
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> CaptchaOptions:
+        return cls(solve=bool(d.get("solve", False)))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"solve": self.solve}
+
+
+@dataclass(frozen=True)
 class SessionOptions:
     """A session's options as the API applied them, defaults filled in."""
 
@@ -220,6 +257,7 @@ class SessionOptions:
     metadata: dict[str, str]
     proxy: SessionProxy | None = None
     timezone: str | None = None
+    captcha: CaptchaOptions = field(default_factory=CaptchaOptions)
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> SessionOptions:
@@ -233,6 +271,7 @@ class SessionOptions:
             metadata=dict(d.get("metadata") or {}),
             proxy=SessionProxy.from_dict(d["proxy"]) if d.get("proxy") else None,
             timezone=d.get("timezone"),
+            captcha=CaptchaOptions.from_dict(d.get("captcha") or {}),
         )
 
 
@@ -247,16 +286,43 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class CaptchaSolveState:
+    """The latest solve of a CAPTCHA still present (sessions created with ``captcha.solve``).
+    ``solved`` means a token was put into the page; the site may still refuse it. ``failed``:
+    hand the CAPTCHA to a person."""
+
+    provider: str
+    status: str  # "solving" | "solved" | "failed"
+    at: datetime
+    reason: str | None
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> CaptchaSolveState:
+        return cls(
+            provider=d["provider"],
+            status=d["status"],
+            at=_time(d["at"]),  # type: ignore[arg-type]
+            reason=d.get("reason"),
+        )
+
+
+@dataclass(frozen=True)
 class SessionCaptcha:
     """A CAPTCHA from a known provider is showing on a page. It may already be solved: a solved
-    checkbox stays until the page moves on. Hand a person a control live-view link."""
+    checkbox stays until the page moves on. Unless ``solve`` says it is solving or solved, hand
+    a person a control live-view link."""
 
     providers: list[str]
     since: datetime
+    solve: CaptchaSolveState | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> SessionCaptcha:
-        return cls(providers=list(d["providers"]), since=_time(d["since"]))  # type: ignore[arg-type]
+        return cls(
+            providers=list(d["providers"]),
+            since=_time(d["since"]),  # type: ignore[arg-type]
+            solve=CaptchaSolveState.from_dict(d["solve"]) if d.get("solve") else None,
+        )
 
 
 @dataclass(frozen=True)

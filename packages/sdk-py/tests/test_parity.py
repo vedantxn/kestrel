@@ -19,6 +19,8 @@ import pytest
 from kestrel_sdk import (
     ApiError,
     AsyncSessions,
+    CaptchaOptions,
+    CaptchaSolveState,
     ComputerActionName,
     ComputerResponse,
     NetworkPolicy,
@@ -38,11 +40,12 @@ from kestrel_sdk._types import (
     SESSION_STATUSES,
     TERMINAL_STATUSES,
     CaptchaProvider,
+    CaptchaSolveFailure,
     EgressDenyReason,
     EndReason,
-    ProxyProvider,
     ErrorCode,
     EventType,
+    ProxyProvider,
 )
 
 OPENAPI = Path(__file__).resolve().parents[3] / "docs" / "api" / "openapi.json"
@@ -80,6 +83,8 @@ def params(fn: Any, *skip: str) -> set[str]:
         (NetworkPolicy, SCHEMAS["NetworkPolicy"]),
         (SessionProxy, SCHEMAS["SessionProxy"]),
         (SessionCaptcha, SCHEMAS["SessionCaptcha"]),
+        (CaptchaSolveState, SCHEMAS["CaptchaSolveState"]),
+        (CaptchaOptions, SCHEMAS["CaptchaOptions"]),
         (ProxyConfig, SCHEMAS["ProxyConfig"]),
         (Usage, SCHEMAS["SessionUsage"]),
         (SessionToken, SCHEMAS["SessionToken"]),
@@ -117,6 +122,7 @@ def test_enums() -> None:
     assert set(get_args(EgressDenyReason)) == enum(
         denied["properties"]["data"]["properties"]["reason"]
     )
+    assert set(get_args(CaptchaSolveFailure)) == set(SCHEMAS["CaptchaSolveFailure"]["enum"])
 
 
 @pytest.mark.parametrize("resource", [Sessions, AsyncSessions])

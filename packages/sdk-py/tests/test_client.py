@@ -9,6 +9,7 @@ import respx
 
 from kestrel_sdk import (
     ApiError,
+    CaptchaOptions,
     Kestrel,
     KestrelConnectionError,
     KestrelError,
@@ -123,6 +124,34 @@ class TestSessions:
         assert s.options.proxy == SessionProxy("http://proxy.example.com:3128", "u")
         Kestrel().sessions.create(proxy={"server": "http://p.example.com:8080"})
         assert body(route.calls.last)["proxy"] == {"server": "http://p.example.com:8080"}
+
+    def test_create_asks_for_captcha_solving_and_reads_the_solve_state(self, api):
+        options = dict(session_json()["options"])
+        options["captcha"] = {"solve": True}
+        route = api.post("/v1/sessions").respond(201, json=session_json(options=options))
+        s = Kestrel().sessions.create(captcha=CaptchaOptions(solve=True))
+        assert body(route.calls.last)["captcha"] == {"solve": True}
+        assert s.options.captcha == CaptchaOptions(solve=True)
+        Kestrel().sessions.create()
+        assert "captcha" not in body(route.calls.last)
+        api.get(f"/v1/sessions/{SESSION_ID}").respond(
+            200,
+            json=session_json(
+                captcha={
+                    "providers": ["recaptcha"],
+                    "since": "2026-10-05T10:00:00.000Z",
+                    "solve": {
+                        "provider": "recaptcha",
+                        "status": "failed",
+                        "at": "2026-10-05T10:00:03.000Z",
+                        "reason": "solver_error",
+                    },
+                }
+            ),
+        )
+        got = Kestrel().sessions.get(SESSION_ID)
+        assert got.captcha is not None and got.captcha.solve is not None
+        assert (got.captcha.solve.status, got.captcha.solve.reason) == ("failed", "solver_error")
 
     def test_repr_hides_the_connect_url(self, api):
         api.get(f"/v1/sessions/{SESSION_ID}").respond(200, json=session_json())
