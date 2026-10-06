@@ -295,6 +295,8 @@ export class HttpRuntimeClient implements RuntimeClient {
     if (body.length !== expected)
       throw new Error(`runtime ${path}: the body is not the size described`);
     return { meta, body };
+  }
+
   probe(
     address: string,
     token: string,
