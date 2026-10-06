@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>recaptcha-explicit</title>
+    <script>
+      (function () {
+        var base = document.title;
+        setInterval(function () {
+          document.title =
+            base +
+            " wd=" +
+            navigator.webdriver +
+            (window.solved ? " solved" : "");
+        }, 250);
+        // Rendered from script, with an anonymous callback: no data-callback to read.
+        window.onRecaptcha = function () {
+          window.grecaptcha.render("slot", {
+            sitekey: "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI",
+            callback: function (token) {
+              window.solved = token;
+            },
+          });
+        };
+      })();
+    </script>
+  </head>
+  <body style="margin: 0; font: 16px sans-serif">
+    <!-- Official test keys: they always pass, and are for testing only. -->
+    <div style="position: absolute; left: 40px; top: 40px">
+      <div id="slot"></div>
+      <script
+        src="https://www.google.com/recaptcha/api.js?onload=onRecaptcha&render=explicit"
+        async
+        defer
+      ></script>
+    </div>
+  </body>
+</html>

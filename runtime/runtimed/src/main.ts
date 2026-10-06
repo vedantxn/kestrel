@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { LIMITS } from "@kestrel/contracts";
 import { CaptchaWatcher } from "./captcha.js";
+import { PageProber } from "./captcha-probe.js";
 import { ViewportSizer } from "./cdp.js";
 import { ControlServer } from "./control.js";
 import { Env } from "./config.js";
@@ -48,7 +49,9 @@ const recorder = new Recorder(
   undefined,
   log,
 );
-const captcha = new CaptchaWatcher(cfg.CHROME_PORT, log);
+const captcha = new CaptchaWatcher(cfg.CHROME_PORT, log, {
+  prober: new PageProber(cfg.CHROME_PORT, log),
+});
 const live = new LiveServer(cfg.CHROME_PORT, tabs, log, captcha);
 const forward = new CdpForward(cfg.CHROME_PORT, live);
 const control = new ControlServer(

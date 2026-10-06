@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>geetest</title>
+    <script>
+      (function () {
+        var base = document.title;
+        setInterval(function () {
+          document.title = base + " wd=" + navigator.webdriver;
+        }, 250);
+      })();
+    </script>
+  </head>
+  <body style="margin: 0; font: 16px sans-serif">
+    <!-- A stand-in for GeeTest v4's button, with the class names the real widget renders
+         (recorded from gt4.geetest.com in the spike, docs/lld/captcha.md). -->
+    <div style="position: absolute; left: 40px; top: 40px">
+      <div
+        class="geetest_captcha_x1 geetest_captcha geetest_float"
+        style="width: 300px; height: 50px; border: 1px solid"
+      >
+        <div class="geetest_holder_x1 geetest_holder">
+          <div class="geetest_btn_click_x1 geetest_btn_click">
+            Click to verify
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

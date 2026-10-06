@@ -6,6 +6,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import {
+  CaptchaInjectRequest,
   ComputerAction,
   ConfigureRequest,
   ConfigureResponse,
@@ -17,6 +18,8 @@ import {
   RUNTIME_PATHS,
   RUNTIME_PROTOCOL_VERSION,
   RuntimeCaptcha,
+  RuntimeCaptchaChallenges,
+  RuntimeCaptchaInject,
   RuntimeHealth,
   ProbeRequest,
 } from "@kestrel/contracts";
@@ -45,6 +48,7 @@ const same = (a: string, b: string): boolean =>
  *  GET  /captcha    the known CAPTCHAs showing now (docs/lld/captcha.md)
  *  GET  /recording/fragments?after=N
  *                   a microVM's recording, pulled by the agent (docs/lld/microvm-recording.md)
+ *  GET  /captcha/challenges, POST /captcha/inject   solving, for a session configured with it
  */
 export class ControlServer {
   private server: Server | undefined;
@@ -211,7 +215,7 @@ export class ControlServer {
         if (parsed.data.recording)
           this.recorder?.start(applied.window, parsed.data.recordingSink);
         // Not awaited: detection must not slow a start (docs/lld/captcha.md).
-        this.captcha?.start();
+        this.captcha?.start({ solve: parsed.data.captchaSolve });
         return this.send(res, 200, response);
       }
 
@@ -293,6 +297,40 @@ export class ControlServer {
         for (const f of got.fragments) res.write(f.data);
         res.end();
         return;
+      }
+
+      if (
+        path === RUNTIME_PATHS.captchaChallenges ||
+        path === RUNTIME_PATHS.captchaInject
+      ) {
+        if (!this.captcha) return this.send(res, 404, { error: "not found" });
+        // Site keys and page URLs leave runtimed only for a session that asked to solve (T-51).
+        if (!this.configured || !this.captcha.solves)
+          return this.send(res, 409, {
+            error: "this session does not solve CAPTCHAs",
+          });
+        if (req.method === "GET" && path === RUNTIME_PATHS.captchaChallenges)
+          return this.send(
+            res,
+            200,
+            RuntimeCaptchaChallenges.parse({
+              challenges: this.captcha.challenges(),
+            }),
+          );
+        if (req.method === "POST" && path === RUNTIME_PATHS.captchaInject) {
+          const parsed = CaptchaInjectRequest.safeParse(await this.body(req));
+          if (!parsed.success)
+            return this.send(res, 400, {
+              error: parsed.error.issues[0]?.message ?? "invalid",
+            });
+          return this.send(
+            res,
+            200,
+            RuntimeCaptchaInject.parse(
+              await this.captcha.inject(parsed.data.id, parsed.data.token),
+            ),
+          );
+        }
       }
 
       if (req.method === "POST" && path === RUNTIME_PATHS.recordingStop) {

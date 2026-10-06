@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>perimeterx</title>
+    <script>
+      (function () {
+        var base = document.title;
+        setInterval(function () {
+          document.title = base + " wd=" + navigator.webdriver;
+        }, 250);
+      })();
+    </script>
+  </head>
+  <body style="margin: 0; font: 16px sans-serif">
+    <!-- A stand-in for HUMAN (PerimeterX) press-and-hold: the block page's documented
+         #px-captcha container with a source-less iframe in it, as the real one renders. -->
+    <div style="position: absolute; left: 40px; top: 40px">
+      <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+      <div
+        id="px-captcha"
+        style="width: 300px; height: 60px; border: 1px solid"
+      >
+        <iframe style="width: 300px; height: 60px; border: 0"></iframe>
+      </div>
+    </div>
+  </body>
+</html>

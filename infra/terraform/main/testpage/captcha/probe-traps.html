@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>probe-traps</title>
+    <script>
+      // Traps in the page's own world: if the platform's CAPTCHA probe ran anything here, or
+      // changed the document, the count in the title goes up. The page loads no third-party
+      // script, so every count is the platform's.
+      (function () {
+        var hits = (window.__hits = {});
+        var hit = function (k) {
+          hits[k] = (hits[k] || 0) + 1;
+        };
+        var wrap = function (obj, name) {
+          var orig = obj[name];
+          obj[name] = function () {
+            hit(name);
+            return orig.apply(this, arguments);
+          };
+        };
+        wrap(Document.prototype, "querySelector");
+        wrap(Document.prototype, "querySelectorAll");
+        wrap(Document.prototype, "getElementById");
+        wrap(Document.prototype, "getElementsByClassName");
+        wrap(Element.prototype, "getAttribute");
+        wrap(Element.prototype, "getBoundingClientRect");
+        wrap(Element.prototype, "checkVisibility");
+        wrap(window, "getComputedStyle");
+        // The classic Runtime.enable detector.
+        var e = new Error();
+        Object.defineProperty(e, "stack", {
+          get: function () {
+            hit("console");
+            return "";
+          },
+        });
+        setInterval(function () {
+          console.debug(e);
+        }, 500);
+        // The body only: the title below changes the head on purpose.
+        addEventListener("load", function () {
+          new MutationObserver(function () {
+            hit("mutation");
+          }).observe(document.body, {
+            subtree: true,
+            attributes: true,
+            childList: true,
+            characterData: true,
+          });
+        });
+        setInterval(function () {
+          var n = 0;
+          for (var k in hits) n += hits[k];
+          document.title =
+            "probe-traps wd=" +
+            navigator.webdriver +
+            " hits=" +
+            n +
+            " " +
+            Object.keys(hits).join(",");
+        }, 250);
+      })();
+    </script>
+  </head>
+  <body style="margin: 0; font: 16px sans-serif">
+    <div style="position: absolute; left: 40px; top: 40px">
+      <!-- A widget's markup without its script, and an in-page widget: both get probed. -->
+      <div
+        class="g-recaptcha"
+        data-sitekey="6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI"
+        data-callback="ok"
+      >
+        <textarea name="g-recaptcha-response" style="display: none"></textarea>
+      </div>
+      <div
+        id="px-captcha"
+        style="width: 300px; height: 60px; border: 1px solid"
+      ></div>
+    </div>
+  </body>
+</html>

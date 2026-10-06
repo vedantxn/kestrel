@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>aws-waf</title>
+    <script>
+      (function () {
+        var base = document.title;
+        setInterval(function () {
+          document.title = base + " wd=" + navigator.webdriver;
+        }, 250);
+      })();
+    </script>
+    <!-- A stand-in for AWS WAF's CAPTCHA interstitial: its script's URL shape, from the
+         solver services' documentation. The type keeps the browser from fetching it. -->
+    <script
+      type="text/x-kestrel-fixture"
+      src="https://0123456789ab.us-east-1.captcha.awswaf.com/0123456789ab/fixture/captcha.js"
+    ></script>
+  </head>
+  <body style="margin: 0; font: 16px sans-serif">
+    <div style="position: absolute; left: 40px; top: 40px">
+      <div id="captcha-container">Let's confirm you are human</div>
+    </div>
+  </body>
+</html>

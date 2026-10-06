@@ -800,6 +800,54 @@ describe("the control API (C5)", () => {
     ).toBe(409);
   });
 
+  it("answers the solving paths only for a session configured to solve", async () => {
+    const configure = (captchaSolve?: boolean) => ({
+      sessionProof: PROOF,
+      viewport: { width: 1280, height: 720 },
+      ...(captchaSolve === undefined ? {} : { captchaSolve }),
+    });
+    const inject = { id: "0123456789abcdef", token: "03AF-x" };
+    const plain = await rig({ captcha: true });
+    await plain.sup.start();
+    expect((await plain.call("GET", "/captcha/challenges")).status).toBe(409);
+    expect((await plain.call("POST", "/configure", configure())).status).toBe(
+      200,
+    );
+    // Without captchaSolve, no site key or page URL leaves runtimed (T-51).
+    expect((await plain.call("GET", "/captcha/challenges")).status).toBe(409);
+    expect((await plain.call("POST", "/captcha/inject", inject)).status).toBe(
+      409,
+    );
+
+    const solving = await rig({ captcha: true });
+    await solving.sup.start();
+    expect(
+      (await solving.call("POST", "/configure", configure(true))).status,
+    ).toBe(200);
+    const res = await solving.call("GET", "/captcha/challenges");
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({ challenges: [] });
+    expect(
+      (await solving.call("GET", "/captcha/challenges", undefined, null))
+        .status,
+    ).toBe(401);
+    expect(
+      (
+        await solving.call("POST", "/captcha/inject", {
+          ...inject,
+          token: 'x"; alert(1)',
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (await solving.call("POST", "/captcha/inject", inject)).json,
+    ).toEqual({ result: "gone", callback: false });
+
+    const old = await rig();
+    await old.sup.start();
+    expect((await old.call("GET", "/captcha/challenges")).status).toBe(404);
+  });
+
   it("has nothing to rekey when it is not a snapshot clone", async () => {
     const { sup, call } = await rig();
     await sup.start();

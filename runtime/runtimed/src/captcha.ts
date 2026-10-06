@@ -1,11 +1,21 @@
-import type { RuntimeCaptcha } from "@kestrel/contracts";
+import type {
+  RuntimeCaptcha,
+  RuntimeCaptchaChallenge,
+  RuntimeCaptchaInject,
+} from "@kestrel/contracts";
 import { Cdp, getVersion, type CdpEvent } from "./cdp.js";
 import {
   MAX_TARGET_STRING,
+  findChallenges,
   matchCaptchas,
+  matchFrame,
+  rootPageId,
+  type Challenge,
   type Detection,
+  type PageSignals,
   type TargetLite,
 } from "./captcha-match.js";
+import type { PageProber } from "./captcha-probe.js";
 
 /** Targets considered at once; more are ignored (T-50). */
 export const MAX_TARGETS = 1000;
@@ -32,10 +42,11 @@ export const LIST = {
 
 /**
  * CAPTCHA detection (`docs/lld/captcha.md`): one browser-level CDP connection that asks Chrome
- * which pages and iframes exist, and nothing else. No domain is enabled in any page and no target
- * is attached, so no page can tell it is there (HLD 8.10). Events only prompt a fresh read of the
- * list, which is what is matched. Started at configure, so it never runs in the pool or in a
- * microVM template, and a snapshot copies no socket.
+ * which pages and iframes exist, and nothing else. No domain is enabled in any page. Events only
+ * prompt a fresh read of the list, which is what is matched. With a `PageProber`, each read also
+ * takes every page's frame tree and, where due, an isolated-world probe of its DOM, on the
+ * prober's own connection (same-site frames and in-page widgets). Started at configure, so it
+ * never runs in the pool or in a microVM template, and a snapshot copies no socket.
  */
 export class CaptchaWatcher {
   private cdp: Cdp | null = null;
@@ -51,6 +62,9 @@ export class CaptchaWatcher {
   private again = false;
   private overflowLogged = false;
   private listeners = new Set<(d: Detection[]) => void>();
+  private targets = new Map<string, TargetLite>();
+  private pages = new Map<string, PageSignals>();
+  private solving = false;
 
   constructor(
     private readonly chromePort: number,
@@ -60,11 +74,17 @@ export class CaptchaWatcher {
       settleMs?: number;
       reconnectMs?: number;
       refreshMs?: number;
+      /** Reads each page's frames and DOM (`captcha-probe.ts`); without it, targets only. */
+      prober?: PageProber;
     } = {},
   ) {}
 
-  /** Begin watching; idempotent. Not awaited by configure. */
-  start(): void {
+  /**
+   * Begin watching; idempotent. Not awaited by configure. `solve`: this session solves, so the
+   * probe also reads widgets' site keys and callbacks, and `challenges`/`inject` answer.
+   */
+  start(opts: { solve?: boolean } = {}): void {
+    if (opts.solve) this.solving = true;
     if (this.started || this.closed) return;
     this.started = true;
     void this.connect();
@@ -92,10 +112,45 @@ export class CaptchaWatcher {
     return () => this.listeners.delete(l);
   }
 
+  /** Whether this session solves. */
+  get solves(): boolean {
+    return this.solving;
+  }
+
+  /** What a solver needs, for a session that solves: nothing otherwise. */
+  challenges(): RuntimeCaptchaChallenge[] {
+    if (!this.solving || !this.watching) return [];
+    return findChallenges(this.targets, this.pages).map(
+      ({ pageId: _page, ...c }) => c,
+    );
+  }
+
+  /** Put a solver's token into the widget it was asked for, found afresh. */
+  async inject(id: string, token: string): Promise<RuntimeCaptchaInject> {
+    if (!this.solving || !this.opts.prober)
+      return { result: "gone", callback: false };
+    await this.refresh();
+    const c: Challenge | undefined = findChallenges(
+      this.targets,
+      this.pages,
+    ).find((x) => x.id === id);
+    if (!c) return { result: "gone", callback: false };
+    const r = await this.opts.prober.inject(
+      c.pageId,
+      c.provider,
+      c.siteKey,
+      token,
+    );
+    if (r.fields === 0 && !r.callback)
+      return { result: "no_field", callback: false };
+    return { result: "injected", callback: r.callback };
+  }
+
   close(): void {
     this.closed = true;
     clearTimeout(this.settle);
     clearInterval(this.ticker);
+    this.opts.prober?.close();
     this.cdp?.close();
     this.cdp = null;
     this.watching = false;
@@ -205,7 +260,28 @@ export class CaptchaWatcher {
           typeof t.parentId === "string" ? t.parentId.slice(0, 128) : undefined,
       });
     }
-    if (this.cdp === cdp && this.watching) this.publish(matchCaptchas(targets));
+    let pages = new Map<string, PageSignals>();
+    if (this.opts.prober) {
+      // Pages with a known frame are probed every read: a Cloudflare challenge page and a
+      // Turnstile widget differ only inside the page, and a solve needs the widget's details.
+      const framed = new Set<string>();
+      const list: { id: string; url: string; title: string }[] = [];
+      for (const [id, t] of targets) {
+        if (t.type === "page") list.push({ id, url: t.url, title: t.title });
+        else if (t.type === "iframe" && matchFrame(t.url)) {
+          const root = rootPageId(targets, id);
+          if (root) framed.add(root);
+        }
+      }
+      pages = await this.opts.prober
+        .read(list, { framed, widgets: this.solving })
+        .catch(() => new Map<string, PageSignals>());
+    }
+    if (this.cdp === cdp && this.watching) {
+      this.targets = targets;
+      this.pages = pages;
+      this.publish(matchCaptchas(targets, pages));
+    }
   }
 
   private publish(next: Detection[]): void {
