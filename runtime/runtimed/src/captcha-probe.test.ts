@@ -4,6 +4,7 @@ import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { CaptchaWatcher, DISCOVER, LIST } from "./captcha.js";
+import { TimezoneOverride } from "./timezone.js";
 import {
   CALL_FUNCTION,
   FILL_FUNCTION,
@@ -132,6 +133,21 @@ class FakeChrome {
         params: m.params ?? {},
         ...(m.sessionId ? { sessionId: m.sessionId } : {}),
       });
+      // As Chrome does for the time-zone module's browser-level auto-attach: every existing page
+      // is announced, attached to that connection and held, before the answer.
+      if (m.method === "Target.setAutoAttach" && !m.sessionId)
+        for (const t of this.targets as { targetId: string; type: string }[])
+          if (t.type === "page")
+            ws.send(
+              JSON.stringify({
+                method: "Target.attachedToTarget",
+                params: {
+                  sessionId: `TZ-${t.targetId}`,
+                  targetInfo: { targetId: t.targetId, type: "page" },
+                  waitingForDebugger: true,
+                },
+              }),
+            );
       ws.send(JSON.stringify({ id: m.id, result: this.answer(m) }));
     });
   }
@@ -341,6 +357,81 @@ describe("the page probe", () => {
     await w.refresh();
     await w.refresh();
     expect(bigAttaches()).toBe(n);
+  });
+});
+
+describe("beside the time-zone override", () => {
+  it("shares the pages but no session: never resumes, overrides or detaches what the time-zone module holds", async () => {
+    // Both attach to every page, each from its own connection. The time-zone module holds new
+    // pages (waitForDebuggerOnStart) until their zone is set; the probe must not let them run,
+    // set anything, or detach a session it did not make.
+    const w = await setup([
+      page("P1", "https://www.google.com/recaptcha/api2/demo"),
+      page("P2", "https://blocked.example/"),
+    ]);
+    chrome.frames.set("P1", [{ url: RC_ANCHOR }]);
+    chrome.dom.set("P2", { ...DOM, px: true });
+    const tz = new TimezoneOverride(chrome.port);
+    try {
+      await tz.apply("Asia/Tokyo");
+      w.start({ solve: true });
+      await until(() => w.current().detections.length === 2);
+      const id = w.challenges()[0]!.id;
+      expect(await w.inject(id, "03AF-token")).toMatchObject({
+        result: "injected",
+      });
+      chrome.targets = [page("P2", "https://blocked.example/")];
+      await w.refresh(); // P1 went: the probe detaches its own session to it
+      w.close();
+
+      const tzConn = chrome.calls.find(
+        (c) => c.method === "Target.setAutoAttach" && !c.sessionId,
+      )!.conn;
+      const probeCalls = chrome.calls.filter(
+        (c) =>
+          c.conn !== tzConn &&
+          c.method !== DISCOVER.method &&
+          c.method !== LIST.method,
+      );
+      const tzCalls = chrome.calls.filter((c) => c.conn === tzConn);
+      // The time-zone module set the zone and released each page it held.
+      for (const p of ["P1", "P2"]) {
+        expect(tzCalls).toContainEqual(
+          expect.objectContaining({
+            method: "Emulation.setTimezoneOverride",
+            sessionId: `TZ-${p}`,
+          }),
+        );
+        expect(tzCalls).toContainEqual(
+          expect.objectContaining({
+            method: "Runtime.runIfWaitingForDebugger",
+            sessionId: `TZ-${p}`,
+          }),
+        );
+      }
+      // The probe: its own sessions only, nothing of the time-zone module's commands.
+      const own = new Set(["S-P1", "S-P2"]);
+      for (const c of probeCalls) {
+        expect([...PROBE_COMMANDS, ...INJECT_COMMANDS]).toContain(c.method);
+        if (c.sessionId) expect(own).toContain(c.sessionId);
+        if (c.method === "Target.attachToTarget")
+          expect(c.params).toEqual({
+            targetId: expect.any(String),
+            flatten: true,
+          });
+        if (c.method === "Target.detachFromTarget")
+          expect(own).toContain(c.params.sessionId);
+      }
+      expect(
+        probeCalls.some((c) => c.method === "Target.detachFromTarget"),
+      ).toBe(true);
+      // And the time-zone module never touched the probe's sessions.
+      for (const c of tzCalls)
+        if (c.sessionId) expect(c.sessionId).toMatch(/^TZ-/);
+      expect(tz.current()).toBe("Asia/Tokyo");
+    } finally {
+      tz.close();
+    }
   });
 });
 
