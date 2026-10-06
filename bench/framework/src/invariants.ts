@@ -1,12 +1,20 @@
+import {
+  checkVms,
+  type AgentVmAccount,
+  type HugePages,
+  type VmHostView,
+} from "./invariants-vm.js";
+
 /**
- * H5, threat model G-05, G-10, G-16. One check that answers "is anything leaked or inconsistent":
+ * H5, threat model G-05, G-10, G-16, G-25. One check that answers "is anything leaked or inconsistent":
  * it compares what Docker, the API's database, each node agent, the egress gateway, the gateways
  * and the firewall each say, and names every disagreement. It is a pure function over a snapshot,
  * so the comparison is tested exhaustively; the collectors that fill a snapshot from a real host
  * are separate (`collect.ts`).
  *
  * It runs after every benchmark and chaos case. Most failures it finds are leaks: a container,
- * a policy, a route or a slot that outlived its session.
+ * a policy, a route or a slot that outlived its session. A microVM node's browsers are judged by
+ * the same questions, asked of their jails, cgroups, processes and namespaces (`invariants-vm.ts`).
  */
 
 export interface DockerContainer {
@@ -15,6 +23,8 @@ export interface DockerContainer {
   role: string | null;
   running: boolean;
   address: string | null;
+  /** The `kestrel.creation` label: an agent reports it while it is making the container. */
+  creation?: string | null;
   /** From `docker inspect`, for the hardening check (G-05). */
   config: {
     privileged: boolean;
@@ -54,9 +64,18 @@ export interface AgentView {
     containerId: string | null;
   }[];
   pool: { containerId: string; address: string }[];
-  /** Stopped sessions' containers, frozen and queued for removal (agent deferRemoval); bounded in count and age. */
+  /** Containers on their way out: frozen for the reaper, or being removed (their record may be gone). */
   retiring?: string[];
+  /** Creation labels of containers (and VMs) the agent is making and has not recorded yet. */
+  creating?: string[];
   pendingReports: number;
+  runtime?: "docker" | "microvm";
+  /** The harness's probes the agent holds (G-23): owned, but never to be left behind. */
+  harness?: {
+    enabled: boolean;
+    probePolicies: { ip: string; sessionId: string }[];
+    probeVms: { id: string; address: string }[];
+  };
 }
 
 export interface EgressView {
@@ -82,6 +101,11 @@ export interface Snapshot {
   failpoints: { process: string; active: Record<string, string> }[];
   /** True while a test run has switched failpoints on on purpose. */
   failpointsExpected: boolean;
+  /** microVM nodes, read from the host (G-25). */
+  vms?: VmHostView[];
+  hugepages?: HugePages | null;
+  /** True while the harness has the agents' probe controls on on purpose. */
+  harnessExpected?: boolean;
 }
 
 export interface Violation {
@@ -116,8 +140,11 @@ export function checkInvariants(s: Snapshot): Violation[] {
       ...agentBindings.map((b) => b.containerId),
       ...s.agents.flatMap((a) => a.pool.map((p) => p.containerId)),
       ...s.agents.flatMap((a) => a.retiring ?? []),
+      ...s.agents.flatMap((a) => (a.harness?.probeVms ?? []).map((v) => v.id)),
     ].filter(Boolean) as string[],
   );
+  const creating = new Set(s.agents.flatMap((a) => a.creating ?? []));
+  const vmIds = new Set((s.vms ?? []).flatMap((h) => h.vms.map((v) => v.id)));
 
   // 1. The API and the agents agree on what is running.
   for (const a of liveApi) {
@@ -153,13 +180,17 @@ export function checkInvariants(s: Snapshot): Violation[] {
 
   // 2. Every container is accounted for, and every session container is running.
   for (const c of s.docker) {
+    // Docker lists a container from the moment it is created; the agent reports it as being made
+    // until its record is written.
+    if (c.creation && creating.has(c.creation)) continue;
     if (!agentContainers.has(c.id))
       bad(
         "leaked-container",
         `container ${c.id.slice(0, 12)} (${c.role ?? "?"}) is not in any agent's store`,
       );
   }
-  const dockerIds = new Set(s.docker.map((c) => c.id));
+  // A microVM node's browsers are VMs: for those, "in Docker" means that the VM exists.
+  const dockerIds = new Set([...s.docker.map((c) => c.id), ...vmIds]);
   for (const b of agentBindings) {
     if (b.containerId && !dockerIds.has(b.containerId))
       bad(
@@ -183,7 +214,15 @@ export function checkInvariants(s: Snapshot): Violation[] {
         .filter((b) => b.address)
         .map((b) => [b.address as string, b]),
     );
+    const leases = new Map(
+      s.agents
+        .filter((a) => a.node === e.node)
+        .flatMap((a) => a.harness?.probePolicies ?? [])
+        .map((l) => [l.ip, l.sessionId]),
+    );
     for (const p of e.policies) {
+      // A probe's lease (G-23) owns its policy; leaving the lease behind is its own rule below.
+      if (leases.get(p.ip) === p.sessionId && !addrs.has(p.ip)) continue;
       const b = addrs.get(p.ip);
       if (!b)
         bad(
@@ -278,6 +317,27 @@ export function checkInvariants(s: Snapshot): Violation[] {
         );
   }
 
+  // 7b. The harness's probe controls are never on outside a harness run, and it leaves nothing behind.
+  for (const a of s.agents) {
+    const h = a.harness;
+    if (!h) continue;
+    if (h.enabled && !s.harnessExpected)
+      bad(
+        "harness-surface-on",
+        `agent ${a.node} runs with KESTREL_HARNESS=on outside a harness run`,
+      );
+    for (const l of h.probePolicies)
+      bad(
+        "harness-probe-left",
+        `agent ${a.node} still holds a probe lease on ${l.ip}`,
+      );
+    for (const v of h.probeVms)
+      bad(
+        "harness-probe-left",
+        `agent ${a.node} still holds probe VM ${v.id.slice(0, 15)}`,
+      );
+  }
+
   // 8. Every session container carries the hardened profile (G-05).
   for (const c of s.docker) {
     const w = (what: string) =>
@@ -304,6 +364,33 @@ export function checkInvariants(s: Snapshot): Violation[] {
     if (k.ports > 0) w("publishes ports");
     if (k.binds > 0) w("mounts host paths");
     if (!/^ksl-/.test(k.networkMode)) w(`is on network ${k.networkMode}`);
+  }
+
+  // 9. microVM nodes: every VM hardened, nothing leaked (G-25).
+  if (s.vms?.length || s.hugepages) {
+    const accounts: AgentVmAccount[] = s.agents.map((a) => ({
+      node: a.node,
+      ids: new Set(
+        [
+          ...a.sessions.map((b) => b.containerId),
+          ...a.pool.map((p) => p.containerId),
+          ...(a.retiring ?? []),
+          ...(a.harness?.probeVms ?? []).map((p) => p.id),
+        ].filter((x): x is string => x !== null),
+      ),
+      creating: new Set(a.creating ?? []),
+      bindings: a.sessions
+        .filter((b) => b.containerId?.startsWith("vm-"))
+        .map((b) => ({
+          sessionId: b.sessionId,
+          state: b.state,
+          containerId: b.containerId as string,
+        })),
+      pool: a.pool
+        .map((p) => p.containerId)
+        .filter((id) => id.startsWith("vm-")),
+    }));
+    checkVms(s.vms ?? [], accounts, s.hugepages, bad);
   }
 
   return v;

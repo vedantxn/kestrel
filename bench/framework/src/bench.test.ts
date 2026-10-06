@@ -296,3 +296,43 @@ describe("the invariant checker (H5)", () => {
     });
   });
 });
+
+describe("the harness races and the harness surface", () => {
+  it("does not count a container an agent is still making, nor one it is removing", () => {
+    const a = good();
+    a.docker.push({
+      ...hardened("mk".padEnd(64, "0"), "pool"),
+      creation: "n1",
+    });
+    expect(rules(a)).toEqual(["leaked-container"]);
+    a.agents[0]!.creating = ["n1"];
+    expect(checkInvariants(a)).toEqual([]);
+    const b = good();
+    b.docker.push(hardened("rm".padEnd(64, "0"), "pool"));
+    b.agents[0]!.retiring = ["rm".padEnd(64, "0")];
+    expect(checkInvariants(b)).toEqual([]);
+  });
+
+  it("lets a probe's lease own its policy, but never lets a probe be left behind", () => {
+    const a = good();
+    a.egress[0]!.policies.push({ ip: "172.30.1.90", sessionId: "ses_probe" });
+    expect(rules(a)).toEqual(["leaked-egress-policy"]);
+    a.agents[0]!.harness = {
+      enabled: true,
+      probePolicies: [{ ip: "172.30.1.90", sessionId: "ses_probe" }],
+      probeVms: [],
+    };
+    a.harnessExpected = true;
+    expect(rules(a)).toEqual(["harness-probe-left"]);
+    a.agents[0]!.harness.probePolicies[0]!.sessionId = "ses_other";
+    expect(rules(a)).toEqual(["leaked-egress-policy", "harness-probe-left"]);
+  });
+
+  it("finds the harness surface on outside a harness run", () => {
+    const a = good();
+    a.agents[0]!.harness = { enabled: true, probePolicies: [], probeVms: [] };
+    expect(rules(a)).toEqual(["harness-surface-on"]);
+    a.harnessExpected = true;
+    expect(checkInvariants(a)).toEqual([]);
+  });
+});
