@@ -39,9 +39,15 @@ export const Env = z.object({
   RUNTIME_VERSION: z.string().default("dev"),
   /**
    * What a browser is (ADR 0017): a Docker container, or a Firecracker microVM restored from a
-   * snapshot of a running browser. A microVM node still uses Docker for sessions that record.
+   * snapshot of a running browser.
    */
   RUNTIME: z.enum(["docker", "microvm"]).default("docker"),
+  /**
+   * On a microVM node, where a session that records runs. "vm" (default): in a VM like every other
+   * session, its recording pulled out of the guest (docs/lld/microvm-recording.md). "docker": the
+   * escape hatch, a Docker container with a recording volume, as before 2026-10-06.
+   */
+  MICROVM_RECORDING: z.enum(["vm", "docker"]).default("vm"),
   MICROVM_DIR: z.string().default("/data/kestrel-vm"),
   FIRECRACKER_DIR: z.string().default("/opt/firecracker"),
   MICROVM_CGROUP: z.string().default("kestrel-vm"),

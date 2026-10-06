@@ -298,6 +298,21 @@ describe("the microVM driver", () => {
   });
 });
 
+describe("a VM and the host's files (microVM recording)", () => {
+  it("refuses a spec with a mount instead of restoring a VM that would silently not record", async () => {
+    const { vm, host } = await rig();
+    await expect(
+      vm.run({
+        ...spec(),
+        HostConfig: {
+          Mounts: [{ Type: "volume", Source: "v", Target: "/artifacts" }],
+        },
+      }),
+    ).rejects.toThrow(/cannot mount/);
+    expect(host.calls.some((c) => c.cmd.endsWith("jailer"))).toBe(false);
+  });
+});
+
 describe("the routed driver", () => {
   it("makes a recording browser a container and everything else a VM, and routes by id", async () => {
     const used: string[] = [];

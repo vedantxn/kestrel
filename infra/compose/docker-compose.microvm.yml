@@ -2,7 +2,9 @@
 # when RUNTIME_A=microvm. The agent already holds the Docker socket (root on the host); this adds
 # what the jailer needs: /dev/kvm and the tap device, mount and cgroup rights (privileged), the
 # host's process and cgroup namespaces so a VM outlives an agent restart, the jail and template directories,
-# and /run/netns shared with the host so namespaces do too.
+# and /run/netns shared with the host so namespaces do too. A VM's recording is pulled out of it
+# and written by the agent into the session's recording volume, so the volumes directory is
+# mounted read-write here (it replaces the read-only mount, by target); no guest ever mounts one.
 services:
   node-a:
     privileged: true
@@ -11,7 +13,9 @@ services:
     environment:
       RUNTIME: microvm
       MICROVM_NETNS_READY: ${MICROVM_NETNS_READY:-8}
+      MICROVM_RECORDING: ${MICROVM_RECORDING:-vm}
     volumes:
+      - /data/docker/volumes:/data/docker/volumes
       - /data/kestrel-vm:/data/kestrel-vm
       - /opt/firecracker:/opt/firecracker:ro
       - type: bind

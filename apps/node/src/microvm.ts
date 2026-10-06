@@ -491,6 +491,10 @@ export class MicroVmDriver implements DockerDriver {
     );
     const token = env.get("KESTREL_CONTROL_TOKEN");
     if (!token) throw new Error("microvm: no control token in the spec");
+    // A VM mounts nothing from the host; its recording is pulled out of it instead
+    // (docs/lld/microvm-recording.md). Refused rather than silently left unrecorded.
+    if ((spec.HostConfig?.Mounts?.length ?? 0) > 0)
+      throw new Error("microvm: a VM cannot mount a volume");
     const id = `vm-${randomBytes(12).toString("hex")}`;
     const t0 = performance.now();
     const marks: Record<string, number> = {};
@@ -733,9 +737,12 @@ export class MicroVmDriver implements DockerDriver {
 }
 
 /**
- * The node's driver when it runs microVMs: VMs for browsers, Docker for what VMs do not do yet.
- * A container with a mount is one that records (W3); recording into a VM would mean reading a
- * guest-written disk on the host, so those stay containers for now (v1 plan section 8).
+ * The node's driver when it runs microVMs: every browser a VM, with Docker behind it for the one
+ * case a VM does not cover. By default a recording session is a VM too: its recording is pulled
+ * out of the guest (`recordingSink: "pull"`, docs/lld/microvm-recording.md), so no spec carries a
+ * mount. With `MICROVM_RECORDING=docker` (the escape hatch) the agent gives recording browsers a
+ * volume, and a spec with a mount becomes a Docker container on the same node, as before
+ * 2026-10-06. Containers are also listed, so any left from that mode are reconciled away.
  */
 export class RoutedDriver implements DockerDriver {
   constructor(

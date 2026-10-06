@@ -49,6 +49,7 @@ import {
 import type { EgressClient } from "./egress-client.js";
 import type { Firewall } from "./firewall.js";
 import type { GatewayHub } from "./gateway-hub.js";
+import { RecordingPuller } from "./recording-pull.js";
 import type { RuntimeClient } from "./runtime-client.js";
 import type { Binding, Store } from "./store.js";
 
@@ -95,6 +96,15 @@ export interface AgentConfig {
    * a session that records and finds none hot starts cold with a fresh volume. Default 1.
    */
   recordingPool?: number;
+  /**
+   * Where a session's recording is made (W3). "volume" (default): the container writes it to a
+   * recording volume mounted into it. "pull" (a microVM node, docs/lld/microvm-recording.md): the
+   * guest holds fragments in memory and the agent pulls them into a volume only it writes, so no
+   * browser needs a volume and any pooled one can record.
+   */
+  recordingSink?: "volume" | "pull";
+  /** The most a teardown spends pulling a VM's last fragments (default RECORDING_STOP_MS). */
+  recordingStopMs?: number;
   /** Send a session's `removed` report as soon as it is queued, not with the next heartbeat. Default on. */
   reportOnRemoval?: boolean;
   /** Where the API reaches this agent, sent at registration. */
@@ -154,6 +164,11 @@ const REAP_MIN_FREE_MB = 4_096;
 /** How far back starts count towards the pool's size. */
 const DEMAND_WINDOW_MS = 10_000;
 
+/** A VM's recording is pulled this often; its guest holds 32 MiB, minutes of video, between pulls. */
+const RECORDING_PULL_MS = 2_000;
+/** A teardown spends at most this pulling a VM's last fragments before the VM is removed. */
+const RECORDING_STOP_MS = 10_000;
+
 const hex = (n: number): string => randomBytes(n).toString("hex");
 
 /**
@@ -199,8 +214,24 @@ export class NodeAgent {
   private timers: NodeJS.Timeout[] = [];
   private booted = false;
 
+  /** Pulls microVMs' recordings into their volumes (recordingSink "pull"). */
+  private readonly puller: RecordingPuller | undefined;
+
   constructor(private readonly d: AgentDeps) {
     this.c = d.config;
+    this.puller = d.volumes
+      ? new RecordingPuller({
+          runtime: d.runtime,
+          store: d.store,
+          volumes: d.volumes,
+          log: d.log,
+        })
+      : undefined;
+  }
+
+  /** Sessions record by pull (microVMs): no browser carries a volume. */
+  private get pulls(): boolean {
+    return this.c.recordingSink === "pull";
   }
 
   private get store(): Store {
@@ -336,7 +367,7 @@ export class NodeAgent {
     // A deploy may have lowered the pool's size: hot browsers past it are left over, not wanted.
     const keep = Math.max(
       this.c.poolTarget,
-      this.c.recordingPool ?? (this.d.volumes ? 1 : 0),
+      this.pulls ? 0 : (this.c.recordingPool ?? (this.d.volumes ? 1 : 0)),
     );
     const hot = this.store.allPool().filter((p) => p.state === "hot");
     for (const p of this.c.poolTarget === 0 ? hot : hot.slice(keep)) {
@@ -464,7 +495,11 @@ export class NodeAgent {
       try {
         this.startMarks.set(id, [["begin", performance.now()]]);
         // `acquire` has already recorded the container against the binding.
-        const got = await this.acquire(id, Boolean(req.recording));
+        // Only a container records into a volume of its own; a VM's recording is pulled.
+        const got = await this.acquire(
+          id,
+          Boolean(req.recording) && !this.pulls,
+        );
         this.mark(id, `acquired:${got.path}`);
         held = { containerId: got.containerId, address: got.address };
         await this.d.failpoints.hit("node.start.after_acquire");
@@ -477,7 +512,18 @@ export class NodeAgent {
         // W3. Recorded only if the container has a volume. The volume is kept from now on, so even a
         // start that fails later leaves nothing unaccounted for: retention removes it.
         let recording = false;
-        if (req.recording) {
+        if (req.recording && this.pulls) {
+          // A VM: the volume is the agent's alone, made now (once per session, whatever the
+          // attempt), and filled by pulling fragments once the session is ready.
+          const volume =
+            this.store.getRecording(id)?.volume ??
+            (await this.makeRecordingVolume());
+          if (volume) {
+            this.store.addRecording(id, volume, this.now());
+            this.store.addPull(id);
+            recording = true;
+          }
+        } else if (req.recording) {
           const volume =
             this.volumeOf.get(got.containerId) ??
             (await this.d.docker.inspect(got.containerId))?.labels[
@@ -496,7 +542,7 @@ export class NodeAgent {
           sessionProof: proof as never,
           viewport: req.viewport,
           recording,
-          recordingSink: "volume",
+          recordingSink: this.pulls ? "pull" : "volume",
         });
         // The container is untrusted: check that what it reports is what was asked (A6).
         if (
@@ -820,6 +866,7 @@ export class NodeAgent {
     for (let i = 0; i < want; i++) {
       this.spawning++;
       const withVolume =
+        !this.pulls &&
         this.d.volumes !== undefined &&
         this.store.allPool().filter((p) => this.volumeOf.has(p.containerId))
           .length +
@@ -1052,10 +1099,24 @@ export class NodeAgent {
     await this.d.failpoints.hit("node.stop.after_route_removed");
     const recorded = this.store.getRecording(id);
     // W3. Let the recorder finish its last fragment; best effort, the file is playable without it.
-    if (recorded && b.address && b.controlToken)
-      await this.d.runtime
-        .stopRecording(b.address, b.controlToken)
-        .catch(() => undefined);
+    // A VM's recording is pulled out of it first: what is waiting, then the last fragment, within
+    // a bounded time, because nothing can be read from the VM once it is gone.
+    const pulled = this.store.getPull(id);
+    if (recorded && b.address && b.controlToken) {
+      const address = b.address;
+      const token = b.controlToken;
+      const stop = () => this.d.runtime.stopRecording(address, token);
+      if (pulled && this.puller)
+        await this.puller.finish(
+          id,
+          address,
+          token,
+          stop,
+          this.c.recordingStopMs ?? RECORDING_STOP_MS,
+        );
+      else await stop().catch(() => undefined);
+    }
+    if (pulled && !pulled.done) this.store.finishPull(id);
     if (b.address) await this.clearPolicyBeforeRemoval(id, b.address);
     // Nothing needs the proxy's password once its policy is gone (T-45).
     const up = b.policy.upstream;
@@ -1723,6 +1784,7 @@ export class NodeAgent {
     );
     every(1000, () => this.tick(), "deadlines");
     every(2000, () => this.pollCaptchas(), "captcha");
+    every(RECORDING_PULL_MS, () => this.pullRecordings(), "recording");
     every(1000, () => this.refillPool(), "pool");
     every(250, () => this.reap(), "reap");
     every(
@@ -1739,6 +1801,40 @@ export class NodeAgent {
       () => this.checkFirewall(),
       "firewall",
     );
+  }
+
+  // --- recordings pulled from microVMs (docs/lld/microvm-recording.md) ---------------------------
+
+  /**
+   * Pull what each recording VM has made since the last pull (docs/lld/microvm-recording.md).
+   * Sessions are pulled side by side in the background, each at most one request at a time, so a
+   * slow or hostile guest delays only its own recording: a session whose last pull is still
+   * running is skipped, and this loop never waits on any guest.
+   */
+  pullRecordings(): void {
+    const puller = this.puller;
+    if (!puller) return;
+    const due = this.store.allBindings().filter((b) => {
+      if (b.state !== "ready" || !b.address || !b.controlToken) return false;
+      if (this.teardowns.has(b.sessionId) || puller.busy(b.sessionId))
+        return false;
+      const c = this.store.getPull(b.sessionId);
+      return c !== undefined && !c.done;
+    });
+    for (const b of due)
+      this.spawn(
+        (async () => {
+          // Up to a few answers at once, to catch up after a pause without waiting a tick each.
+          for (let i = 0; i < 4; i++) {
+            const r = await puller.pull(
+              b.sessionId,
+              b.address as string,
+              b.controlToken as string,
+            );
+            if (r !== "more") break;
+          }
+        })(),
+      );
   }
 
   // --- CAPTCHAs (docs/lld/captcha.md) ---------------------------------------------------------

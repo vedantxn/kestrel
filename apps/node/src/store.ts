@@ -85,7 +85,20 @@ CREATE TABLE IF NOT EXISTS recordings (
   volume TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS recording_pulls (
+  session_id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  done INTEGER NOT NULL DEFAULT 0
+);
 `;
+
+/** A recording pulled out of a microVM: the last fragment appended, and the file's length after it. */
+export interface PullCursor {
+  seq: number;
+  bytes: number;
+  done: boolean;
+}
 
 /**
  * G2, G15. The agent's durable memory, written before a start is acknowledged. It holds what
@@ -441,8 +454,56 @@ export class Store {
   }
 
   deleteRecording(sessionId: string): void {
+    this.db.transaction(() => {
+      this.db
+        .prepare("DELETE FROM recordings WHERE session_id = ?")
+        .run(sessionId);
+      this.db
+        .prepare("DELETE FROM recording_pulls WHERE session_id = ?")
+        .run(sessionId);
+    })();
+  }
+
+  // --- recordings pulled from microVMs (docs/lld/microvm-recording.md) ----------------------------
+
+  /** This session's recording is pulled from its guest, starting from nothing. Idempotent. */
+  addPull(sessionId: string): void {
     this.db
-      .prepare("DELETE FROM recordings WHERE session_id = ?")
+      .prepare("INSERT OR IGNORE INTO recording_pulls(session_id) VALUES(?)")
+      .run(sessionId);
+  }
+
+  getPull(sessionId: string): PullCursor | undefined {
+    const r = this.db
+      .prepare("SELECT * FROM recording_pulls WHERE session_id = ?")
+      .get(sessionId) as Record<string, number> | undefined;
+    return r ? { seq: r.seq!, bytes: r.bytes!, done: r.done === 1 } : undefined;
+  }
+
+  /**
+   * Move the cursor past fragments just appended, only if it is still where the append started
+   * (and not done). False if anything else moved it.
+   */
+  advancePull(
+    sessionId: string,
+    from: { seq: number; bytes: number },
+    to: { seq: number; bytes: number },
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          "UPDATE recording_pulls SET seq = ?, bytes = ? WHERE session_id = ? AND seq = ? AND bytes = ? AND done = 0",
+        )
+        .run(to.seq, to.bytes, sessionId, from.seq, from.bytes).changes === 1
+    );
+  }
+
+  /** Nothing more will be pulled for this session. */
+  finishPull(sessionId: string): void {
+    this.db
+      .prepare(
+        "UPDATE recording_pulls SET done = 1 WHERE session_id = ? AND done = 0",
+      )
       .run(sessionId);
   }
 }

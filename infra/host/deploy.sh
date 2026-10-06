@@ -3,6 +3,8 @@
 # Run as root (bin/host deploy and bin/host run do):
 #   sudo infra/host/deploy.sh [--no-build] [--two-nodes]
 #   RUNTIME_A=microvm: node a's browsers are Firecracker microVMs (ADR 0017); node b stays Docker.
+#   MICROVM_RECORDING=docker: node a's recording sessions are Docker containers (the escape hatch);
+#   by default they are VMs too, their recordings pulled out (docs/lld/microvm-recording.md).
 #
 # Builds the images, makes the secrets the first time, starts Postgres, applies migrations,
 # creates the first project and API key, then starts the platform services.
@@ -79,7 +81,7 @@ PUBLIC_IP=$PUBLIC_IP
 TEST_PAGE_URL=$TEST_PAGE_URL
 KESTREL_NODES=$NODES
 ENV
-printf "$SIZES\nRUNTIME_A=$RUNTIME_A\nMICROVM_NETNS_READY=${MICROVM_NETNS_READY:-8}\n" >> /var/lib/kestrel/compose.env
+printf "$SIZES\nRUNTIME_A=$RUNTIME_A\nMICROVM_NETNS_READY=${MICROVM_NETNS_READY:-8}\nMICROVM_RECORDING=${MICROVM_RECORDING:-vm}\n" >> /var/lib/kestrel/compose.env
 chmod 0600 /var/lib/kestrel/compose.env
 
 if [ "$NO_BUILD" != 1 ]; then

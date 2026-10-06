@@ -1,6 +1,9 @@
 import {
   ComputerResponse,
   ConfigureResponse,
+  RECORDING_FRAGMENTS_HEADER,
+  RECORDING_LIMITS,
+  RecordingFragments,
   RUNTIME_PATHS,
   RUNTIME_PORTS,
   RuntimeCaptcha,
@@ -49,18 +52,30 @@ export interface RuntimeClient {
     token: string,
     timeoutMs?: number,
   ): Promise<void>;
+  /**
+   * A microVM's recording: the fragments after `after` (and an acknowledgement of those up to it).
+   * The description is schema-checked and the body is exactly the size it claims, at most
+   * `RECORDING_LIMITS.pullBytes`; the caller checks the rest (sequence, boxes). 404 is thrown as a
+   * `RuntimeHttpError`.
+   */
+  recordingFragments(
+    address: string,
+    token: string,
+    after: number,
+    timeoutMs?: number,
+  ): Promise<{ meta: RecordingFragments; body: Buffer }>;
 }
 
 const MAX_RESPONSE_BYTES = 16 * 1024;
 /** A full-page PNG of a 1920x1080 display, base64, with room to spare. */
 const MAX_COMPUTER_RESPONSE_BYTES = 16 * 1024 * 1024;
 
-async function readLimited(
+async function readLimitedBytes(
   res: Response,
   max = MAX_RESPONSE_BYTES,
-): Promise<string> {
+): Promise<Buffer> {
   const reader = res.body?.getReader();
-  if (!reader) return "";
+  if (!reader) return Buffer.alloc(0);
   const chunks: Uint8Array[] = [];
   let size = 0;
   for (;;) {
@@ -73,7 +88,14 @@ async function readLimited(
     }
     chunks.push(value);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks, size);
+}
+
+async function readLimited(
+  res: Response,
+  max = MAX_RESPONSE_BYTES,
+): Promise<string> {
+  return (await readLimitedBytes(res, max)).toString("utf8");
 }
 
 /** A non-2xx answer, with its status. */
@@ -218,6 +240,52 @@ export class HttpRuntimeClient implements RuntimeClient {
       timeoutMs,
       MAX_COMPUTER_RESPONSE_BYTES,
     );
+  }
+
+  async recordingFragments(
+    address: string,
+    token: string,
+    after: number,
+    timeoutMs = 5000,
+  ): Promise<{ meta: RecordingFragments; body: Buffer }> {
+    const path = `${RUNTIME_PATHS.recordingFragments}?after=${after}`;
+    let res: Response;
+    try {
+      res = await fetch(`http://${address}:${this.port}${path}`, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: "error",
+      });
+    } catch (e) {
+      throw detail(path, e);
+    }
+    if (!res.ok) {
+      await readLimited(res).catch(() => undefined);
+      throw new RuntimeHttpError(path, res.status);
+    }
+    const raw = res.headers.get(RECORDING_FRAGMENTS_HEADER);
+    if (!raw || raw.length > MAX_RESPONSE_BYTES) {
+      await res.body?.cancel();
+      throw new Error(`runtime ${path}: no valid description of the fragments`);
+    }
+    let meta: RecordingFragments;
+    try {
+      meta = RecordingFragments.parse(JSON.parse(raw));
+    } catch {
+      await res.body?.cancel();
+      throw new Error(`runtime ${path}: the fragments' description is invalid`);
+    }
+    const expected = meta.fragments.reduce((n, f) => n + f.bytes, 0);
+    if (expected > RECORDING_LIMITS.pullBytes) {
+      await res.body?.cancel();
+      throw new Error(
+        `runtime ${path}: more fragments than one answer may hold`,
+      );
+    }
+    const body = await readLimitedBytes(res, expected);
+    if (body.length !== expected)
+      throw new Error(`runtime ${path}: the body is not the size described`);
+    return { meta, body };
   }
 
   async stopRecording(

@@ -76,7 +76,11 @@ if (env.RUNTIME === "microvm") {
   await microvm.start();
   driver = new RoutedDriver(microvm, docker);
   log.info(
-    { octets: env.MICROVM_OCTETS, pages: microvm.pages },
+    {
+      octets: env.MICROVM_OCTETS,
+      pages: microvm.pages,
+      recording: env.MICROVM_RECORDING,
+    },
     "browsers are microVMs",
   );
 }
@@ -112,6 +116,12 @@ agent = new NodeAgent({
     ...(env.RECORDING_POOL !== undefined
       ? { recordingPool: env.RECORDING_POOL }
       : {}),
+    // A microVM's recording is pulled out of it into a volume the agent writes (needs the
+    // volumes directory mounted read-write: docker-compose.microvm.yml).
+    recordingSink:
+      env.RUNTIME === "microvm" && env.MICROVM_RECORDING === "vm"
+        ? "pull"
+        : "volume",
     address:
       env.ADVERTISE_ADDRESS ?? `http://${env.LISTEN_HOST}:${env.LISTEN_PORT}`,
     runtimeVersion: env.RUNTIME_VERSION,

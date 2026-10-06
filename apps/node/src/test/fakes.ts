@@ -11,6 +11,9 @@ import {
   type HeartbeatRequest,
   type HeartbeatResponse,
   type ListPoliciesResponse,
+  RECORDING_LIMITS,
+  RecordingFragments,
+  RUNTIME_PATHS,
   type RegisterRequest,
   type RegisterResponse,
   type ReportsRequest,
@@ -36,7 +39,7 @@ import type {
   Volumes,
 } from "../docker.js";
 import type { EgressClient } from "../egress-client.js";
-import type { RuntimeClient } from "../runtime-client.js";
+import { RuntimeHttpError, type RuntimeClient } from "../runtime-client.js";
 import { Store } from "../store.js";
 
 export class FakeDocker implements DockerDriver {
@@ -166,6 +169,12 @@ export class FakeRuntime implements RuntimeClient {
     if (b === "fail" || this.failAllConfigures) throw new Error("runtime: 500");
     if (b === "garbage") throw new Error("response did not match its schema");
     this.configured.set(address, req);
+    if (
+      req.recording &&
+      req.recordingSink === "pull" &&
+      !this.guests.has(address)
+    )
+      this.guests.set(address, new FakeGuestRecording());
     const v =
       b === "badViewport"
         ? { width: req.viewport.width + 1, height: req.viewport.height }
@@ -197,8 +206,80 @@ export class FakeRuntime implements RuntimeClient {
   }
   async stopRecording(address: string): Promise<void> {
     this.calls.push({ op: "stopRecording", address });
+    this.guests.get(address)?.stop();
+  }
+
+  /** microVMs' recorders (pull sink), by address: made when configure asks for one. */
+  guests = new Map<string, FakeGuestRecording>();
+  async recordingFragments(
+    address: string,
+    _token: string,
+    after: number,
+  ): Promise<{ meta: RecordingFragments; body: Buffer }> {
+    this.calls.push({ op: `fragments:${after}`, address });
+    if (!this.alive(address)) throw new Error("connection refused");
+    const g = this.guests.get(address);
+    const path = RUNTIME_PATHS.recordingFragments;
+    if (!g || g.answer === "404") throw new RuntimeHttpError(path, 404);
+    if (g.answer === "timeout") throw new Error(`runtime ${path}: timed out`);
+    if (after < g.acked || after > g.made.length)
+      throw new RuntimeHttpError(path, 409);
+    g.acked = after;
+    const out = g.made.slice(after, after + RECORDING_LIMITS.pullFragments);
+    let got: { meta: RecordingFragments; body: Buffer } = {
+      meta: {
+        state: g.state,
+        fragments: out.map((d, i) => ({ seq: after + 1 + i, bytes: d.length })),
+        done: g.ended && after + out.length === g.made.length,
+      } as RecordingFragments,
+      body: Buffer.concat(out),
+    };
+    if (g.tamper) got = g.tamper(got);
+    // What the real client checks before the agent sees it.
+    return { meta: RecordingFragments.parse(got.meta), body: got.body };
   }
 }
+
+/** A VM's recorder as the agent sees it, scriptable: fragments it has made, and how it answers. */
+export class FakeGuestRecording {
+  made: Buffer[] = [];
+  acked = 0;
+  ended = false;
+  state: RecordingFragments["state"] = "recording";
+  answer: "ok" | "404" | "timeout" = "ok";
+  /** A hostile guest rewrites its answers. */
+  tamper?: (a: { meta: RecordingFragments; body: Buffer }) => {
+    meta: RecordingFragments;
+    body: Buffer;
+  };
+  /** Fragments the recorder writes as it stops (its last one, and the index). */
+  onStop: Buffer[] = [];
+  /** Recorder output: the init segment. */
+  init(): this {
+    this.made.push(Buffer.concat([mp4Box("ftyp", 20), mp4Box("moov", 700)]));
+    return this;
+  }
+  media(n: number, body = 1000): this {
+    for (let i = 0; i < n; i++)
+      this.made.push(
+        Buffer.concat([mp4Box("moof", 100), mp4Box("mdat", body, i + 1)]),
+      );
+    return this;
+  }
+  stop(): void {
+    if (this.ended) return;
+    this.made.push(...this.onStop);
+    this.ended = true;
+    this.state = "stopped";
+  }
+}
+
+export const mp4Box = (type: string, body = 0, fill = 0): Buffer => {
+  const b = Buffer.alloc(8 + body, fill);
+  b.writeUInt32BE(8 + body, 0);
+  b.write(type, 4, "latin1");
+  return b;
+};
 
 export class FakeEgress implements EgressClient {
   policies = new Map<string, EgressPolicy>();
