@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,6 +82,8 @@ function fakeHost(dir: string) {
   };
   const procs: Procs = {
     isVmm: async (pid, id) => pids.get(pid) === id,
+    isHandler: async (pid, id) =>
+      pids.get(pid)?.endsWith(`/${id}/root/uffd.sock`) ?? false,
     alive: (pid) => pids.has(pid),
     kill: (pid) => {
       killed.push(pid);
@@ -85,7 +93,7 @@ function fakeHost(dir: string) {
       calls.push({ cmd, args: [...args, `uid=${uid}`, `cgroup=${cgroup}`] });
       writeFileSync(args[0]!, ""); // the handler's socket
       const pid = nextPid++;
-      pids.set(pid, "handler");
+      pids.set(pid, `handler:${args[0]}`);
       return pid;
     },
   };
@@ -285,6 +293,51 @@ describe("the microVM driver", () => {
     const pid = [...host.pids.keys()][0]!;
     host.pids.delete(pid); // the VMM exited by itself
     expect(await vm.inspect(info.id)).toMatchObject({ running: false });
+  });
+
+  it("treats a VM whose page-fault handler is gone as dead, and ends it (G-25)", async () => {
+    const { dir, host, vm } = await rig({
+      uffdHandler: "/opt/firecracker/uffd_on_demand_handler",
+    });
+    const info = await vm.run(spec());
+    const died: string[] = [];
+    vm.onEvent((e) => void died.push(`${e.id}:${e.action}`));
+    const handler = [...host.pids].find(([, v]) => v.startsWith("handler:"));
+    const vmm = [...host.pids].find(([, v]) => v === info.id)![0];
+    host.pids.delete(handler![0]); // the handler was killed
+    expect(await vm.inspect(info.id)).toMatchObject({ running: false });
+    expect((await vm.list())[0]).toMatchObject({ running: false });
+    // Old enough not to be mid-restore: the watch kills the VMM and reports the VM dead.
+    const meta = join(dir, "meta", `${info.id}.json`);
+    const m = JSON.parse(readFileSync(meta, "utf8")) as { createdAt: number };
+    writeFileSync(
+      meta,
+      JSON.stringify({ ...m, createdAt: m.createdAt - 10_000 }),
+    );
+    for (let i = 0; i < 40 && died.length === 0; i++)
+      await new Promise((r) => setTimeout(r, 50));
+    expect(died).toEqual([`${info.id}:die`]);
+    expect(host.killed).toContain(vmm);
+  });
+
+  it("makes a probe VM like a clone, rekeyed as a probe (G-23)", async () => {
+    const { rt, vm } = await rig();
+    const info = await vm.runProbe({
+      ...spec(),
+      Labels: { "kestrel.node": "a", "kestrel.role": "probe" },
+    });
+    expect(info).toMatchObject({ running: true, address: "172.30.1.128" });
+    const rekey = rt.seen.find((s) => s.url.endsWith("/rekey"))!;
+    expect(JSON.parse(rekey.body!)).toEqual({
+      token: "c".repeat(48),
+      probe: true,
+    });
+    expect(vm.describe()).toMatchObject({
+      uid: 10002,
+      cgroupParent: "kestrel-vm",
+      octets: [128, 131],
+      netns: { inUse: [128], ready: [], making: [] },
+    });
   });
 
   it("does not trust a pid file that names some other process", async () => {

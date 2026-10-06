@@ -18,6 +18,7 @@ import {
   RUNTIME_PATHS,
   RUNTIME_PORTS,
   RuntimeHealth,
+  type MicroVmRuntimeView,
 } from "@kestrel/contracts";
 import type { Logger } from "@kestrel/shared";
 import type { ContainerInfo, DockerDriver, DockerEvent } from "./docker.js";
@@ -142,6 +143,15 @@ export class NetnsPool {
       number,
     ];
     return `02:4b:00:${h(b)}:${h(c)}:${h(octet)}`;
+  }
+
+  /** Which namespaces are made and waiting, used by a VM, and being made (for the invariant checker). */
+  snapshot(): MicroVmRuntimeView["netns"] {
+    return {
+      ready: [...this.ready],
+      inUse: [...this.inUse],
+      making: [...this.making],
+    };
   }
 
   /** At boot: namespaces of live VMs stay in use; any other of this node's is deleted. */
@@ -331,6 +341,8 @@ const exists = (path: string) =>
 export interface Procs {
   /** Is `pid` the Firecracker of VM `id`? (The pid file is in the VM's chroot, so it is checked.) */
   isVmm(pid: number, id: string): Promise<boolean>;
+  /** Is `pid` the page-fault handler of VM `id`? (Its pid could have been reused.) */
+  isHandler(pid: number, id: string): Promise<boolean>;
   alive(pid: number): boolean;
   kill(pid: number): void;
   /** Start a detached process as the VM's user and put it in the VM's cgroup; returns its pid. */
@@ -347,6 +359,10 @@ export const hostProcs: Procs = {
   isVmm: async (pid, id) => {
     const cmd = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
     return cmd.split("\0").includes(id) && cmd.includes("firecracker");
+  },
+  isHandler: async (pid, id) => {
+    const cmd = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
+    return cmd.split("\0").some((a) => a.endsWith(`/${id}/root/uffd.sock`));
   },
   alive: (pid) => {
     try {
@@ -433,6 +449,27 @@ export class MicroVmDriver implements DockerDriver {
     clearInterval(this.watch);
   }
 
+  /** What the invariant checker needs to find each VM's jail, cgroup and namespace, and judge them (G-25). */
+  describe(): MicroVmRuntimeView {
+    const c = this.c;
+    return {
+      dir: c.dir,
+      cgroupParent: c.cgroupParent,
+      uid: c.vmUid,
+      gid: c.vmGid,
+      vcpus: c.vcpus,
+      memMib: c.memMib,
+      subnetPrefix: c.subnetPrefix,
+      octets: c.octets,
+      bridge: c.bridge,
+      bridgeIp: c.bridgeIp,
+      egressPort: c.egressPort,
+      pages: this.pages,
+      netnsTarget: c.netnsReady,
+      netns: this.netns.snapshot(),
+    };
+  }
+
   /** Read at every restore: a rebuilt template has a new token (and the old clones keep theirs). */
   private async token(): Promise<string> {
     return (
@@ -482,7 +519,24 @@ export class MicroVmDriver implements DockerDriver {
     };
   }
 
-  async run(spec: Docker.ContainerCreateOptions): Promise<ContainerInfo> {
+  run(spec: Docker.ContainerCreateOptions): Promise<ContainerInfo> {
+    return this.make(spec, false);
+  }
+
+  /**
+   * The harness's probe VM (threat model G-23): restored and placed exactly like a session's
+   * clone, in a namespace of its own, but rekeyed as a probe, so it is never configured and its
+   * runtimed serves `/probe`. The agent gives it no egress policy. Called only by an agent whose
+   * harness surface is on.
+   */
+  runProbe(spec: Docker.ContainerCreateOptions): Promise<ContainerInfo> {
+    return this.make(spec, true);
+  }
+
+  private async make(
+    spec: Docker.ContainerCreateOptions,
+    probe: boolean,
+  ): Promise<ContainerInfo> {
     const env = new Map(
       (spec.Env ?? []).map((e) => [
         e.slice(0, e.indexOf("=")),
@@ -511,7 +565,7 @@ export class MicroVmDriver implements DockerDriver {
       await this.writeMeta(meta);
       await this.restore(meta, mark);
       const address = this.netns.address(octet);
-      await this.rekey(address, token, mark);
+      await this.rekey(address, token, mark, probe);
       if (performance.now() - t0 > 500)
         this.d.log.info({ vm: id, phases: marks }, "microvm: slow restore");
       return this.info(meta, true);
@@ -611,6 +665,7 @@ export class MicroVmDriver implements DockerDriver {
     address: string,
     token: string,
     mark: (k: string) => void = () => undefined,
+    probe = false,
   ): Promise<void> {
     const template = await this.token();
     const base = `http://${address}:${RUNTIME_PORTS.control}`;
@@ -643,7 +698,7 @@ export class MicroVmDriver implements DockerDriver {
           authorization: `Bearer ${template}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ token }),
+        body: JSON.stringify(probe ? { token, probe: true } : { token }),
         signal: AbortSignal.timeout(10_000),
       });
     let res: Response;
@@ -673,8 +728,24 @@ export class MicroVmDriver implements DockerDriver {
       .then((t) => JSON.parse(t) as Meta)
       .catch(() => null);
     if (!m) return null;
-    const pid = await this.pid(id);
-    return this.info(m, pid !== null && this.procs.alive(pid));
+    return this.info(m, (await this.state(m)).running);
+  }
+
+  /**
+   * A VM runs while its VMM does and, with 2 MiB pages, while its page-fault handler does: without
+   * the handler the guest hangs at its next fault, so the VM counts as dead (and is killed).
+   */
+  private async state(
+    m: Meta,
+  ): Promise<{ running: boolean; vmm: number | null }> {
+    const pid = await this.pid(m.id);
+    const vmm = pid !== null && this.procs.alive(pid) ? pid : null;
+    if (vmm === null) return { running: false, vmm };
+    if (m.handlerPid === undefined) return { running: true, vmm };
+    const handler =
+      this.procs.alive(m.handlerPid) &&
+      (await this.procs.isHandler(m.handlerPid, m.id));
+    return { running: handler, vmm };
   }
 
   /** Kill the VMM; nothing is torn down by a daemon, so a removal does not slow anything else. */
@@ -710,10 +781,8 @@ export class MicroVmDriver implements DockerDriver {
 
   async list(): Promise<ContainerInfo[]> {
     const out: ContainerInfo[] = [];
-    for (const m of await this.metas()) {
-      const pid = await this.pid(m.id);
-      out.push(this.info(m, pid !== null && this.procs.alive(pid)));
-    }
+    for (const m of await this.metas())
+      out.push(this.info(m, (await this.state(m)).running));
     return out;
   }
 
@@ -725,10 +794,12 @@ export class MicroVmDriver implements DockerDriver {
   private async poll(): Promise<void> {
     for (const m of await this.metas()) {
       if (this.removing.has(m.id) || this.dead.has(m.id)) continue;
-      const pid = await this.pid(m.id);
-      if (pid !== null && this.procs.alive(pid)) continue;
+      const { running, vmm } = await this.state(m);
+      if (running) continue;
       // Not yet started (the jailer writes the pid a moment after the meta file): not dead.
       if (Date.now() - m.createdAt < 5_000) continue;
+      // Its handler is gone: the guest would hang at its next page fault. End it now.
+      if (vmm !== null) this.procs.kill(vmm);
       this.dead.add(m.id);
       for (const l of this.listeners)
         l({ id: m.id, action: "die", exitCode: 137 });
