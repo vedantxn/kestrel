@@ -25,9 +25,17 @@ export const USAGE = `Usage: kestrel <command> [options]
 Commands:
   sessions create [--timeout ms] [--idle-timeout ms] [--viewport WxH] [--record]
                   [--allow host]... [--deny host]... [--wait-for-capacity ms]
-                  [--proxy http://host:port [--proxy-username u]]
-                                the proxy's password is read from
+                  [--proxy scheme://host:port [--proxy-username u]]
+                                scheme is http, https (TLS to the proxy) or
+                                socks5; the proxy's password is read from
                                 $KESTREL_PROXY_PASSWORD, never from a flag
+                  [--proxy-provider p] [--proxy-country CC] [--proxy-region r]
+                  [--proxy-city c] [--proxy-sticky id] [--proxy-sticky-minutes n]
+                                an exit from a residential provider: brightdata,
+                                oxylabs, decodo or iproyal (default generic)
+                  [--timezone Area/City]
+                                the browser's time zone; defaults from
+                                --proxy-country where it has one clear zone
   sessions list [--status s] [--limit n] [--cursor c]
   sessions get <id>
   sessions stop <id>
@@ -81,6 +89,13 @@ const COMMANDS: Record<string, Command> = {
       record: { type: "boolean" },
       proxy: { type: "string" },
       "proxy-username": { type: "string" },
+      "proxy-provider": { type: "string" },
+      "proxy-country": { type: "string" },
+      "proxy-region": { type: "string" },
+      "proxy-city": { type: "string" },
+      "proxy-sticky": { type: "string" },
+      "proxy-sticky-minutes": { type: "string" },
+      timezone: { type: "string" },
     },
     args: [],
     async run(k, _args, v, io) {
@@ -97,6 +112,7 @@ const COMMANDS: Record<string, Command> = {
           deny: v.deny as string[] | undefined,
         };
       req.proxy = proxy(v, io);
+      if (typeof v.timezone === "string") req.timezone = v.timezone;
       const s = await k.sessions.create(req, { signal: io.signal });
       if (v.json) return json(io, s);
       io.stdout(details(s));
@@ -352,20 +368,60 @@ function proxy(v: Values, io: Io): CreateSessionRequest["proxy"] {
   const password = io.env.KESTREL_PROXY_PASSWORD || undefined;
   const username =
     typeof v["proxy-username"] === "string" ? v["proxy-username"] : undefined;
+  const exitFlags = [
+    "proxy-provider",
+    "proxy-country",
+    "proxy-region",
+    "proxy-city",
+    "proxy-sticky",
+    "proxy-sticky-minutes",
+  ] as const;
   if (typeof v.proxy !== "string") {
     if (username)
-      throw new UsageError("--proxy-username needs --proxy http://host:port");
+      throw new UsageError("--proxy-username needs --proxy scheme://host:port");
+    const stray = exitFlags.find((f) => v[f] !== undefined);
+    if (stray)
+      throw new UsageError(`--${stray} needs --proxy scheme://host:port`);
     return undefined;
   }
   if (password && !username)
     throw new UsageError(
       "KESTREL_PROXY_PASSWORD is set: pass --proxy-username as well",
     );
+  const str = (k: (typeof exitFlags)[number]): string | undefined =>
+    typeof v[k] === "string" ? (v[k] as string) : undefined;
+  const provider = str("proxy-provider");
   return {
     server: v.proxy,
     ...(username ? { username } : {}),
     ...(password ? { password } : {}),
+    ...(provider
+      ? {
+          provider: provider as NonNullable<
+            CreateSessionRequest["proxy"]
+          >["provider"],
+        }
+      : {}),
+    ...(str("proxy-country") ? { country: str("proxy-country") } : {}),
+    ...(str("proxy-region") ? { region: str("proxy-region") } : {}),
+    ...(str("proxy-city") ? { city: str("proxy-city") } : {}),
+    ...(str("proxy-sticky") ? { sticky: str("proxy-sticky") } : {}),
+    ...(v["proxy-sticky-minutes"] !== undefined
+      ? { stickyMinutes: int(v, "proxy-sticky-minutes") }
+      : {}),
   };
+}
+
+/** Where the proxy was asked to exit: `DE, munich, sticky abc123`. */
+function exitOf(p: NonNullable<Session["options"]["proxy"]>): string {
+  const parts = [p.country, p.region, p.city].filter(Boolean) as string[];
+  if (p.sticky)
+    parts.push(
+      `sticky ${p.sticky}${p.stickyMinutes ? ` for ${p.stickyMinutes} min` : ""}`,
+    );
+  const via =
+    p.provider && p.provider !== "generic" ? ` via ${p.provider}` : "";
+  return parts.length || via ? `; exit ${parts.join(", ") || "any"}${via}` : "";
 }
 
 /**
@@ -390,10 +446,18 @@ function details(s: Session): string {
       "proxy",
       s.options.proxy
         ? s.options.proxy.server +
-          (s.options.proxy.username ? ` (as ${s.options.proxy.username})` : "")
+          (s.options.proxy.username
+            ? ` (as ${s.options.proxy.username})`
+            : "") +
+          exitOf(s.options.proxy)
         : "-",
     ],
+    ["timezone", s.options.timezone ?? "-"],
     ["browser seconds", String(s.usage.browserSeconds)],
+    [
+      "egress bytes",
+      `${s.usage.egressBytesUp} up, ${s.usage.egressBytesDown} down`,
+    ],
     [
       "captcha",
       s.captcha

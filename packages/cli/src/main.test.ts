@@ -152,6 +152,78 @@ describe("sessions", () => {
     expect(r.stdout + r.stderr).not.toContain("pr0xy-cli");
   });
 
+  it("create asks a provider for an exit and a time zone, and shows them with the bytes", async () => {
+    const proxied = session({
+      options: {
+        ...session().options,
+        proxy: {
+          server: "socks5://gate.decodo.com:7000",
+          username: "acme",
+          provider: "decodo",
+          country: "DE",
+          city: "munich",
+          sticky: "abc123",
+          stickyMinutes: 30,
+        },
+        timezone: "Europe/Berlin",
+      },
+      usage: { browserSeconds: 3, egressBytesUp: 120, egressBytesDown: 4567 },
+    });
+    const r = await cli(
+      [
+        "sessions",
+        "create",
+        "--proxy",
+        "socks5://gate.decodo.com:7000",
+        "--proxy-username",
+        "acme",
+        "--proxy-provider",
+        "decodo",
+        "--proxy-country",
+        "DE",
+        "--proxy-city",
+        "munich",
+        "--proxy-sticky",
+        "abc123",
+        "--proxy-sticky-minutes",
+        "30",
+        "--timezone",
+        "Europe/Berlin",
+      ],
+      () => ({ status: 201, body: proxied }),
+      { KESTREL_PROXY_PASSWORD: "pr0xy-cli" },
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]!.body).toMatchObject({
+      proxy: {
+        server: "socks5://gate.decodo.com:7000",
+        username: "acme",
+        password: "pr0xy-cli",
+        provider: "decodo",
+        country: "DE",
+        city: "munich",
+        sticky: "abc123",
+        stickyMinutes: 30,
+      },
+      timezone: "Europe/Berlin",
+    });
+    expect(r.stdout).toMatch(
+      /^proxy\s+socks5:\/\/gate\.decodo\.com:7000 \(as acme\); exit DE, munich, sticky abc123 for 30 min via decodo$/m,
+    );
+    expect(r.stdout).toMatch(/^timezone\s+Europe\/Berlin$/m);
+    expect(r.stdout).toMatch(/^egress bytes\s+120 up, 4567 down$/m);
+    expect(r.stdout + r.stderr).not.toContain("pr0xy-cli");
+  });
+
+  it("create refuses exit flags without --proxy", async () => {
+    const r = await cli(
+      ["sessions", "create", "--proxy-country", "DE"],
+      ok(session()),
+    );
+    expect(r.code).toBe(2);
+    expect(r.calls).toHaveLength(0);
+  });
+
   it("create refuses a proxy password without a username, and a username without a proxy", async () => {
     const noUser = await cli(
       ["sessions", "create", "--proxy", "http://p.example.com:3128"],
