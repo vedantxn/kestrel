@@ -6,6 +6,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import {
+  AGENT_STATE_PATH,
   ComputerAction,
   NODE_PATHS,
   SessionId,
@@ -70,7 +71,7 @@ export function createNodeServer(
         return send(res, 401, { error: "unauthorized" });
       const path = new URL(req.url ?? "/", "http://node").pathname;
 
-      if (req.method === "GET" && path === "/v1/state")
+      if (req.method === "GET" && path === AGENT_STATE_PATH)
         return send(res, 200, agent.state());
       if (req.method === "GET" && path === NODE_PATHS.describe)
         return send(res, 200, agent.describe());
