@@ -3,6 +3,9 @@
 # real Playwright and Puppeteer scripts through the public gateway from outside AWS.
 #
 #   bin/exit-check [quick]        quick = QUICK=1 (short batches), for the from-scratch run
+#
+# Needs two nodes deployed (deploy.sh --two-nodes) and, for check 10, node b's port open:
+# bin/tf main apply -var open_node_b_port=true (and without it afterwards).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -11,11 +14,20 @@ Q=()
 [ "${1:-}" = quick ] && Q=(QUICK=1)
 name=exit-$(date +%s)
 bin/host sync >/dev/null
-bin/host run --detach --name "$name" -- sudo infra/host/bench.sh m1 TWO_NODES=1 "${Q[@]}" >/dev/null
-until bin/host logs "$name" 2>/dev/null | grep -q '"name":"m1-exit-check"'; do sleep 20; done
+bin/host run --detach --name "$name" -- sudo infra/host/bench.sh m1 TWO_NODES=1 ${Q[@]+"${Q[@]}"} >/dev/null
+# Wait for the report; stop waiting if the run ends without one (an early failure would otherwise hang here).
+until bin/host logs "$name" 2>/dev/null | grep -q '"name":"m1-exit-check"'; do
+  if bin/host jobs 2>/dev/null | grep -Eq "^$name +exit"; then
+    bin/host logs "$name" 2>/dev/null | grep -q '"name":"m1-exit-check"' && break # it finished just now
+    bin/host logs "$name" | tail -n 40
+    echo "m1 FAILED: the run ended without a report" >&2
+    exit 1
+  fi
+  sleep 20
+done
 bin/host logs "$name" | grep -vE "done, " | tail -n 40
 bin/host logs "$name" | grep -q '"pass":true' || { echo "m1 FAILED" >&2; exit 1; }
 echo "--- check 10: from outside AWS ($HOST)"
-KEY=$(bin/host run -- sudo cat /var/lib/kestrel/secrets/harness-api-key)
+KEY=$(bin/host run -- sudo cat /var/lib/kestrel/secrets/harness-api-key | tr -d '\r')
 KESTREL_API_KEY="$KEY" KESTREL_URL="https://$HOST" TEST_PAGE_URL=$(bin/tf main output -raw test_page_url) node bench/framework/dist/outside.js
 echo "exit check passed"

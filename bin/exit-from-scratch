@@ -1,17 +1,229 @@
 #!/usr/bin/env bash
-# Destroy the main stack and rebuild it from nothing, once (v1 plan WP9). The Elastic IP and the
-# state bucket live in the bootstrap stack, so the hostname survives.
+# Destroy the main stack, rebuild it from nothing and run the exit check on it (v1 plan WP9,
+# section 7). The Elastic IP and the state bucket live in the bootstrap stack, so the hostname
+# survives.
+#
+#   bin/exit-from-scratch [--dry-run] [--keep-large] [--final-runtime microvm|docker]
+#
+#   --dry-run          print the steps and run nothing
+#   --keep-large       stop after the exit check and leave the host as it ran (m7i.2xlarge, two
+#                      Docker nodes at the exit sizes, nightly stop off). Port 8444 is closed anyway.
+#   --final-runtime    how node a runs at the end (default microvm, as the host normally runs)
+#
+# Steps:
+#   1. here: an admin sign-in with 3 h left (MIN_SESSION_HOURS), the dev key, a build of the harness
+#   2. destroy the main stack; apply it on m7i.2xlarge with the nightly stop off (8444 stays closed)
+#   3. wait for the first boot (cloud-init), the host check, /dev/kvm
+#   4. sync, the runtime image, two Docker nodes at the exit sizes (6 slots and 3 warm each)
+#   5. open 8444, bin/exit-check quick (m1 on the host, check 10 from here), close 8444
+#   6. back to the default instance size (Terraform stops and starts the host)
+#   7. redeploy as the host normally runs: node a on microVMs (Firecracker, the template built from
+#      the runtime image), default sizes; a short churn check; the nightly stop back on
+# The exit check runs on Docker nodes: the harness's collectors read Docker only (threat model
+# G-25). On any failure, port 8444 is closed again and the script says what it left.
+#
+# Each run gets a new certificate for the same hostname: Let's Encrypt allows five a week.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-VARS=(-var instance_type=m7i.2xlarge -var open_node_b_port=true -var autostop_enabled=false)
+
+DRY=0
+KEEP_LARGE=0
+FINAL_RUNTIME=microvm
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1 ;;
+    --keep-large) KEEP_LARGE=1 ;;
+    --final-runtime) FINAL_RUNTIME=${2:?--final-runtime needs microvm or docker}; shift ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+case "$FINAL_RUNTIME" in microvm|docker) ;; *) echo "--final-runtime is microvm or docker" >&2; exit 2 ;; esac
+
+LARGE=(-var instance_type=m7i.2xlarge -var autostop_enabled=false)
+EXIT_SIZES=(SLOTS_A=6 POOL_A=3 SLOTS_B=6 POOL_B=3)
+MIN_HOURS=${MIN_SESSION_HOURS:-3}
+ADMIN_PROFILE=${KESTREL_ADMIN_PROFILE:-kestrel-admin}
+DEV_PROFILE=${KESTREL_PROFILE:-kestrel-dev}
+
 start=$(date +%s)
-bin/tf main destroy --yes "${VARS[@]}"
-bin/tf main apply --yes "${VARS[@]}"
-bin/host up
-bin/host autostop off
-bin/host sync
-bin/host run -- sudo runtime/build.sh
-bin/host run -- sudo env SLOTS_A=6 POOL_A=3 SLOTS_B=6 POOL_B=3 infra/host/deploy.sh --two-nodes
-echo "rebuilt in $(( $(date +%s) - start )) s"
-bin/exit-check quick
+STAGE="preflight"
+PORT_OPEN=0        # 8444 is open in the security group
+LARGE_HOST=0       # the host is (or may be) on m7i.2xlarge with the nightly stop off
+HOST="as it was"
+EXIT_RESULT="not run"
+DEPLOYED="nothing yet"
+
+say() { printf '\n== [%dm] %s\n' "$(( ($(date +%s) - start) / 60 ))" "$*"; }
+
+# run CMD...: print it, and run it unless this is a dry run.
+run() {
+  printf '   $'; printf ' %q' "$@"; printf '\n'
+  [ "$DRY" = 1 ] || "$@"
+}
+
+# retry TRIES CMD...: for Terraform, whose first apply after a destroy can race AWS (a bucket name
+# just freed, an instance still terminating). An apply is safe to repeat.
+retry() {
+  local tries=$1 i
+  shift
+  for i in $(seq 1 "$tries"); do
+    if run "$@"; then return 0; fi
+    [ "$i" -lt "$tries" ] || return 1
+    echo "   failed; trying again in 60 s ($i of $tries)"
+    sleep 60
+  done
+}
+
+check_admin_session() {
+  local left
+  left=$(aws configure export-credentials --profile "$ADMIN_PROFILE" --format process 2>/dev/null | python3 -c '
+import datetime, json, sys
+e = json.load(sys.stdin).get("Expiration")
+if not e:
+    print("unknown")
+else:
+    t = datetime.datetime.fromisoformat(e.replace("Z", "+00:00"))
+    print(round((t - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 3600, 1))
+') || left=none
+  case "$left" in
+    none) echo "no admin session; sign in: aws login --profile $ADMIN_PROFILE" >&2; return 1 ;;
+    unknown) echo "   admin session: expiry not reported; continuing" ;;
+    *)
+      if ! python3 -c "import sys; sys.exit(0 if $left >= $MIN_HOURS else 1)"; then
+        echo "the admin session has $left h left and this run needs about $MIN_HOURS h; sign in again: aws login --profile $ADMIN_PROFILE" >&2
+        return 1
+      fi
+      echo "   admin session: $left h left" ;;
+  esac
+}
+
+summary() {
+  local took=$(( ($(date +%s) - start) / 60 ))
+  echo
+  echo "== what this run left ($took min)"
+  echo "   exit check:     $EXIT_RESULT"
+  if [ "$PORT_OPEN" = 1 ]; then
+    echo "   port 8444:      STILL OPEN. Close it: bin/tf main apply ${LARGE[*]}"
+  else
+    echo "   port 8444:      closed"
+  fi
+  echo "   host:           $HOST"
+  if [ "$LARGE_HOST" = 1 ]; then
+    echo "                   back to normal: bin/tf main apply && bin/host autostop on   (or bin/host down)"
+  fi
+  echo "   deployed:       $DEPLOYED"
+}
+
+on_exit() {
+  local code=$?
+  [ "$DRY" = 1 ] && return
+  if [ "$code" -ne 0 ]; then
+    echo >&2
+    echo "!! stopped during: $STAGE (exit $code)" >&2
+    if [ "$PORT_OPEN" = 1 ]; then
+      echo "== closing port 8444 again (the host keeps its size, to look at what failed)"
+      if bin/tf main apply --yes "${LARGE[@]}"; then PORT_OPEN=0; fi
+    fi
+  fi
+  summary
+}
+trap on_exit EXIT
+trap 'exit 130' INT TERM
+
+[ "$DRY" = 1 ] && echo "dry run: nothing below is executed"
+
+# --- 1. preflight --------------------------------------------------------------------------
+say "preflight on this machine: admin sign-in, dev key, harness build"
+if [ "$DRY" = 1 ]; then
+  echo "   (an admin session with at least $MIN_HOURS h left; the $DEV_PROFILE key works)"
+else
+  command -v aws >/dev/null && command -v terraform >/dev/null && command -v node >/dev/null \
+    || { echo "needs aws, terraform and node on PATH" >&2; exit 1; }
+  [ -d node_modules ] || { echo "run npm ci first (check 10 runs the harness from here)" >&2; exit 1; }
+  check_admin_session
+  AWS_PROFILE=$DEV_PROFILE aws sts get-caller-identity --query Arn --output text >/dev/null \
+    || { echo "the $DEV_PROFILE key does not work" >&2; exit 1; }
+fi
+run npm run build --silent
+
+# --- 2. destroy and create -----------------------------------------------------------------
+STAGE="destroy"
+say "destroy the main stack"
+HOST="being destroyed; check with bin/tf main plan"
+run bin/tf main destroy --yes "${LARGE[@]}"
+HOST="destroyed"
+STAGE="create"
+say "create it: m7i.2xlarge, nightly stop off, port 8444 closed"
+LARGE_HOST=1
+HOST="being created on m7i.2xlarge, nightly stop off; check with bin/tf main plan"
+retry 3 bin/tf main apply --yes "${LARGE[@]}"
+HOST="running, m7i.2xlarge, nightly stop OFF (about \$0.40 an hour)"
+
+# --- 3. first boot -------------------------------------------------------------------------
+STAGE="first boot"
+say "wait for the host and its first boot"
+run bin/host up
+# sync makes /srv/kestrel, which `bin/host run` starts in, before the first-boot script has.
+run bin/host sync
+# 0 done, 2 done with warnings (newer cloud-init), 1 failed.
+run bin/host run -- sudo bash -c 'cloud-init status --wait >/dev/null; s=$?; cloud-init status --long; [ "$s" -ne 1 ]'
+run bin/host check
+if [ "$FINAL_RUNTIME" = microvm ] && [ "$KEEP_LARGE" = 0 ]; then
+  run bin/host run -- test -c /dev/kvm   # nested virtualisation (var.nested_virtualization)
+fi
+run bin/host autostop off
+
+# --- 4. build and deploy -------------------------------------------------------------------
+STAGE="runtime image"
+say "the runtime image (Chrome $(cat runtime/CHROME_VERSION))"
+run bin/host run -- sudo runtime/build.sh
+STAGE="deploy (two Docker nodes)"
+say "deploy two Docker nodes at the exit sizes"
+run bin/host run -- sudo env RUNTIME_A=docker "${EXIT_SIZES[@]}" infra/host/deploy.sh --two-nodes
+DEPLOYED="two Docker nodes at the exit sizes (${EXIT_SIZES[*]})"
+
+# --- 5. the exit check ---------------------------------------------------------------------
+STAGE="open 8444"
+say "open port 8444: node b's gateway, which check 10 reaches from outside"
+retry 2 bin/tf main apply --yes "${LARGE[@]}" -var open_node_b_port=true
+PORT_OPEN=1
+STAGE="exit check"
+say "the exit check (m1 on the host, then check 10 from here)"
+if ! run bin/exit-check quick; then EXIT_RESULT="FAILED"; exit 1; fi
+EXIT_RESULT="passed"
+
+# --- 6. close 8444, and the default size ---------------------------------------------------
+if [ "$KEEP_LARGE" = 1 ]; then
+  STAGE="close 8444"
+  say "close port 8444 (--keep-large: the host stays as the check ran it)"
+  retry 3 bin/tf main apply --yes "${LARGE[@]}"
+  PORT_OPEN=0
+  [ "$DRY" = 1 ] || echo "rebuilt and checked in $(( ($(date +%s) - start) / 60 )) min"
+  exit 0
+fi
+STAGE="close 8444 and resize"
+say "close port 8444 and go back to the default instance size (Terraform stops and starts the host)"
+HOST="being resized to the default instance type; check with bin/tf main plan"
+retry 3 bin/tf main apply --yes
+PORT_OPEN=0
+LARGE_HOST=0
+HOST="running, the default instance type (variables.tf), nightly stop still off"
+
+# --- 7. as the host normally runs ----------------------------------------------------------
+STAGE="redeploy ($FINAL_RUNTIME node a)"
+say "redeploy as the host normally runs: node a $FINAL_RUNTIME, node b Docker, default sizes"
+run bin/host up
+# No platform rebuild; for microVMs this installs Firecracker and builds the template.
+run bin/host run -- sudo env RUNTIME_A="$FINAL_RUNTIME" infra/host/deploy.sh --two-nodes --no-build
+DEPLOYED="node a $FINAL_RUNTIME, node b Docker, default sizes"
+STAGE="churn check"
+say "a short churn check: browsers made and destroyed on both nodes, no failures"
+run bin/host run -- sudo infra/host/bench.sh churn TWO_NODES=1 CHURN_CONCURRENCY=1,4 CHURN_SECONDS=30 RUNTIME="$FINAL_RUNTIME"
+STAGE="nightly stop"
+run bin/host autostop on
+HOST="running, the default instance type, nightly stop on (bin/host down to stop it now)"
+STAGE="done"
+[ "$DRY" = 1 ] || echo "rebuilt and checked in $(( ($(date +%s) - start) / 60 )) min"
