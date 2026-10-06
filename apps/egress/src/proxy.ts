@@ -104,6 +104,14 @@ type Decision =
       port: number;
     };
 
+/** The size of an HTTP/1.1 head: its first line, each header line, and the blank line. */
+function headBytes(first: string, raw: string[]): number {
+  let n = first.length + 2 + 2;
+  for (let i = 0; i + 1 < raw.length; i += 2)
+    n += (raw[i] as string).length + 2 + (raw[i + 1] as string).length + 2;
+  return n;
+}
+
 /** `::ffff:1.2.3.4` is the same peer as `1.2.3.4`. */
 const normalizePeer = (a: string | undefined): string =>
   (a ?? "").replace(/^::ffff:/, "");
@@ -943,6 +951,12 @@ export class EgressProxy {
       opened.resume();
     }
 
+    // The request's head counts as sent (G-20): its line and headers as the browser sent them.
+    countBytes(
+      entry.bytes,
+      "up",
+      headBytes(`${method} ${req.url ?? ""} HTTP/1.1`, req.rawHeaders),
+    );
     const upstream = httpRequest(
       {
         host: d.addresses[0],
@@ -982,6 +996,11 @@ export class EgressProxy {
             if (v !== undefined && !HOP_BY_HOP.has(k)) out[k] = v;
           out.connection = "close";
           res.writeHead(code, out);
+          countBytes(
+            entry.bytes,
+            "down",
+            headBytes(`HTTP/1.1 ${code}`, up.rawHeaders),
+          );
           up.on("data", (c: Buffer) => {
             countBytes(entry.bytes, "down", c.length);
             this.o.metrics.bytes.inc({ direction: "in" }, c.length);

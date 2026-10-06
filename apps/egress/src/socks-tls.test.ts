@@ -509,7 +509,10 @@ describe("SOCKS5 upstream (RFC 1928, 1929)", () => {
     expect(lines[0]).toBe("GET /page?q=1 HTTP/1.1");
     expect(lines.some((l) => /^proxy-authorization/i.test(l))).toBe(false);
     onlyTheProxyWasDialed();
-    await waitFor(() => entry().bytes.down === "hello from the far end".length);
+    // The body and the response's head (status line and headers).
+    await waitFor(() => entry().bytes.down > "hello from the far end".length);
+    expect(entry().bytes.down).toBeLessThan(400);
+    expect(entry().bytes.up).toBeGreaterThan(30); // the request's head
   });
 
   it("plain HTTP through a SOCKS5 proxy that refuses the credentials is reported", async () => {
@@ -639,7 +642,7 @@ describe("TLS to an https:// proxy", () => {
 // --- bytes without a proxy -------------------------------------------------------------------
 
 describe("byte counters (G-20)", () => {
-  it("count a plain HTTP request's body up and the response down, per session", async () => {
+  it("count a plain HTTP request up and its response down, heads and bodies, per session", async () => {
     rig = await makeRig(undefined, 0);
     const body = "x".repeat(5000);
     const a = await send(
@@ -648,8 +651,11 @@ describe("byte counters (G-20)", () => {
     expect(a.status).toBe(200);
     const text = await readAll(a);
     expect(text).toBe("direct, 5000 bytes received");
-    await waitFor(() => entry().bytes.down === text.length);
-    expect(entry().bytes.up).toBe(5000);
+    // Bodies, plus each head as it crossed: line, headers and the blank line.
+    await waitFor(() => entry().bytes.down > text.length);
+    expect(entry().bytes.down).toBeLessThan(text.length + 300);
+    expect(entry().bytes.up).toBeGreaterThan(5000);
+    expect(entry().bytes.up).toBeLessThan(5000 + 300);
   });
 
   it("survive a policy update for the same session and are handed over when it is cleared", async () => {
