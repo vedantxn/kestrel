@@ -14,6 +14,7 @@ import { applyViewport, ViewportSizer } from "./cdp.js";
 import { chromeArgs } from "./chrome-args.js";
 import { Tabs } from "./page.js";
 import { CaptchaWatcher } from "./captcha.js";
+import { TimezoneOverride } from "./timezone.js";
 import { ControlServer } from "./control.js";
 import { CdpForward } from "./forward.js";
 import { Recorder } from "./recorder.js";
@@ -100,6 +101,8 @@ class FakeChrome {
         }
         case "Browser.getWindowForTarget":
           return reply({ windowId: 7 });
+        case "Target.setAutoAttach":
+          return reply({});
         case "Browser.setWindowBounds":
           this.bounds.push(m.params?.bounds);
           if (this.ignore > 0) this.ignore--;
@@ -556,7 +559,12 @@ describe("the supervisor (R4-R6)", () => {
 
 describe("the control API (C5)", () => {
   async function rig(
-    opts: { snapshot?: boolean; captcha?: boolean; recorder?: Recorder } = {},
+    opts: {
+      snapshot?: boolean;
+      captcha?: boolean;
+      recorder?: Recorder;
+      timezone?: boolean;
+    } = {},
   ) {
     chrome = new FakeChrome();
     const port = await chrome.start();
@@ -579,6 +587,7 @@ describe("the control API (C5)", () => {
       undefined,
       opts.snapshot ?? false,
       opts.captcha ? new CaptchaWatcher(port) : undefined,
+      opts.timezone ? new TimezoneOverride(port) : undefined,
     );
     const cport = await control.listen(0, "127.0.0.1");
     closers.push(() => control.close());
@@ -886,6 +895,51 @@ describe("the control API (C5)", () => {
         })
       ).status,
     ).toBe(409);
+  });
+
+  it("holds the session's time zone before it answers, and says which is in force", async () => {
+    const { sup, call } = await rig({ timezone: true });
+    await sup.start();
+    const res = await call("POST", "/configure", {
+      sessionProof: PROOF,
+      viewport: { width: 1280, height: 720 },
+      timezone: "Asia/Tokyo",
+    });
+    expect(res).toMatchObject({
+      status: 200,
+      json: { timezone: "Asia/Tokyo" },
+    });
+    expect(
+      (
+        await call("POST", "/configure", {
+          sessionProof: PROOF,
+          viewport: { width: 1280, height: 720 },
+          timezone: "Not/AZone",
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  it("answers timezone null when none was asked for, and 501 when it cannot hold one", async () => {
+    const plain = await rig({ timezone: true });
+    await plain.sup.start();
+    expect(
+      await plain.call("POST", "/configure", {
+        sessionProof: PROOF,
+        viewport: { width: 1280, height: 720 },
+      }),
+    ).toMatchObject({ status: 200, json: { timezone: null } });
+    const without = await rig();
+    await without.sup.start();
+    expect(
+      (
+        await without.call("POST", "/configure", {
+          sessionProof: PROOF,
+          viewport: { width: 1280, height: 720 },
+          timezone: "Asia/Tokyo",
+        })
+      ).status,
+    ).toBe(501);
   });
 
   it("validates the request", async () => {

@@ -27,6 +27,7 @@ import { runComputer, type Tabs } from "./page.js";
 import { runProbe } from "./probe.js";
 import type { Recorder } from "./recorder.js";
 import type { Supervisor } from "./supervisor.js";
+import type { TimezoneOverride } from "./timezone.js";
 
 const same = (a: string, b: string): boolean =>
   timingSafeEqual(
@@ -69,6 +70,8 @@ export class ControlServer {
     private readonly snapshot = false,
     /** CAPTCHA detection, started once the container is bound to a session. */
     private readonly captcha?: CaptchaWatcher,
+    /** The session's time zone, held for its life (docs/lld/upstream-proxy.md). */
+    private readonly timezone?: TimezoneOverride,
   ) {}
 
   async listen(port: number, host = "0.0.0.0"): Promise<number> {
@@ -85,6 +88,7 @@ export class ControlServer {
   async close(): Promise<void> {
     this.sizer.close();
     this.captcha?.close();
+    this.timezone?.close();
     this.server?.closeAllConnections();
     await new Promise<void>((r) =>
       this.server ? this.server.close(() => r()) : r(),
@@ -188,8 +192,19 @@ export class ControlServer {
           return this.send(res, 409, {
             error: "this container is bound to another session",
           });
+        // Before the answer, so the session's first page already has its zone.
+        if (parsed.data.timezone !== undefined) {
+          if (!this.timezone)
+            return this.send(res, 501, {
+              error: "time zones are not supported",
+            });
+          await this.timezone.apply(parsed.data.timezone);
+        }
         const applied = await this.sizer.apply(viewport);
-        const response = ConfigureResponse.parse(applied);
+        const response = ConfigureResponse.parse({
+          ...applied,
+          timezone: this.timezone?.current() ?? null,
+        });
         this.configured = { proof: sessionProof, viewport, response };
         // Started after the viewport is applied, so the video is the window the caller asked for.
         // In a microVM this is the first moment anything is recorded: the template never is.

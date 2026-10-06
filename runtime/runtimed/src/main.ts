@@ -9,6 +9,7 @@ import { LiveServer } from "./live.js";
 import { Recorder } from "./recorder.js";
 import { Tabs } from "./page.js";
 import { Supervisor, type Proc } from "./supervisor.js";
+import { TimezoneOverride } from "./timezone.js";
 
 const parsed = Env.safeParse(process.env);
 if (!parsed.success) {
@@ -60,6 +61,7 @@ const control = new ControlServer(
   sizer,
   cfg.SNAPSHOT === "on",
   captcha,
+  new TimezoneOverride(cfg.CHROME_PORT, log),
 );
 
 await forward.listen(cfg.FORWARD_PORT);
