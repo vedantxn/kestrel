@@ -285,7 +285,8 @@ describe("sockets are not leaked", () => {
   });
 
   it("drops connections that never finish a request, or never send one", async () => {
-    rig = await makeRig({ preRequestTimeoutMs: 150 });
+    // Long enough that the first look cannot race the check that drops them.
+    rig = await makeRig({ preRequestTimeoutMs: 400 });
     const socks: Socket[] = [];
     for (let i = 0; i < 30; i++) {
       const s = connect({ host: "127.0.0.1", port: rig.port });
@@ -296,9 +297,9 @@ describe("sockets are not leaked", () => {
         ); // headers never end
       socks.push(s);
     }
-    await wait(200);
+    await wait(100);
     expect(await rig.open()).toBeGreaterThan(0);
-    await wait(1500);
+    await wait(2200);
     expect(await rig.open()).toBe(0);
     socks.forEach((s) => s.destroy());
   });
