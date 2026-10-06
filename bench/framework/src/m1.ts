@@ -15,6 +15,7 @@ import {
   PuppeteerDriver,
 } from "./driver.js";
 import { checkInvariants } from "./invariants.js";
+import { runCloneDiff } from "./clones.js";
 import { runIsolationSuite, type IsolationConfig } from "./isolation.js";
 import { runChaos } from "./chaos.js";
 import { runBatch } from "./lifecycle.js";
@@ -176,6 +177,40 @@ export async function runM1(c: M1Config): Promise<Report> {
     });
     report.measure("isolation", findings);
     await invariants("the isolation suite");
+
+    c.log("check 4b: what a snapshot copies into every clone (G-24)");
+    try {
+      const d = await runCloneDiff(client, c.host, c.testPageUrl);
+      if ("skipped" in d)
+        report.add({
+          id: "4b",
+          name: "snapshot clones share nothing that links them (G-24)",
+          pass: true,
+          detail: `not applicable: ${d.skipped}`,
+        });
+      else {
+        report.add({
+          id: "4b",
+          name: `snapshot clones share nothing that links them (G-24, node ${d.node}${d.baseline ? ", against two containers" : ", no Docker node for a baseline"})`,
+          pass: d.pass,
+          detail: d.pass
+            ? `${d.uniqueCount} items differ between the clones; ${d.shared.length} the same and explained`
+            : d.failures
+                .slice(0, 6)
+                .map((f) => `${f.item}: ${f.why}`)
+                .join("; "),
+        });
+        report.measure("clones", d);
+      }
+    } catch (e) {
+      report.add({
+        id: "4b",
+        name: "snapshot clones share nothing that links them (G-24)",
+        pass: false,
+        detail: (e as Error).message.slice(0, 300),
+      });
+    }
+    await invariants("the clone comparison");
   }
 
   if (want(5)) {
