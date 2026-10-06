@@ -37,6 +37,8 @@ export interface HostConfig {
     iface: string;
     bridgeIp: string;
     egressSocket: string;
+    /** The agent's probe controls (KESTREL_HARNESS=on); default harness.sock beside the egress socket. */
+    harnessSocket?: string;
   }[];
   apiInternal: string;
   databaseUrlFile: string;
@@ -120,6 +122,9 @@ export function mapContainer(i: Docker.ContainerInspectInfo): DockerContainer {
     },
   };
 }
+
+export const harnessSocketOf = (n: HostConfig["nodes"][number]): string =>
+  n.harnessSocket ?? n.egressSocket.replace(/[^/]+$/, "harness.sock");
 
 /** A node agent's account of itself (`GET /v1/state`), checked against its contract. */
 export async function agentState(

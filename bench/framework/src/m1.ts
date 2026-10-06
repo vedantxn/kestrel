@@ -3,7 +3,12 @@ import Docker from "dockerode";
 import WebSocket from "ws";
 import { chromium, type BrowserContext } from "playwright-core";
 import { KestrelClient } from "./client.js";
-import { DEFAULT_HOST, settledInvariants, type HostConfig } from "./collect.js";
+import {
+  DEFAULT_HOST,
+  harnessSocketOf,
+  settledInvariants,
+  type HostConfig,
+} from "./collect.js";
 import {
   PlaywrightDiscoveryDriver,
   PlaywrightDriver,
@@ -29,10 +34,7 @@ export interface M1Config {
   concurrency: number;
   latencySamples: number;
   host: HostConfig;
-  isolation: Omit<
-    IsolationConfig,
-    "publicIp" | "publicHostname" | "testPageUrl"
-  >;
+  isolation: Pick<IsolationConfig, "probeImage">;
   environment: Record<string, string | number>;
   only?: number[];
   chaosOnly?: string[];
@@ -69,7 +71,10 @@ export async function runM1(c: M1Config): Promise<Report> {
   const want = (n: number) => !c.only || c.only.includes(n);
   const common = { testPageUrl: c.testPageUrl, expectTitle: EXPECT_TITLE };
   const invariants = async (label: string): Promise<void> => {
-    const r = await settledInvariants(checkInvariants, c.host);
+    // The harness turned the agents' probe controls on for this run (infra/host/bench.sh).
+    const r = await settledInvariants(checkInvariants, c.host, {
+      harnessExpected: true,
+    });
     report.add({
       id: "3",
       name: `invariants after ${label}`,
@@ -142,6 +147,14 @@ export async function runM1(c: M1Config): Promise<Report> {
     c.log("check 4: isolation suite");
     const findings = await runIsolationSuite(client, {
       ...c.isolation,
+      host: c.host,
+      nodes: c.host.nodes.map((n) => ({
+        node: n.id,
+        network: n.iface,
+        bridgeIp: n.bridgeIp,
+        secretFile: n.secretFile,
+        harnessSocket: harnessSocketOf(n),
+      })),
       publicIp: c.publicIp,
       publicHostname: c.publicHostname,
       testPageUrl: c.testPageUrl,
@@ -149,12 +162,15 @@ export async function runM1(c: M1Config): Promise<Report> {
     const failed = findings.filter((f) => !f.pass);
     report.add({
       id: "4",
-      name: `isolation suite (${findings.length} attacks and controls, 3 kinds)`,
+      name: `isolation suite (${findings.length} attacks and controls, 3 kinds, every node; a probe VM on microVM nodes)`,
       pass: failed.length === 0,
       detail: failed.length
         ? failed
             .slice(0, 5)
-            .map((f) => `[kind ${f.kind}] ${f.name}: ${f.detail}`)
+            .map(
+              (f) =>
+                `[kind ${f.kind}${f.where ? `, ${f.where}` : ""}] ${f.name}: ${f.detail}`,
+            )
             .join("; ")
         : "every forbidden target refused; every control passed",
     });
@@ -443,10 +459,6 @@ export function m1ConfigFromEnv(
           }
         : DEFAULT_HOST,
     isolation: {
-      node: "a",
-      network: "ksl-a",
-      bridgeIp: "172.30.1.1",
-      egressSocket: "/run/kestrel/a/egress.sock",
       probeImage: env.PROBE_IMAGE ?? "kestrel-platform:dev",
     },
     environment: {
