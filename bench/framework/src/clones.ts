@@ -506,16 +506,26 @@ export async function observe(
   }
 }
 
+/**
+ * A baseline container's Chrome may be seconds old (a cold start), and Chrome commits its
+ * preferences about 10 s after a change: observed at once, one container could lack values the
+ * other has written, and the comparison would read that as "two containers differ". Clones need no
+ * wait: their Chrome settled before the snapshot. Found by m1 4b on the AWS host, 2026-10-07.
+ */
+export const BASELINE_SETTLE_MS = 15_000;
+
 async function observePair(
   client: KestrelClient,
   node: string,
   testPageUrl: string,
   opts: Record<string, unknown> = {},
   check: (s: Session) => Promise<void> = async () => undefined,
+  settleMs = 0,
 ): Promise<[CloneObservation, CloneObservation]> {
   const sessions = await sessionsOn(client, node, 2, opts);
   try {
     for (const s of sessions) await check(s);
+    if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs));
     return [
       await observe(sessions[0]!, testPageUrl),
       await observe(sessions[1]!, testPageUrl),
@@ -537,7 +547,14 @@ export async function runCloneDiff(
   const dockerNode = [...runtimes].find(([, r]) => r === "docker")?.[0];
   const [a, b] = await observePair(client, vmNode, testPageUrl);
   const baseline = dockerNode
-    ? await observePair(client, dockerNode, testPageUrl)
+    ? await observePair(
+        client,
+        dockerNode,
+        testPageUrl,
+        {},
+        undefined,
+        BASELINE_SETTLE_MS,
+      )
     : undefined;
   return { node: vmNode, ...compareClones(a, b, baseline) };
 }
@@ -587,7 +604,14 @@ export async function runWarmCloneDiff(
       skipped: `node ${vmNode} runs profile sessions in Docker containers (MICROVM_PROFILES=docker): no warm clone to compare`,
     };
   const baseline = dockerNode
-    ? await observePair(client, dockerNode, testPageUrl, opts, warm)
+    ? await observePair(
+        client,
+        dockerNode,
+        testPageUrl,
+        opts,
+        warm,
+        BASELINE_SETTLE_MS,
+      )
     : undefined;
   return {
     node: vmNode,
