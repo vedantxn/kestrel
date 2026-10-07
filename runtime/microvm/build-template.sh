@@ -33,15 +33,28 @@ TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 GUEST=172.16.0.2
 BOOT="console=ttyS0 reboot=k panic=1 pci=off quiet ro init=/init ip=$GUEST::172.16.0.1:255.255.255.0::eth0:off KESTREL_CONTROL_TOKEN=$TOKEN KESTREL_PROXY=http://172.16.0.1:3128 KESTREL_CHROME=$CHROME"
 
+# A cgroup cannot go while a process is still leaving it (EBUSY), and a kill is not an exit: retry,
+# as the agent's driver does (one left behind was found by bench profiles' invariants, 2026-10-07).
+rm_cgroup() {
+  for _ in $(seq 1 100); do
+    rmdir "$1" 2>/dev/null && return 0
+    [ -d "$1" ] || return 0
+    sleep 0.05
+  done
+  echo "build-template: cgroup $1 left behind" >&2
+}
 cleanup() {
   [ -f "$ROOT/firecracker.pid" ] && kill -9 "$(cat "$ROOT/firecracker.pid")" 2>/dev/null || true
-  sleep 0.2
   rm -rf "$DIR/jail/firecracker/$ID" "$NEW"
-  rmdir "/sys/fs/cgroup/$CGROUP/$ID" 2>/dev/null || true
+  rm_cgroup "/sys/fs/cgroup/$CGROUP/$ID"
   ip netns del $NS 2>/dev/null || true
   ip link del $HL 2>/dev/null || true
 }
 trap cleanup EXIT
+# Empty cgroups an earlier build left (no process in them, so no build is using them).
+for d in /sys/fs/cgroup/"$CGROUP"/tpl-*; do
+  [ -d "$d" ] && grep -qx 'populated 0' "$d/cgroup.events" 2>/dev/null && rm_cgroup "$d"
+done
 [ -f "$DIR/rootfs.ext4" ] || { echo "no $DIR/rootfs.ext4: run runtime/microvm/build-rootfs.sh" >&2; exit 1; }
 # Same filesystem as the jail, so it can be linked in; renamed into place, never rewritten in place,
 # since earlier builds' jails (and a build of the other template running now) link the old file.
