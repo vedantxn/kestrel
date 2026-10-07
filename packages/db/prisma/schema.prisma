@@ -39,6 +39,7 @@ enum EndReason {
   start_timeout
   disk_limit
   node_refused
+  profile_unavailable
 
   @@map("end_reason")
 }
@@ -67,11 +68,15 @@ model Project {
   maxConcurrentSessions Int              @default(20) @map("max_concurrent_sessions")
   /// A14: session creations per minute (enforced in memory in v1).
   createsPerMinute      Int              @default(300) @map("creates_per_minute")
+  /// P18: live profiles, and the bytes of their current versions together.
+  maxProfiles           Int              @default(100) @map("max_profiles")
+  maxProfileBytes       BigInt           @default(5368709120) @map("max_profile_bytes")
   createdAt             DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
   org                   Org              @relation(fields: [orgId], references: [id])
   apiKeys               ApiKey[]
   sessions              Session[]
   idempotencyKeys       IdempotencyKey[]
+  profiles              Profile[]
 
   @@unique([orgId, name])
   @@map("projects")
@@ -104,6 +109,10 @@ model Node {
   address         String
   slotsTotal      Int       @map("slots_total")
   hotCount        Int       @default(0) @map("hot_count")
+  /// P18: warm browsers (Chrome not launched), from heartbeats. Orders node choice for profile sessions.
+  warmCount       Int       @default(0) @map("warm_count")
+  /// P18: the Chrome major of the node's pinned runtime image, from registration. 0 until reported.
+  chromeMajor     Int       @default(0) @map("chrome_major")
   /// K10: bumped when the node is declared lost.
   epoch           Int       @default(1)
   state           NodeState @default(active)
@@ -144,6 +153,8 @@ model Session {
   endedAt           DateTime?      @map("ended_at") @db.Timestamptz(3)
   /// The CAPTCHAs present now ({providers, since}), set from the node's captcha.* events with them.
   captcha           Json?
+  /// P18: the profile the session started from (`options.profile`), for the lock repairs.
+  profileId         String?        @map("profile_id") @db.Uuid
   project           Project        @relation(fields: [projectId], references: [id])
   apiKey            ApiKey         @relation(fields: [apiKeyId], references: [id])
   node              Node?          @relation(fields: [nodeId], references: [id])
@@ -188,4 +199,50 @@ model IdempotencyKey {
   @@unique([projectId, key])
   @@index([expiresAt])
   @@map("idempotency_keys")
+}
+
+/// P18 (docs/lld/p18-profiles.md 4.6). A project's saved browser state. Names are unique among a
+/// project's live profiles: a partial unique index in the migration, which Prisma cannot express.
+model Profile {
+  id              String           @id @db.Uuid
+  projectId       String           @map("project_id") @db.Uuid
+  name            String?
+  metadata        Json             @default("{}")
+  /// 0: nothing saved yet.
+  currentVersion  Int              @default(0) @map("current_version")
+  /// The one session that may write the next version (`persist: true`); the write lock.
+  writerSessionId String?          @unique @map("writer_session_id") @db.Uuid
+  writerSince     DateTime?        @map("writer_since") @db.Timestamptz(3)
+  createdAt       DateTime         @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime         @map("updated_at") @db.Timestamptz(3)
+  deletedAt       DateTime?        @map("deleted_at") @db.Timestamptz(3)
+  project         Project          @relation(fields: [projectId], references: [id])
+  versions        ProfileVersion[]
+
+  @@index([projectId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("profiles")
+}
+
+/// One version of a profile: one encrypted blob in the profile store. `pending` while its writer
+/// runs, `committed` when it is the current version, `superseded` once a newer one is committed
+/// (kept for readers that started on it, then collected with its blob).
+model ProfileVersion {
+  profileId    String    @map("profile_id") @db.Uuid
+  version      Int
+  state        String
+  sessionId    String    @map("session_id") @db.Uuid
+  /// The version's data key, wrapped with the project's key (AES-256-GCM). Never stored unwrapped.
+  wrappedKey   Bytes     @map("wrapped_key")
+  /// Set at commit: the blob's length and SHA-256, and the saving node's Chrome major.
+  bytes        BigInt?
+  sha256       String?
+  chromeMajor  Int?      @map("chrome_major")
+  createdAt    DateTime  @map("created_at") @db.Timestamptz(3)
+  committedAt  DateTime? @map("committed_at") @db.Timestamptz(3)
+  supersededAt DateTime? @map("superseded_at") @db.Timestamptz(3)
+  profile      Profile   @relation(fields: [profileId], references: [id])
+
+  @@id([profileId, version])
+  @@index([state, supersededAt])
+  @@map("profile_versions")
 }
