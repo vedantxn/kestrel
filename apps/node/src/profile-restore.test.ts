@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  AgentState,
   encodeProfileArchive,
   idToUuid,
   newId,
@@ -147,6 +148,33 @@ describe("the warm pool level", () => {
     const res = await r.agent.start(startReq());
     expect(res).toMatchObject({ result: "ready", startPath: "cold" });
     expect(warmPool(r)).toHaveLength(1);
+  });
+
+  it("is in the invariant checker's account: each browser's level, the target and what is wanted now", async () => {
+    const r = await rig({ slotsTotal: 4, poolTarget: 1, warmPool: 1 });
+    const st = AgentState.parse(r.agent.state());
+    expect(
+      st.pool.map((p) => p.level).sort((a, b) => a.localeCompare(b)),
+    ).toEqual(["hot", "warm"]);
+    expect(st.warm).toEqual({ target: 1, wanted: 1 });
+    // Restores in the demand window raise what is wanted, as starts do for the hot pool.
+    const projectId = prj();
+    for (let i = 0; i < 2; i++)
+      await r.agent.start(
+        startReq({
+          projectId,
+          profile: await savedVersion(r.profileStore!, projectId),
+        }),
+      );
+    expect(r.agent.state().warm).toEqual({ target: 1, wanted: 2 });
+    // A node that keeps no warm browsers wants none, whatever it was asked to restore.
+    const none = await rig({ warmPool: 0 });
+    expect(none.agent.state().warm).toEqual({ target: 0, wanted: 0 });
+    expect(none.agent.state().pool.every((p) => p.level === "hot")).toBe(true);
+    // Nor does a node without profiles, whatever WARM_POOL says: the target is the one it keeps.
+    const off = makeRig({ warmPool: 1 });
+    await off.agent.boot();
+    expect(off.agent.state().warm).toEqual({ target: 0, wanted: 0 });
   });
 
   it("tells the API its Chrome at registration", async () => {

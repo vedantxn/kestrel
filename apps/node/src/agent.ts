@@ -414,7 +414,14 @@ export class NodeAgent {
       address: string | null;
       containerId: string | null;
     }[];
-    pool: { containerId: string; address: string; state: string }[];
+    pool: {
+      containerId: string;
+      address: string;
+      state: string;
+      level: PoolLevel;
+    }[];
+    /** P18: the warm level's target (`WARM_POOL`) and what is wanted now, for the invariant checker. */
+    warm: { target: number; wanted: number };
     pendingReports: number;
     slotsTotal: number;
     poolHeadroom: number;
@@ -441,7 +448,9 @@ export class NodeAgent {
         containerId: p.containerId,
         address: p.address,
         state: p.state,
+        level: p.level,
       })),
+      warm: { target: this.warmTarget(), wanted: this.warmWanted() },
       pendingReports: this.store.pendingReportCount(),
       slotsTotal: this.c.slotsTotal,
       poolHeadroom: this.c.poolHeadroom ?? 0,
