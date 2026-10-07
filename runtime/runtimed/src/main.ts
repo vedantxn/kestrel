@@ -7,6 +7,7 @@ import { ControlServer } from "./control.js";
 import { Env } from "./config.js";
 import { CdpForward } from "./forward.js";
 import { LiveServer } from "./live.js";
+import { ProfileModule } from "./profile.js";
 import { Recorder } from "./recorder.js";
 import { Tabs } from "./page.js";
 import { Supervisor, type Proc } from "./supervisor.js";
@@ -68,6 +69,7 @@ const control = new ControlServer(
   new TimezoneOverride(cfg.CHROME_PORT, log),
   // Made by the guest's init (runtime/microvm/init); only a snapshot clone has a clock to correct.
   cfg.SNAPSHOT === "on" ? pipeClock("/run/kestrel/clock") : undefined,
+  new ProfileModule(cfg.PROFILE_DIR, cfg.CHROME_PORT, supervisor),
 );
 
 await forward.listen(cfg.FORWARD_PORT);
@@ -78,7 +80,8 @@ log("runtimed listening", {
   sandbox: cfg.CHROME_SANDBOX,
 });
 await supervisor.start();
-log("browser ready", { version: supervisor.chromeVersion });
+if (supervisor.state === "warm") log("browser warm: Chrome waits for a launch");
+else log("browser ready", { version: supervisor.chromeVersion });
 
 // Docker stops a container with SIGTERM: finish the recording's last fragment first (StopTimeout is short).
 process.on("SIGTERM", () => {

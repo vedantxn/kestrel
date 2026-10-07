@@ -163,6 +163,7 @@ const baseCfg: Env = {
   PROFILE_DIR: "/profile",
   CHROME_SANDBOX: "on",
   SNAPSHOT: "off",
+  KESTREL_CHROME: "now",
   CONTROL_PORT: 9000,
   FORWARD_PORT: 9223,
   CHROME_PORT: 9222,
@@ -717,6 +718,7 @@ describe("the control API (C5)", () => {
     expect((await call("POST", "/rekey", { token: "short" })).status).toBe(400);
     expect((await call("POST", "/rekey", { token: fresh })).json).toEqual({
       ok: true,
+      now: expect.any(Number), // the guest's clock (P18)
     });
     // The snapshot's page is gone; the session's page was made after the restore.
     expect(chrome!.closed).toEqual(["T1"]);
@@ -782,7 +784,7 @@ describe("the control API (C5)", () => {
     ).toBe(404);
     expect(
       (await call("POST", "/rekey", { token: probeToken, probe: true })).json,
-    ).toEqual({ ok: true });
+    ).toEqual({ ok: true, now: expect.any(Number) });
     // The snapshot's page is kept: a probe shows nothing.
     expect(chrome!.closed).toEqual([]);
     expect(

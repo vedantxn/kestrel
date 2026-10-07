@@ -10,6 +10,8 @@ import {
   ComputerAction,
   ConfigureRequest,
   ConfigureResponse,
+  LaunchRequest,
+  LaunchResponse,
   LIMITS,
   RECORDING_FRAGMENTS_HEADER,
   RECORDING_LIMITS,
@@ -28,6 +30,7 @@ import { Cdp, getVersion, ViewportSizer } from "./cdp.js";
 import type { CdpForward } from "./forward.js";
 import { runComputer, type Tabs } from "./page.js";
 import { runProbe } from "./probe.js";
+import { ProfileError, type ProfileModule } from "./profile.js";
 import type { Recorder } from "./recorder.js";
 import type { Supervisor } from "./supervisor.js";
 import type { TimezoneOverride } from "./timezone.js";
@@ -50,6 +53,7 @@ const same = (a: string, b: string): boolean =>
  *  GET  /recording/fragments?after=N
  *                   a microVM's recording, pulled by the agent (docs/lld/microvm-recording.md)
  *  GET  /captcha/challenges, POST /captcha/inject   solving, for a session configured with it
+ *  PUT  /profile, POST /launch, POST /profile/save   profiles (docs/lld/p18-profiles.md)
  */
 export class ControlServer {
   private server: Server | undefined;
@@ -79,6 +83,8 @@ export class ControlServer {
     private readonly timezone?: TimezoneOverride,
     /** A clone's wall clock, set at rekey from the host's (threat model 9.1). */
     private readonly clock?: GuestClock,
+    /** P18: restore into a warm browser, and save at the end. */
+    private readonly profile?: ProfileModule,
   ) {}
 
   async listen(port: number, host = "0.0.0.0"): Promise<number> {
@@ -171,7 +177,7 @@ export class ControlServer {
           200,
           RuntimeHealth.parse({
             protocolVersion: RUNTIME_PROTOCOL_VERSION,
-            status: this.supervisor.state,
+            status: this.supervisor.health,
             chromeReady: this.supervisor.chromeReady,
             chromeVersion: this.supervisor.chromeVersion,
           }),
@@ -238,9 +244,53 @@ export class ControlServer {
         if (parsed.data.now !== undefined && this.clock)
           await this.clock.set(parsed.data.now);
         // A probe keeps the snapshot's page: nothing is ever shown in it, and it is never configured.
+        // A warm clone (P18) has no Chrome yet, so no page to replace: Chrome starts after the restore.
         if (parsed.data.probe) this.probe = true;
-        else await this.freshPage();
-        return this.send(res, 200, { ok: true });
+        else if (this.supervisor.state !== "warm") await this.freshPage();
+        // The guest's clock, which the agent compares with its own before restoring a profile.
+        return this.send(res, 200, { ok: true, now: Date.now() });
+      }
+
+      if (
+        path === RUNTIME_PATHS.profile ||
+        path === RUNTIME_PATHS.launch ||
+        path === RUNTIME_PATHS.profileSave
+      ) {
+        if (!this.profile) return this.send(res, 404, { error: "not found" });
+        try {
+          if (req.method === "PUT" && path === RUNTIME_PATHS.profile)
+            return this.send(res, 200, await this.profile.restore(req));
+          if (req.method === "POST" && path === RUNTIME_PATHS.launch) {
+            const parsed = LaunchRequest.safeParse(await this.body(req));
+            if (!parsed.success)
+              return this.send(res, 400, {
+                error: parsed.error.issues[0]?.message ?? "invalid",
+              });
+            return this.send(
+              res,
+              200,
+              LaunchResponse.parse(
+                await this.profile.launch(parsed.data.viewport),
+              ),
+            );
+          }
+          if (req.method === "POST" && path === RUNTIME_PATHS.profileSave) {
+            const archive = await this.profile.save();
+            res.writeHead(200, {
+              "content-type": "application/octet-stream",
+              "content-length": archive.length,
+            });
+            res.end(archive);
+            return;
+          }
+        } catch (e) {
+          if (e instanceof ProfileError)
+            return this.send(res, e.status, {
+              error: e.code,
+              message: e.message,
+            });
+          throw e;
+        }
       }
 
       if (req.method === "POST" && path === RUNTIME_PATHS.probe) {

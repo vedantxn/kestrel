@@ -22,6 +22,12 @@ export const Env = z.object({
    * made after the restore rather than copied from the snapshot.
    */
   SNAPSHOT: z.enum(["on", "off"]).default("off"),
+  /**
+   * P18 (docs/lld/p18-profiles.md 4.2). `deferred`: a warm browser. The display starts and Chrome
+   * waits for `POST /launch`, so a saved profile can be written into the empty profile directory
+   * before Chrome first opens it.
+   */
+  KESTREL_CHROME: z.enum(["now", "deferred"]).default("now"),
   CONTROL_PORT: z.coerce.number().int().default(9000),
   FORWARD_PORT: z.coerce.number().int().default(9223),
   CHROME_PORT: z.coerce.number().int().default(9222),
