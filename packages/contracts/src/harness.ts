@@ -90,8 +90,20 @@ export const AgentState = z.object({
       containerId: z.string(),
       address: z.string(),
       state: z.string(),
+      /** P18: `warm` is a browser with Chrome not yet launched, kept for sessions that restore a profile. */
+      level: z.enum(["hot", "warm"]).default("hot"),
     }),
   ),
+  /**
+   * P18: the warm level's size. `target` is the node's `WARM_POOL`; `wanted` is what the agent
+   * wants now (the target, grown by the profile restores of its demand window).
+   */
+  warm: z
+    .object({
+      target: z.number().int().nonnegative(),
+      wanted: z.number().int().nonnegative(),
+    })
+    .default({ target: 0, wanted: 0 }),
   pendingReports: z.number().int(),
   slotsTotal: z.number().int(),
   poolHeadroom: z.number().int().default(0),

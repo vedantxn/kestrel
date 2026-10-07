@@ -22,7 +22,34 @@ describe("the harness surface", () => {
       creating: [],
       retiring: [],
       harness: { enabled: false, probePolicies: [], probeVms: [] },
+      warm: { target: 0, wanted: 0 },
     });
+  });
+
+  it("reads each pooled browser's level, hot unless the agent says warm (P18)", () => {
+    const s = AgentState.parse({
+      sessions: [],
+      pool: [
+        { containerId: "c1", address: "172.30.1.5", state: "hot" },
+        {
+          containerId: "c2",
+          address: "172.30.1.6",
+          state: "hot",
+          level: "warm",
+        },
+      ],
+      pendingReports: 0,
+      slotsTotal: 4,
+      admitting: true,
+      failpoints: {},
+      warm: { target: 1, wanted: 2 },
+    });
+    expect(s.pool.map((p) => p.level)).toEqual(["hot", "warm"]);
+    expect(s.warm).toEqual({ target: 1, wanted: 2 });
+    expect(
+      AgentState.safeParse({ ...s, pool: [{ ...s.pool[0], level: "cold" }] })
+        .success,
+    ).toBe(false);
   });
 
   it("bounds a probe lease's life", () => {
