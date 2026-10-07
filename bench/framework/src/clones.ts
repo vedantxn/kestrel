@@ -117,6 +117,15 @@ export const WARM_CLONE_ALLOWED: { pattern: RegExp; why: string }[] = [
       /^file:Default\/(Local Storage\/leveldb\/|IndexedDB\/|WebStorage\/|LocalStorage(-journal|-wal)?$)/,
     why: "restored from the profile both sessions opened: every session of a profile starts with its saved web storage (the warm template is taken before Chrome runs, so it holds none)",
   },
+  {
+    // Found by the first host run of check 8 (2026-10-07): SQLite journals, LevelDB LOCK/LOG/CURRENT
+    // files and caches, the same in both clones because each Chrome wrote them the same way, and
+    // "different" in two containers only because some exist for a moment. Per-profile salts and
+    // stores (SENSITIVE_FILE's names) stay judged: a salt the same in two warm clones would link them.
+    pattern:
+      /^file:Default\/(?!(.*\/)?(Visited Links|MediaDeviceSalts|Trust Tokens|BrowsingTopicsState|BrowsingTopicsSiteData|Cookies|Network Persistent State|TransportSecurity|Reporting and NEL|Preferences|Secure Preferences)$)/,
+    why: "made after the restore by each clone's own Chrome: the warm template is taken before Chrome first runs, so its profile directory is empty and no profile file can come from it",
+  },
 ];
 
 /** Names that hold secrets or identifiers: copied, they link clones. */

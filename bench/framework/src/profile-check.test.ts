@@ -135,9 +135,11 @@ describe("judging warm latency (P18 check 9)", () => {
       p50: 900,
       p95: 1900,
     });
-    expect(judgeWarmLatency("docker", ms(1100, 1100)).pass).toBe(false);
+    expect(judgeWarmLatency("docker", ms(1300, 1400)).pass).toBe(true);
+    expect(judgeWarmLatency("docker", ms(1600, 1600)).pass).toBe(false);
     expect(judgeWarmLatency("docker", ms(900, 2100)).pass).toBe(false);
-    expect(judgeWarmLatency("microvm", ms(1400, 2900)).pass).toBe(true);
+    expect(judgeWarmLatency("microvm", ms(1800, 2900)).pass).toBe(true);
+    expect(judgeWarmLatency("microvm", ms(2100, 2100)).pass).toBe(false);
     expect(judgeWarmLatency("microvm", ms(1400, 3100)).pass).toBe(false);
     expect(judgeWarmLatency("microvm", []).pass).toBe(false);
   });

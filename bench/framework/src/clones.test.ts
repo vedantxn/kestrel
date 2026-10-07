@@ -141,6 +141,28 @@ describe("what a snapshot copies into every clone (G-24)", () => {
     ).toMatchObject({ verdict: "same-everywhere" });
   });
 
+  it("on warm clones, allows files each Chrome made after the restore, but never a shared salt", () => {
+    const ok = (item: string) =>
+      WARM_CLONE_ALLOWED.some((a) => a.pattern.test(item));
+    for (const item of [
+      "file:Default/Cookies-journal",
+      "file:Default/LOCK",
+      "file:Default/Sync Data/LevelDB/CURRENT",
+      "file:Default/Cache/Cache_Data/index",
+      "file:Default/MediaDeviceSalts-journal",
+    ])
+      expect(ok(item), item).toBe(true);
+    for (const item of [
+      "file:Default/Visited Links",
+      "file:Default/MediaDeviceSalts",
+      "file:Default/BrowsingTopicsState",
+      "file:Default/Cookies",
+      "file:Default/Trust Tokens",
+      "file:Local State",
+    ])
+      expect(ok(item), item).toBe(false);
+  });
+
   it("allows exactly the copies the first host run judged harmless, and nothing next to them", () => {
     const ok = (item: string) =>
       CLONE_ALLOWED.some((a) => a.pattern.test(item));
@@ -209,7 +231,7 @@ describe("warm clones of one profile (P18 check 8, T-76)", () => {
     ]);
   });
 
-  it("allows exactly what a profile keeps", () => {
+  it("allows what a profile keeps, and what each Chrome made after the restore, but not salts or preferences", () => {
     const ok = (item: string) =>
       WARM_CLONE_ALLOWED.some((a) => a.pattern.test(item));
     for (const p of PROFILE_ALLOW) {
@@ -217,11 +239,12 @@ describe("warm clones of one profile (P18 check 8, T-76)", () => {
       expect(ok(`file:${file}`), file).toBe(true);
     }
     expect(ok("file:Default/LocalStorage-wal")).toBe(true);
+    // Made by each warm clone's own Chrome after the restore: the warm template has no profile.
+    expect(ok("file:Default/Session Storage/000003.log")).toBe(true);
     for (const item of [
       "file:Default/Cookies",
-      "file:Default/LocalStorageX",
-      "file:Default/Session Storage/000003.log",
       "file:Default/Preferences",
+      "file:Default/Secure Preferences",
       "Default/Preferences#profile.salt",
     ])
       expect(ok(item), item).toBe(false);
