@@ -346,6 +346,80 @@ describe("node choice", () => {
   });
 });
 
+describe("a reader racing a commit or a delete", () => {
+  /**
+   * Run `change` on another connection the first time the admission reads the profile with a
+   * model query: the moment between reading the current version and reading its row, if the
+   * admission makes two reads.
+   */
+  function between(e: Env, change: () => Promise<unknown>): void {
+    let fired = false;
+    e.ctx.db = e.db.$extends({
+      query: {
+        profile: {
+          async findFirst({ args, query }) {
+            const r = await query(args);
+            if (!fired) {
+              fired = true;
+              await change();
+            }
+            return r;
+          },
+        },
+      },
+    }) as unknown as Env["db"];
+  }
+
+  it("starts from the version current when it read, even if a commit supersedes it at once", async () => {
+    const e = await setup();
+    const p = await newProfile(e);
+    await stop(e, await start(e, { id: p.id, persist: true }));
+    const uuid = idToUuid(p.id);
+    const v1 = await e.db.profileVersion.findFirstOrThrow({
+      where: { profileId: uuid, version: 1 },
+    });
+    between(e, () =>
+      e.db.$transaction([
+        e.db.profileVersion.update({
+          where: { profileId_version: { profileId: uuid, version: 1 } },
+          data: { state: "superseded", supersededAt: new Date() },
+        }),
+        e.db.profileVersion.create({
+          data: { ...v1, version: 2, state: "committed" },
+        }),
+        e.db.profile.update({
+          where: { id: uuid },
+          data: { currentVersion: 2 },
+        }),
+      ]),
+    );
+    const res = await e.create({ profile: { id: p.id } });
+    expect(res.statusCode, res.body).toBe(201);
+  });
+
+  it("accepts a current version whose row is superseded (kept for readers)", async () => {
+    const e = await setup();
+    const p = await newProfile(e);
+    await stop(e, await start(e, { id: p.id, persist: true }));
+    await e.db.profileVersion.updateMany({
+      where: { profileId: idToUuid(p.id) },
+      data: { state: "superseded", supersededAt: new Date() },
+    });
+    const res = await e.create({ profile: { id: p.id } });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(Session.parse(res.json()).startPath).toBe("warm");
+  });
+
+  it("answers not_found, never a 500, for a profile deleted while it is read", async () => {
+    const e = await setup();
+    const p = await newProfile(e);
+    await stop(e, await start(e, { id: p.id, persist: true }));
+    between(e, () => e.call("DELETE", `/v1/profiles/${p.id}`));
+    const res = await e.create({ profile: { id: p.id } });
+    expect([201, 404]).toContain(res.statusCode);
+  });
+});
+
 describe("a profile that cannot be restored", () => {
   it("fails at once with profile_unavailable when the blob is gone", async () => {
     const e = await setup();

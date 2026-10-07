@@ -63,14 +63,13 @@ export async function admitProfile(
     new AppError("not_found", "No such profile.", { param: "profile.id" });
   if (!uuid) throw notFound();
 
-  let current: number;
   if (opt.persist) {
-    const taken = await tx.$queryRaw<{ current_version: number }[]>`
+    // Take the lock; it also locks the row, so the read below cannot change under us.
+    const taken = await tx.$executeRaw`
       UPDATE profiles SET writer_session_id = ${sessionUuid}::uuid, writer_since = ${now}
        WHERE id = ${uuid}::uuid AND project_id = ${auth.projectId}::uuid
-         AND deleted_at IS NULL AND writer_session_id IS NULL
-      RETURNING current_version`;
-    if (taken.length === 0) {
+         AND deleted_at IS NULL AND writer_session_id IS NULL`;
+    if (taken === 0) {
       const live = await tx.profile.count({
         where: { id: uuid, projectId: auth.projectId, deletedAt: null },
       });
@@ -81,30 +80,45 @@ export async function admitProfile(
         { retryable: true, param: "profile.id" },
       );
     }
-    current = taken[0]!.current_version;
-  } else {
-    const row = await tx.profile.findFirst({
-      where: { id: uuid, projectId: auth.projectId, deletedAt: null },
-      select: { currentVersion: true },
-    });
-    if (!row) throw notFound();
-    current = row.currentVersion;
   }
+
+  // The current version and its row in one statement, so a reader never sees a profile whose
+  // version moved on, or that was deleted, between two reads. A reader may get a version that was
+  // superseded a moment ago: it is kept for ten minutes, longer than any start.
+  const [cur] = await tx.$queryRaw<
+    {
+      current_version: number;
+      state: string | null;
+      bytes: bigint | null;
+      sha256: string | null;
+      chrome_major: number | null;
+      wrapped_key: Uint8Array | null;
+    }[]
+  >`SELECT p.current_version, v.state, v.bytes, v.sha256, v.chrome_major, v.wrapped_key
+      FROM profiles p
+      LEFT JOIN profile_versions v
+        ON v.profile_id = p.id AND v.version = p.current_version
+     WHERE p.id = ${uuid}::uuid AND p.project_id = ${auth.projectId}::uuid
+       AND p.deleted_at IS NULL`;
+  if (!cur) throw notFound();
+  const current = cur.current_version;
 
   let restore: AdmittedProfile["restore"];
   if (current > 0) {
-    const v = await tx.profileVersion.findUnique({
-      where: { profileId_version: { profileId: uuid, version: current } },
-    });
-    if (!v || v.state !== "committed" || v.bytes === null || !v.sha256)
-      throw new Error(`profile ${uuid} has no committed version ${current}`);
+    if (
+      (cur.state !== "committed" && cur.state !== "superseded") ||
+      cur.bytes === null ||
+      !cur.sha256 ||
+      !cur.wrapped_key
+    )
+      throw new Error(`profile ${uuid} has no saved version ${current}`);
     restore = {
       version: current,
       // A version from a node that did not say its Chrome needs a node that does.
-      chromeMajor: v.chromeMajor ?? 1,
-      bytes: Number(v.bytes),
-      sha256: v.sha256,
-      wrappedKey: v.wrappedKey,
+      chromeMajor: cur.chrome_major ?? 1,
+      bytes: Number(cur.bytes),
+      sha256: cur.sha256,
+      wrappedKey: cur.wrapped_key,
     };
   }
 
