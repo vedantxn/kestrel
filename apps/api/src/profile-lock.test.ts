@@ -464,6 +464,35 @@ describe("releasing the lock (section 5)", () => {
     expect(await profileEvents(e, w.id)).toHaveLength(1);
   });
 
+  it("releases a writer already stopping when its node is lost, so the profile is not locked forever", async () => {
+    const e = await setup();
+    const p = await newProfile(e);
+    const w = await start(e, { id: p.id, persist: true });
+    const run = async (seconds: number, beat: boolean) => {
+      for (let t = 0; t < seconds; t++) {
+        e.clock.advance(1_000);
+        if (beat && t % 2 === 0) await e.syncAll();
+        if (t % 5 === 0) await e.sweeper.tick();
+      }
+    };
+    await run(10, true);
+    // The client stops it; the node accepts, then goes silent before reporting anything.
+    expect((await e.call("POST", `/v1/sessions/${w.id}/stop`)).statusCode).toBe(
+      200,
+    );
+    await new Promise((r) => setImmediate(r));
+    expect((await e.db.session.findFirstOrThrow()).status).toBe("stopping");
+    await run(20, false);
+    expect(
+      (await e.db.node.findUniqueOrThrow({ where: { id: "a" } })).state,
+    ).toBe("lost");
+    expect((await e.db.session.findFirstOrThrow()).status).toBe("stopped");
+    expect(await lockAndPending(e, p)).toEqual({ inUseBy: null, pending: 0 });
+    expect(await profileEvents(e, w.id)).toMatchObject([
+      { type: "profile.save_failed", data: { reason: "node_lost" } },
+    ]);
+  });
+
   it("releases a writer whose report was lost for good (no_report), after three heartbeats", async () => {
     const e = await setup();
     const p = await newProfile(e);

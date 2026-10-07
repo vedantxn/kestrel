@@ -7,7 +7,7 @@ import {
   runTx,
   NON_TERMINAL,
 } from "./lifecycle.js";
-import { collectProfiles } from "./profile-sessions.js";
+import { collectProfiles, releaseProfileLock } from "./profile-sessions.js";
 import { dispatchStop } from "./sessions.js";
 
 /** P18: superseded versions and orphaned blobs are collected this often, by the leader. */
@@ -213,6 +213,9 @@ export class Sweeper {
               );
               if (s.status !== "stopping")
                 await beginStop(tx, s.id, "node_lost", now);
+              // P18: a writer on a lost node can never report its save, whatever it was doing,
+              // including one already stopping for another reason (section 5, rule 2).
+              await releaseProfileLock(tx, s.id, "node_lost", now);
               await completeStop(ctx, tx, s.id, now);
             }
           }
