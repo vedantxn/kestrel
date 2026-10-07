@@ -173,10 +173,12 @@ export async function openProfileBlob(
   d.setAuthTag(b.subarray(b.length - TAG_BYTES));
   let zipped: Buffer;
   try {
-    zipped = Buffer.concat([
-      d.update(b.subarray(PROFILE_BLOB_HEADER_BYTES, b.length - TAG_BYTES)),
-      d.final(),
-    ]);
+    const body = d.update(
+      b.subarray(PROFILE_BLOB_HEADER_BYTES, b.length - TAG_BYTES),
+    );
+    // GCM's final block is empty: no second copy of the whole body for it.
+    const tail = d.final();
+    zipped = tail.length === 0 ? body : Buffer.concat([body, tail]);
   } catch {
     throw new ProfileCryptoError("blob does not decrypt");
   }

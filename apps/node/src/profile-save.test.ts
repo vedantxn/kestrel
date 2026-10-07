@@ -24,7 +24,8 @@ import {
   profileBlobKey,
   sealProfileBlob,
 } from "@kestrel/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { checkSaved } from "./profile.js";
 import {
   HttpRuntimeClient,
   ResponseTooLarge,
@@ -432,46 +433,102 @@ describe("a writer's save", () => {
     ]);
   });
 
-  it("seals at most four at once, off the slot's path, counted as reports still to come", async () => {
-    const r = await rig({ slotsTotal: 8, poolTarget: 0 });
+  it("holds at most four archives at once, pull to write, and seals off the slot's path", async () => {
+    const r = await rig({ slotsTotal: 8, poolTarget: 0, profileSaveMs: 5_000 });
     const store = r.profileStore!;
     const put = store.put.bind(store);
-    let now = 0;
+    // An archive is held from the moment the browser is asked for it until it is written.
+    let held = 0;
     let most = 0;
     let release!: () => void;
     const gate = new Promise<void>((x) => (release = x));
     store.put = async (k, d) => {
-      now++;
-      most = Math.max(most, now);
       await gate;
       await put(k, d);
-      now--;
+      held--;
     };
     const reqs = Array.from({ length: 6 }, () => writer());
     for (const q of reqs) await run(r, q);
+    for (const q of reqs)
+      r.runtime.saveAnswers.set(
+        r.store.getBinding(q.sessionId)!.address!,
+        async () => {
+          held++;
+          most = Math.max(most, held);
+          return {
+            ok: true,
+            body: encodeProfileArchive(
+              [],
+              [{ path: "Default/LocalStorage", data: Buffer.from("state") }],
+            ),
+          };
+        },
+      );
     for (const q of reqs)
       await r.agent.stop({
         sessionId: q.sessionId,
         reason: "client_stop",
       } as never);
-    // every browser is gone and every slot free while the saves wait to be written
+    // Four pulled, their browsers gone and slots free while their saves wait to be written; the
+    // other two wait their turn, within their budget, before asking their browsers.
     const until = Date.now() + 2_000;
-    while (r.store.allBindings().length > 0 && Date.now() < until)
+    while (r.store.allBindings().length > 2 && Date.now() < until)
       await new Promise((x) => setTimeout(x, 10));
-    expect(r.store.allBindings()).toEqual([]);
     await new Promise((x) => setTimeout(x, 50));
+    expect(r.store.allBindings()).toHaveLength(2);
+    expect(r.runtime.saveCalls).toHaveLength(4);
     expect(most).toBe(4);
     expect(r.agent.describe().pendingReports).toBe(
-      r.store.pendingReportCount() + 6,
+      r.store.pendingReportCount() + 4,
     );
     release();
     await r.agent.idle();
+    expect(most).toBe(4);
     expect(reqs.map((q) => profileReports(r, q.sessionId)[0]?.outcome)).toEqual(
       Array(6).fill("saved"),
     );
     expect(r.agent.describe().pendingReports).toBe(
       r.store.pendingReportCount(),
     );
+  });
+
+  it("fails a save that cannot get its turn within the budget, without asking its browser", async () => {
+    const r = await rig({ profileSavesAtOnce: 1, profileSaveMs: 300 });
+    const store = r.profileStore!;
+    const put = store.put.bind(store);
+    let release!: () => void;
+    const gate = new Promise<void>((x) => (release = x));
+    store.put = async (k, d) => {
+      await gate;
+      await put(k, d);
+    };
+    const first = writer();
+    const second = writer();
+    await run(r, first);
+    const b = await run(r, second);
+    await r.agent.stop({
+      sessionId: first.sessionId,
+      reason: "client_stop",
+    } as never);
+    const t0 = Date.now();
+    await r.agent.stop({
+      sessionId: second.sessionId,
+      reason: "client_stop",
+    } as never);
+    while (r.store.getBinding(second.sessionId) && Date.now() - t0 < 2_000)
+      await new Promise((x) => setTimeout(x, 10));
+    // its slot is free at the end of its budget, not when the first save is written
+    expect(r.store.getBinding(second.sessionId)).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(r.runtime.saveCalls).not.toContain(b.address);
+    expect(profileReports(r, second.sessionId)).toMatchObject([
+      { outcome: "failed", reason: "timeout" },
+    ]);
+    release();
+    await r.agent.idle();
+    expect(profileReports(r, first.sessionId)).toMatchObject([
+      { outcome: "saved" },
+    ]);
   });
 
   it("fails storage_full when the store is out of space, and keeps nothing", async () => {
@@ -640,6 +697,25 @@ describe("a save across an agent restart", () => {
   });
 });
 
+describe("checking a save without copying it", () => {
+  it("checks every rule without copying a file's bytes", () => {
+    const body = encodeProfileArchive(
+      [],
+      [{ path: "Default/LocalStorage", data: Buffer.alloc(2 * MAX, 7) }],
+    );
+    const concat = vi.spyOn(Buffer, "concat");
+    try {
+      expect(checkSaved(body, 4 * MAX)).toBe(body);
+      const copied = concat.mock.calls.map((c) =>
+        (c[0] as Uint8Array[]).reduce((n, b) => n + b.length, 0),
+      );
+      expect(copied.filter((n) => n >= MAX)).toEqual([]);
+    } finally {
+      concat.mockRestore();
+    }
+  });
+});
+
 describe("the runtime client's save call", () => {
   async function server(
     handler: (req: IncomingMessage, res: ServerResponse) => void,
@@ -695,6 +771,45 @@ describe("the runtime client's save call", () => {
       c.saveProfile("127.0.0.1", "t", 1024, AbortSignal.timeout(200)),
     ).rejects.toThrow();
     expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  it("reads an archive of a stated length into one buffer, not chunks copied into another", async () => {
+    const body = encodeProfileArchive(
+      [],
+      [{ path: "Default/LocalStorage", data: Buffer.alloc(MAX, 3) }],
+    );
+    const c = await server((_q, res) => {
+      res.writeHead(200, { "content-length": String(body.length) });
+      // in pieces, as a network delivers it
+      for (let i = 0; i < body.length; i += 64 * 1024)
+        res.write(body.subarray(i, i + 64 * 1024));
+      res.end();
+    });
+    const concat = vi.spyOn(Buffer, "concat");
+    try {
+      const got = await c.saveProfile("127.0.0.1", "t", 2 * MAX, signal());
+      expect(got.ok && got.body.equals(body)).toBe(true);
+      const copied = concat.mock.calls.map((x) =>
+        (x[0] as Uint8Array[]).reduce((n, b) => n + b.length, 0),
+      );
+      expect(copied.filter((n) => n >= MAX)).toEqual([]);
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
+  it("refuses a stated length past the cap before reading the body", async () => {
+    const big = await server((_q, res) => {
+      res.writeHead(200, {
+        "content-length": String(
+          4 + PROFILE_LIMITS.manifestBytes + PROFILE_LIMITS.cookiesBytes + 2048,
+        ),
+      });
+      res.end();
+    });
+    await expect(
+      big.saveProfile("127.0.0.1", "t", 1024, signal()),
+    ).rejects.toBeInstanceOf(ResponseTooLarge);
   });
 
   it("passes a refusal's status and code on, and an archive's exact bytes", async () => {

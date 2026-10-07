@@ -350,6 +350,31 @@ describe("a start that restores a profile", () => {
     expect(r.store.allBindings()).toEqual([]);
   });
 
+  it("holds at most four archives at once: a burst of restores waits its turn", async () => {
+    const r = await rig({ slotsTotal: 8, warmPool: 0, poolTarget: 0 });
+    const projectId = prj();
+    const profile = await savedVersion(r.profileStore!, projectId);
+    const store = r.profileStore!;
+    const get = store.get.bind(store);
+    let reading = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((x) => (release = x));
+    store.get = async (k, n) => {
+      reading++;
+      await gate;
+      return get(k, n);
+    };
+    const starts = Array.from({ length: 6 }, () =>
+      r.agent.start(startReq({ projectId, profile })),
+    );
+    await new Promise((x) => setTimeout(x, 100));
+    expect(reading).toBe(4);
+    release();
+    const res = await Promise.all(starts);
+    expect(res.every((x) => x.result === "ready")).toBe(true);
+    expect(reading).toBe(6);
+  });
+
   it("starts an empty profile (nothing saved yet) on the hot path", async () => {
     const r = await rig();
     const res = await r.agent.start(

@@ -170,6 +170,28 @@ async function readLimitedBytes(
   return Buffer.concat(chunks, size);
 }
 
+/**
+ * A body of at most `n` bytes, read into one buffer of that size. More than `n` is refused (a body
+ * longer than its length is not one the agent reads); fewer gives the bytes there were.
+ */
+async function readExactly(res: Response, n: number): Promise<Buffer> {
+  const out = Buffer.allocUnsafe(n);
+  let size = 0;
+  const reader = res.body?.getReader();
+  if (!reader) return out.subarray(0, 0);
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (size + value.length > n) {
+      await reader.cancel();
+      throw new ResponseTooLarge();
+    }
+    out.set(value, size);
+    size += value.length;
+  }
+  return out.subarray(0, size);
+}
+
 async function readLimited(
   res: Response,
   max = MAX_RESPONSE_BYTES,
@@ -489,10 +511,18 @@ export class HttpRuntimeClient implements RuntimeClient {
       }
       return { ok: false, status: res.status, code };
     }
-    return {
-      ok: true,
-      body: await readLimitedBytes(res, maxProfileArchiveBytes(maxBytes)),
-    };
+    const cap = maxProfileArchiveBytes(maxBytes);
+    // runtimed says the archive's length: read it into one buffer of that size rather than
+    // collect chunks and copy them into another (twice the archive in memory). Without a length,
+    // chunks it is, under the same cap.
+    const declared = Number(res.headers.get("content-length") ?? "x");
+    if (!Number.isSafeInteger(declared) || declared < 0)
+      return { ok: true, body: await readLimitedBytes(res, cap) };
+    if (declared > cap) {
+      await res.body?.cancel();
+      throw new ResponseTooLarge();
+    }
+    return { ok: true, body: await readExactly(res, declared) };
   }
 
   probe(

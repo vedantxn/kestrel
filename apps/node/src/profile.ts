@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import {
   PROFILE_LIMITS,
   ProfileArchiveError,
+  ProfileArchiveParser,
   idToUuid,
   maxProfileArchiveBytes,
-  parseProfileArchive,
   type EndReason,
   type ProfileSaveFailure,
   type StartProfile,
@@ -65,6 +65,16 @@ export function blobIds(
 const sha256 = (b: Uint8Array): string =>
   createHash("sha256").update(b).digest("hex");
 
+/**
+ * Check every archive rule without copying a file's bytes: the push parser hands back views into
+ * the buffer, which are dropped. (`parseProfileArchive` collects a copy of every file.)
+ */
+export function validateArchive(body: Buffer, maxBytes: number): void {
+  const p = new ProfileArchiveParser(maxBytes);
+  p.push(body);
+  p.finish();
+}
+
 /** The largest archive any version may hold, decompressed. */
 const RESTORE_CAP = maxProfileArchiveBytes(PROFILE_LIMITS.maxBytesCeiling);
 
@@ -102,7 +112,7 @@ export async function readRestore(
       blob,
       RESTORE_CAP,
     );
-    parseProfileArchive(archive, PROFILE_LIMITS.maxBytesCeiling);
+    validateArchive(archive, PROFILE_LIMITS.maxBytesCeiling);
   } catch {
     throw new ProfileUnavailable("the profile's blob does not open");
   }
@@ -112,7 +122,7 @@ export async function readRestore(
 /** A browser's save answer, as hostile input: every archive rule, against the save's cap. */
 export function checkSaved(body: Buffer, maxBytes: number): Buffer {
   try {
-    parseProfileArchive(body, maxBytes);
+    validateArchive(body, maxBytes);
   } catch (e) {
     if (e instanceof ProfileArchiveError) throw new SaveFailed(e.reason);
     throw new SaveFailed("invalid_archive");

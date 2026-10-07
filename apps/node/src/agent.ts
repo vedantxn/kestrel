@@ -147,8 +147,10 @@ export interface AgentConfig {
   chromeMajor?: number;
   /** P18: the most a save may take, Chrome's exit included (default PROFILE_LIMITS.saveMs). */
   profileSaveMs?: number;
-  /** P18: saves sealed and written at once (default PROFILE_SAVES_AT_ONCE). */
+  /** P18: saves holding an archive at once, pulled to written (default PROFILE_SAVES_AT_ONCE). */
   profileSavesAtOnce?: number;
+  /** P18: restores holding an archive at once (default PROFILE_RESTORES_AT_ONCE). */
+  profileRestoresAtOnce?: number;
   /** Where the API reaches this agent, sent at registration. */
   address: string;
   runtimeVersion: string;
@@ -237,8 +239,13 @@ const REAP_MIN_FREE_MB = 4_096;
 /** How far back starts count towards the pool's size. */
 const DEMAND_WINDOW_MS = 10_000;
 
-/** P18: at most this many saves seal and write at once on a node (memory: about 4 x 128 MiB). */
+/**
+ * P18: at most this many saves hold a profile archive at once on a node, from the pull until it is
+ * sealed and written (memory: about 4 x 2 x 64 MiB at the default size), and at most this many
+ * restores hold one, from reading the blob until the session is ready or the start has failed.
+ */
 const PROFILE_SAVES_AT_ONCE = 4;
+const PROFILE_RESTORES_AT_ONCE = 4;
 
 /** A VM's recording is pulled this often; its guest holds 32 MiB, minutes of video, between pulls. */
 const RECORDING_PULL_MS = 2_000;
@@ -292,7 +299,13 @@ export class NodeAgent {
   private recentWarmStarts: number[] = [];
   /** P18: saves being sealed and written now (their sessions are gone), and the queue for a turn. */
   private sealing = new Set<string>();
-  private sealWaiters: (() => void)[] = [];
+  /** P18: the bound on archives in memory (see PROFILE_SAVES_AT_ONCE). */
+  private readonly savePermits = new Permits(
+    () => this.c.profileSavesAtOnce ?? PROFILE_SAVES_AT_ONCE,
+  );
+  private readonly restorePermits = new Permits(
+    () => this.c.profileRestoresAtOnce ?? PROFILE_RESTORES_AT_ONCE,
+  );
   private resolvingSaves = false;
   /** Each container's recording volume, as made here: saves a Docker call per teardown (a restart falls back to inspect). */
   private volumeOf = new Map<string, string>();
@@ -675,7 +688,34 @@ export class NodeAgent {
     return !b || b.state === "stopping";
   }
 
+  /**
+   * P18: a start that restores a profile holds one of a few permits while its archive is in memory
+   * (until it is ready or has failed), so a burst of restores cannot hold more than a few archives
+   * at once. One that waits too long for a permit is refused: another node may take it (K5).
+   */
   private async doStart(
+    id: string,
+    req: StartRequest,
+    t0: number,
+  ): Promise<StartResponse> {
+    if (!req.profile?.restore) return this.doStartWith(id, req, t0);
+    const release = await this.restorePermits.take(this.c.readyTimeoutMs);
+    if (!release) {
+      this.store.deleteBinding(id);
+      this.finishSave(id, { outcome: "failed", reason: "not_started" });
+      return {
+        result: "refused",
+        reason: "too many profile restores on this node at once",
+      };
+    }
+    try {
+      return await this.doStartWith(id, req, t0);
+    } finally {
+      release();
+    }
+  }
+
+  private async doStartWith(
     id: string,
     req: StartRequest,
     t0: number,
@@ -1544,6 +1584,27 @@ export class NodeAgent {
     // state while it is read, no page can reach the network while Chrome closes), and before the
     // browser goes. Only the pull holds the slot; sealing and writing come after the removal.
     const save = await this.pullSave(id, b, reason);
+    try {
+      await this.removeAndFinish(id, b, reason, recorded !== undefined, save);
+    } catch (e) {
+      // The teardown is retried, and the save pulled again: this pull's archive is let go.
+      save.release?.();
+      throw e;
+    }
+  }
+
+  /** The end of a teardown: the browser goes, the slot is released, the save is passed on. */
+  private async removeAndFinish(
+    id: string,
+    b: Binding,
+    reason: EndReason,
+    recorded: boolean,
+    save: {
+      archive?: Buffer;
+      failure?: ProfileSaveFailure;
+      release?: () => void;
+    },
+  ): Promise<void> {
     // Known from creation, or from the container's label after a restart (reconcile); a volume
     // missed here (a teardown during boot) is an orphan that volume reaping removes.
     const volume =
@@ -1580,7 +1641,8 @@ export class NodeAgent {
       egressBytesDown: bytes.down,
     }));
     this.gatewayAttachmentsDrop(id);
-    if (save.archive) this.spawn(this.writeSave(id, save.archive));
+    if (save.archive && save.release)
+      this.spawn(this.writeSave(id, save.archive, save.release));
     else if (save.failure)
       this.finishSave(id, { outcome: "failed", reason: save.failure });
   }
@@ -1596,7 +1658,12 @@ export class NodeAgent {
     id: string,
     b: Binding,
     reason: EndReason,
-  ): Promise<{ archive?: Buffer; failure?: ProfileSaveFailure }> {
+  ): Promise<{
+    archive?: Buffer;
+    failure?: ProfileSaveFailure;
+    /** Held with the archive until it is written; the caller passes it on or releases it. */
+    release?: () => void;
+  }> {
     const s = this.store.getProfileSave(id);
     if (!s || s.state === "written") return {};
     if (!this.d.profileStore) return { failure: "storage_error" };
@@ -1605,9 +1672,38 @@ export class NodeAgent {
     if (!CLEAN_ENDS.includes(reason)) return { failure: "unclean_end" };
     if (!b.address || !b.controlToken || !b.containerId)
       return { failure: "browser_gone" };
-    const signal = AbortSignal.timeout(
-      this.c.profileSaveMs ?? PROFILE_LIMITS.saveMs,
-    );
+    // The save's budget covers the wait for a permit too: a teardown never holds its slot past it.
+    // Past the bound on archives in memory, a save waits its turn, and fails `timeout` rather than
+    // keep its browser (and slot) longer than the budget.
+    const budget = this.c.profileSaveMs ?? PROFILE_LIMITS.saveMs;
+    const end = performance.now() + budget;
+    const release = await this.savePermits.take(budget);
+    if (!release) return { failure: "timeout" };
+    let kept = false;
+    try {
+      const got = await this.pullWithin(
+        id,
+        b,
+        s,
+        AbortSignal.timeout(Math.max(1, Math.ceil(end - performance.now()))),
+      );
+      if (got.archive) {
+        kept = true;
+        return { ...got, release };
+      }
+      return got;
+    } finally {
+      if (!kept) release();
+    }
+  }
+
+  private async pullWithin(
+    id: string,
+    b: Binding,
+    s: { maxBytes: number; state: string },
+    signal: AbortSignal,
+  ): Promise<{ archive?: Buffer; failure?: ProfileSaveFailure }> {
+    if (!b.address || !b.controlToken) return { failure: "browser_gone" };
     let answer;
     try {
       answer = await this.d.runtime.saveProfile(
@@ -1645,12 +1741,15 @@ export class NodeAgent {
     return { archive };
   }
 
-  /** Seal and write a pulled archive, a few at a time, then queue the report. Off the slot's path. */
-  private async writeSave(id: string, archive: Buffer): Promise<void> {
-    const limit = this.c.profileSavesAtOnce ?? PROFILE_SAVES_AT_ONCE;
-    while (this.sealingNow >= limit)
-      await new Promise<void>((r) => this.sealWaiters.push(r));
-    this.sealingNow++;
+  /**
+   * Seal and write a pulled archive, then queue the report. Off the slot's path; the permit taken
+   * for the pull is released when it is done, so the archive counts until then.
+   */
+  private async writeSave(
+    id: string,
+    archive: Buffer,
+    release: () => void,
+  ): Promise<void> {
     try {
       const s = this.store.getProfileSave(id);
       if (!s) return;
@@ -1675,12 +1774,10 @@ export class NodeAgent {
       }
       this.finishSave(id, outcome);
     } finally {
-      this.sealingNow--;
-      this.sealWaiters.shift()?.();
+      release();
       this.sealing.delete(id);
     }
   }
-  private sealingNow = 0;
 
   /** Queue a writer's one `profile` report and drop its save, key included. */
   private finishSave(
@@ -2863,5 +2960,45 @@ function sameUpstream(
 class StartAborted extends Error {
   constructor() {
     super("start aborted: the session was stopped");
+  }
+}
+
+/**
+ * A counting semaphore: at most `limit()` holders at once, the rest waiting in turn. A waiter may
+ * give up after a while (`take` answers null); each permit is released once, however often its
+ * release is called.
+ */
+class Permits {
+  private used = 0;
+  private waiters: (() => void)[] = [];
+
+  constructor(private readonly limit: () => number) {}
+
+  async take(ms: number): Promise<(() => void) | null> {
+    if (this.used < this.limit() && this.waiters.length === 0)
+      return this.grant();
+    if (ms <= 0) return null;
+    return new Promise((resolve) => {
+      const waiter = () => {
+        clearTimeout(timer);
+        resolve(this.grant());
+      };
+      const timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((w) => w !== waiter);
+        resolve(null);
+      }, ms);
+      this.waiters.push(waiter);
+    });
+  }
+
+  private grant(): () => void {
+    this.used++;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.used--;
+      if (this.used < this.limit()) this.waiters.shift()?.();
+    };
   }
 }
