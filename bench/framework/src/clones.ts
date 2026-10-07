@@ -133,7 +133,10 @@ export function compareClones(
       );
     else uniqueCount++;
     for (const k of ["grv", "uuid"] as const)
-      if (x[k] === y[k])
+      // randomUUID exists only in a secure context, so the first page (about:blank) has none: an
+      // empty value is not a shared one. The first page's crypto is still compared through grv.
+      if (!x[k] || !y[k]) continue;
+      else if (x[k] === y[k])
         fail(`${where}.${k}`, `crypto's ${k} is the same in two clones`);
       else uniqueCount++;
   }

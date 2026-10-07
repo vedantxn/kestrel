@@ -73,6 +73,16 @@ describe("what a snapshot copies into every clone (G-24)", () => {
     ]);
   });
 
+  it("does not count a randomUUID the page could not make as shared (about:blank is not a secure context)", () => {
+    const a = obs();
+    const b = obs();
+    a.first.uuid = "";
+    b.first.uuid = "";
+    expect(rules(compareClones(a, b))).toEqual([]);
+    b.first.grv = a.first.grv; // the first page's crypto is still judged
+    expect(rules(compareClones(a, b))).toEqual(["first.grv"]);
+  });
+
   it("fails on a clock off the host's, shared device ids, template state and a copied connection", () => {
     const a = obs();
     const b = obs();
