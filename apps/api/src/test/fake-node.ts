@@ -1,7 +1,10 @@
+import { createHash } from "node:crypto";
 import {
   type ComputerRequest,
   NODE_PATHS,
   NodeId,
+  idToUuid,
+  type ProfileSaveFailure,
   type EndReason,
   type HeartbeatRequest,
   type HeartbeatResponse,
@@ -11,6 +14,12 @@ import {
   type StopRequest,
   type StopResponse,
 } from "@kestrel/contracts";
+import {
+  openProfileBlob,
+  profileBlobKey,
+  sealProfileBlob,
+  type ProfileStore,
+} from "@kestrel/shared";
 import type { FastifyInstance } from "fastify";
 import {
   NodeCallError,
@@ -43,6 +52,22 @@ export class FakeNode {
   /** G14: a stop for a session not yet seen is remembered, and a later start is refused. */
   rememberedStops = new Set<string>();
   hotCount = 1;
+  /** P18: warm browsers, and the node's pinned Chrome major (0: a node from before profiles). */
+  warmCount = 1;
+  chromeMajor = 154;
+  /**
+   * P18. With a store, a profile session's restore reads and opens the real blob with the key the
+   * API sent, and a save seals `profileArchive` with the save key and writes it, as the agent does.
+   */
+  profileStore: ProfileStore | undefined;
+  /** What a writer's teardown does: save, send nothing (a lost report), or fail with a reason. */
+  profileSave: "auto" | "lost" | ProfileSaveFailure = "auto";
+  /** The plaintext the next save writes. */
+  profileArchive = Buffer.from("fake profile archive");
+  /** Archives opened at start, by session id. */
+  restored = new Map<string, Buffer>();
+  private profileStarts = new Map<string, StartRequest>();
+  private saving: Promise<void>[] = [];
   private reportSeq = 0;
   private release: (() => void) | undefined;
 
@@ -84,13 +109,58 @@ export class FakeNode {
           return { result: "failed", reason: "stopped while starting" };
         break;
     }
+    if (req.profile) {
+      const failed = await this.restoreProfile(req);
+      if (failed) return failed;
+      this.profileStarts.set(req.sessionId, req);
+    }
     this.held.set(req.sessionId, "ready");
     return {
       result: "ready",
-      startPath: this.startMode === "cold" ? "cold" : "hot",
+      startPath: req.profile?.restore
+        ? "warm"
+        : this.startMode === "cold"
+          ? "cold"
+          : "hot",
       readyMs: 12,
       deviceScaleFactor: 1,
     };
+  }
+
+  private async restoreProfile(
+    req: StartRequest,
+  ): Promise<StartResponse | undefined> {
+    const r = req.profile?.restore;
+    if (!r || !this.profileStore) return undefined;
+    const ids = {
+      projectUuid: idToUuid(req.projectId),
+      profileUuid: idToUuid(req.profile!.profileId),
+      version: r.version,
+    };
+    try {
+      const blob = await this.profileStore.get(
+        profileBlobKey(ids.projectUuid, ids.profileUuid, r.version),
+        r.bytes,
+      );
+      if (createHash("sha256").update(blob).digest("hex") !== r.sha256)
+        throw new Error("digest");
+      this.restored.set(
+        req.sessionId,
+        await openProfileBlob(
+          Buffer.from(r.key, "base64"),
+          ids,
+          blob,
+          64 * 1024 * 1024,
+        ),
+      );
+      return undefined;
+    } catch {
+      return {
+        result: "failed",
+        reason: "profile unavailable",
+        code: "profile_unavailable",
+      };
+    }
   }
 
   /** Let a `hang` start finish. */
@@ -118,7 +188,10 @@ export class FakeNode {
     /** G-20: the egress gateway's counts, as a node from after byte counters reports them. */
     egressBytes?: { up: number; down: number },
   ): void {
+    const wasReady = this.held.get(sessionId) === "ready";
     this.held.delete(sessionId);
+    const start = this.profileStarts.get(sessionId);
+    this.profileStarts.delete(sessionId);
     this.reports.push({
       id: `r${++this.reportSeq}`,
       at: this.now().toISOString(),
@@ -132,6 +205,61 @@ export class FakeNode {
             egressBytesDown: egressBytes.down,
           }
         : {}),
+    });
+    // P18: after the removal, the writer's save is sealed and reported, as in the agent.
+    if (start?.profile?.save && this.profileSave !== "lost")
+      this.saving.push(this.saveProfile(start, reason, wasReady));
+  }
+
+  private async saveProfile(
+    start: StartRequest,
+    reason: EndReason | null,
+    wasReady: boolean,
+  ): Promise<void> {
+    const save = start.profile!.save!;
+    const base = {
+      id: `r${++this.reportSeq}`,
+      at: this.now().toISOString(),
+      kind: "profile" as const,
+      sessionId: start.sessionId,
+      profileId: start.profile!.profileId,
+      version: save.version,
+    };
+    const clean =
+      wasReady &&
+      (reason === "client_stop" ||
+        reason === "client_disconnect" ||
+        reason === "idle_timeout" ||
+        reason === "max_lifetime");
+    const mode = this.profileSave;
+    if (mode !== "auto" || !clean) {
+      this.reports.push({
+        ...base,
+        outcome: "failed",
+        reason: mode !== "auto" && mode !== "lost" ? mode : "unclean_end",
+      });
+      return;
+    }
+    const ids = {
+      projectUuid: idToUuid(start.projectId),
+      profileUuid: idToUuid(start.profile!.profileId),
+      version: save.version,
+    };
+    const blob = await sealProfileBlob(
+      Buffer.from(save.key, "base64"),
+      ids,
+      this.profileArchive,
+    );
+    if (this.profileStore)
+      await this.profileStore.put(
+        profileBlobKey(ids.projectUuid, ids.profileUuid, save.version),
+        blob,
+      );
+    this.reports.push({
+      ...base,
+      outcome: "saved",
+      bytes: blob.length,
+      sha256: createHash("sha256").update(blob).digest("hex"),
     });
   }
 
@@ -165,11 +293,13 @@ export class FakeNode {
         free: Math.max(0, this.slotsTotal - this.held.size),
       },
       hotCount: this.hotCount,
+      warmCount: this.warmCount,
       sessions: [...this.held].map(([sessionId, state]) => ({
         sessionId: sessionId as never,
         state,
       })),
-      pendingReports: this.reports.length,
+      // A save still sealing will produce a report: it counts as one waiting (P18).
+      pendingReports: this.reports.length + this.saving.length,
     };
   }
 
@@ -196,6 +326,7 @@ export class FakeNode {
       slotsTotal: this.slotsTotal,
       address: `http://127.0.0.1:7${this.id.charCodeAt(0)}`,
       runtimeVersion: "test",
+      ...(this.chromeMajor > 0 ? { chromeMajor: this.chromeMajor } : {}),
     });
     if (res.statusCode !== 200) throw new Error(`register failed: ${res.body}`);
     this.epoch = res.json().epoch;
@@ -223,6 +354,9 @@ export class FakeNode {
   }
 
   async flushReports(internal: FastifyInstance): Promise<void> {
+    const saving = this.saving;
+    this.saving = [];
+    await Promise.all(saving);
     if (this.reports.length === 0) return;
     const res = await this.post(internal, NODE_PATHS.reports, {
       nodeId: this.id,

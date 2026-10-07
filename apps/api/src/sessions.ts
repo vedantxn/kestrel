@@ -46,7 +46,9 @@ import {
   transition,
 } from "./lifecycle.js";
 import { NodeCallError } from "./node-client.js";
-import { admit, reassign } from "./scheduler.js";
+import { startProfile, type AdmittedProfile } from "./profile-sessions.js";
+import { requireProfiles } from "./profiles.js";
+import { AdmissionFull, admit, reassign, type Admission } from "./scheduler.js";
 
 const MAX_CONCURRENT_WAITERS = 200; // G-13: waiting creates hold a request open each
 /** One project must not be able to use up every waiting place. */
@@ -97,7 +99,9 @@ export async function toApiSession(
     options,
     nodeId: row.nodeId ? NodeId.parse(row.nodeId) : null,
     startPath:
-      row.startPath === "hot" || row.startPath === "cold"
+      row.startPath === "hot" ||
+      row.startPath === "warm" ||
+      row.startPath === "cold"
         ? row.startPath
         : null,
     usage: {
@@ -155,6 +159,8 @@ export async function createSession(
     ...(split ? { proxy: split.stored } : {}),
     ...(timezone !== undefined ? { timezone } : {}),
   });
+  // P18: profiles need the deployment's store and key.
+  if (options.profile) requireProfiles(ctx, "profile");
   // Solving is opt-in per session and needs the operator's solver service (docs/lld/captcha.md).
   if (options.captcha.solve && !ctx.captchaSolver)
     throw new AppError(
@@ -189,16 +195,24 @@ export async function createSession(
   };
 
   // Admission: no session row exists until a slot is reserved (A11).
-  let reservation: { sessionId: string; nodeId: string; epoch: number };
+  let reservation: {
+    sessionId: string;
+    nodeId: string;
+    epoch: number;
+    profile?: AdmittedProfile;
+  };
   const waitUntil =
     performance.now() +
     Math.min(waitForCapacityMs, LIMITS.maxWaitForCapacityMs);
   let waiting = false;
   try {
     for (;;) {
-      const r = await runTx(ctx, (tx) =>
+      const r: Admission = await runTx(ctx, (tx) =>
         admit(ctx, tx, auth, options, idemRow),
-      );
+      ).catch((e: unknown) => {
+        if (e instanceof AdmissionFull) return { kind: "full" } as const;
+        throw e;
+      });
       if (r.kind === "ok") {
         reservation = r;
         break;
@@ -296,7 +310,12 @@ async function failStart(
 async function startOnNode(
   ctx: Ctx,
   auth: Auth,
-  reservation: { sessionId: string; nodeId: string; epoch: number },
+  reservation: {
+    sessionId: string;
+    nodeId: string;
+    epoch: number;
+    profile?: AdmittedProfile;
+  },
   options: SessionOptions,
   /** With its password; held in memory only until this start is answered. */
   upstream: UpstreamProxy | undefined,
@@ -321,6 +340,30 @@ async function startOnNode(
       "The session was stopped before it started.",
     );
 
+  const profileUnavailable = () =>
+    new AppError("internal", "The profile could not be restored.", {
+      retryable: false,
+    });
+  // P18: the data keys go to the node in the start request and nowhere else (T-73).
+  let profile: StartRequest["profile"];
+  if (reservation.profile) {
+    try {
+      profile = startProfile(ctx, auth.projectId, reservation.profile);
+    } catch (e) {
+      ctx.log.error(
+        { sessionId, err: e instanceof Error ? e.message : String(e) },
+        "profile key did not unwrap",
+      );
+      return failStart(
+        ctx,
+        sessionId,
+        "profile_unavailable",
+        profileUnavailable(),
+        nodeId,
+      );
+    }
+  }
+
   for (;;) {
     const req: StartRequest = {
       sessionId: publicSessionId(sessionId),
@@ -340,6 +383,8 @@ async function startOnNode(
       ...(options.captcha.solve && ctx.captchaSolver
         ? { captcha: { solver: ctx.captchaSolver } }
         : {}),
+      // Only for a profile session, so a node from before profiles refuses it (strict).
+      ...(profile ? { profile } : {}),
     };
 
     let result;
@@ -420,7 +465,7 @@ async function startOnNode(
       // K5: a refusal is retried once, on another node.
       retried = true;
       const other = await runTx(ctx, (tx) =>
-        reassign(ctx, tx, sessionId, [nodeId]),
+        reassign(ctx, tx, sessionId, [nodeId], reservation.profile?.needs),
       );
       if (other) {
         nodeId = other.nodeId;
@@ -428,6 +473,16 @@ async function startOnNode(
         continue;
       }
     }
+
+    // P18: the profile's blob is missing, damaged or does not decrypt. Not retryable.
+    if (result.result === "failed" && result.code === "profile_unavailable")
+      return failStart(
+        ctx,
+        sessionId,
+        "profile_unavailable",
+        profileUnavailable(),
+        nodeId,
+      );
 
     return failStart(
       ctx,

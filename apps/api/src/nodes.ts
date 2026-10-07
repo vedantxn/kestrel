@@ -25,6 +25,7 @@ import {
   transition,
   type Tx,
 } from "./lifecycle.js";
+import { applyProfileReport, releaseUnreported } from "./profile-sessions.js";
 
 /** C4's repair path: the node tells the API what it holds, and the API tells it what to do about it. */
 
@@ -43,6 +44,7 @@ export async function registerNode(
       address: req.address,
       slotsTotal: req.slotsTotal,
       runtimeVersion: req.runtimeVersion,
+      chromeMajor: req.chromeMajor ?? 0,
       registeredAt: now,
       lastHeartbeatAt: now,
     },
@@ -51,6 +53,8 @@ export async function registerNode(
       address: req.address,
       slotsTotal: req.slotsTotal,
       runtimeVersion: req.runtimeVersion,
+      // P18: the node's pinned Chrome; a node from before profiles says nothing, and takes none.
+      chromeMajor: req.chromeMajor ?? 0,
       lastHeartbeatAt: now,
     },
   });
@@ -127,6 +131,7 @@ export async function heartbeat(
       data: {
         lastHeartbeatAt: now,
         hotCount: req.hotCount,
+        warmCount: req.warmCount ?? 0,
         slotsTotal: req.slots.total,
         state,
         fenced,
@@ -190,6 +195,17 @@ export async function heartbeat(
         await completeStop(ctx, tx, s.id, now);
         ctx.metrics.sweeper.inc({ action: "vanished" });
       }
+
+      // P18, section 5 rule 3: a writer session's `profile` report lost for good.
+      const released = await releaseUnreported(
+        tx,
+        node.id,
+        heldIds,
+        absentFloor,
+        now,
+      );
+      if (released > 0)
+        ctx.metrics.sweeper.inc({ action: "profile_no_report" }, released);
     }
 
     return {
@@ -334,8 +350,8 @@ async function applyReport(
     return;
   }
 
-  // P18-5 commits profile saves; until then a profile report is recorded nowhere.
-  if (r.kind === "profile") return;
+  if (r.kind === "profile")
+    return applyProfileReport(ctx, tx, nodeId, uuid, r, at, dedupe);
 
   // removed: the container is gone and the slot released. Idempotent without a dedupe key:
   // once the session is terminal, neither call below matches anything.

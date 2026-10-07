@@ -7,7 +7,11 @@ import {
   runTx,
   NON_TERMINAL,
 } from "./lifecycle.js";
+import { collectProfiles } from "./profile-sessions.js";
 import { dispatchStop } from "./sessions.js";
+
+/** P18: superseded versions and orphaned blobs are collected this often, by the leader. */
+const PROFILE_COLLECT_MS = 60_000;
 
 /** An arbitrary constant naming the sweeper's advisory lock ("KEST"). */
 const SWEEPER_LOCK = 1263424340;
@@ -38,6 +42,7 @@ export class Sweeper {
   private lastTick: { wall: number; mono: number } | null = null;
   private timer: NodeJS.Timeout | undefined;
   private running = false;
+  private lastProfileCollect = -Infinity;
 
   constructor(private readonly ctx: Ctx) {}
 
@@ -55,6 +60,18 @@ export class Sweeper {
     return this.connectedSince === null
       ? null
       : this.ctx.monotonic() - this.connectedSince;
+  }
+
+  /** P18: profile collection, on its own; a store failure never fails the tick. */
+  async collect(nowMs: number): Promise<void> {
+    try {
+      await collectProfiles(this.ctx, nowMs);
+    } catch (e) {
+      this.ctx.log.warn(
+        { err: e instanceof Error ? e.message : String(e) },
+        "profile collection failed",
+      );
+    }
   }
 
   async tick(): Promise<void> {
@@ -209,6 +226,13 @@ export class Sweeper {
         this.connectedSince ??= mono;
         for (const s of outcome.toStop)
           void dispatchStop(ctx, s.sessionId, s.nodeId, "start_timeout");
+        if (
+          ctx.profiles &&
+          mono - this.lastProfileCollect >= PROFILE_COLLECT_MS
+        ) {
+          this.lastProfileCollect = mono;
+          await this.collect(nowMs);
+        }
       }
     } catch (e) {
       // The database is unreachable, or a failpoint threw. Either way, restart the grace.

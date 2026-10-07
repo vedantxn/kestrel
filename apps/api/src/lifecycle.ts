@@ -8,6 +8,7 @@ import {
 import { Prisma } from "@kestrel/db";
 import type { Ctx } from "./context.js";
 import { newUuid } from "./ids.js";
+import { releaseOnEnd } from "./profile-sessions.js";
 
 export type Tx = Prisma.TransactionClient;
 
@@ -176,6 +177,10 @@ export async function completeStop(
     events: [{ type: "session.ended", data: { endReason: reason, status } }],
     at,
   });
-  if (ok) ctx.metrics.ended.inc({ status, reason });
+  if (ok) {
+    ctx.metrics.ended.inc({ status, reason });
+    // P18: a profile lock this session can no longer save into goes now (section 5).
+    await releaseOnEnd(tx, id, { readyAt: row.readyAt, endReason: reason }, at);
+  }
   return ok;
 }

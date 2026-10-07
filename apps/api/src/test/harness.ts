@@ -172,6 +172,7 @@ export async function makeEnv(opts: EnvOptions = {}): Promise<Env> {
         }
       : {}),
   };
+  for (const n of Object.values(nodes)) n.profileStore = ctx.profiles?.store;
   const sweeper = new Sweeper(ctx);
   const api = buildPublicApp(ctx);
   const internal = buildInternalApp(ctx, sweeper);
