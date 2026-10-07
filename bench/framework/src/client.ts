@@ -1,6 +1,7 @@
 import {
   ErrorResponse,
   ListEventsResponse,
+  Profile,
   Session,
   type CreateSessionRequest,
   type SessionStatus,
@@ -14,6 +15,8 @@ export class ApiError extends Error {
     message: string,
     readonly retryable: boolean,
     readonly retryAfter?: number,
+    /** The request field the error is about (`profile.id`, say). */
+    readonly param?: string,
   ) {
     super(`${status} ${code}: ${message}`);
   }
@@ -63,6 +66,7 @@ export class KestrelClient {
         e.data.error.message,
         e.data.error.retryable,
         Number.isFinite(ra) && ra > 0 ? ra : undefined,
+        e.data.error.param,
       );
     }
     return { status: res.status, json };
@@ -103,6 +107,21 @@ export class KestrelClient {
     return ListEventsResponse.parse(
       (await this.call("GET", `/v1/sessions/${id}/events?limit=1000`)).json,
     ).data.map((e) => e.type);
+  }
+
+  /** P18. A profile in the key's project. */
+  async createProfile(
+    body: { name?: string; metadata?: Record<string, string> } = {},
+  ): Promise<Profile> {
+    return Profile.parse((await this.call("POST", "/v1/profiles", body)).json);
+  }
+
+  async getProfile(id: string): Promise<Profile> {
+    return Profile.parse((await this.call("GET", `/v1/profiles/${id}`)).json);
+  }
+
+  async deleteProfile(id: string): Promise<void> {
+    await this.call("DELETE", `/v1/profiles/${id}`);
   }
 
   /** W1. A token; `url` is the connect URL (cdp) or the viewer page (view, control). */
