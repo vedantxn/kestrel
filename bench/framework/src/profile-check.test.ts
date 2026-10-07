@@ -14,7 +14,10 @@ import {
 const PRF = "prf_01k6zzzzzzzzzzzzzzzzzzzzzz" as ProfileId;
 
 /** A client whose creates answer from a script, for judging what the API said. */
-function scripted(answers: ("ok" | "409" | "409-final" | "503")[]) {
+function scripted(
+  answers: ("ok" | "409" | "409-final" | "503")[],
+  opts: { lockStuck?: boolean } = {},
+) {
   let i = 0;
   const stopped: string[] = [];
   const session = (n: number) =>
@@ -41,11 +44,31 @@ function scripted(answers: ("ok" | "409" | "409-final" | "503")[]) {
     async waitFor() {
       return session(0);
     },
+    // The writer (the first create) holds the lock until it is stopped, or forever.
+    async getProfile() {
+      return {
+        inUseBy: opts.lockStuck || !stopped.includes("ses_1") ? "ses_1" : null,
+      };
+    },
   } as unknown as KestrelClient;
   return { client, stopped };
 }
 
 describe("judging one writer (P18 check 4)", () => {
+  it("fails when the lock is not free soon after the writer ends", async () => {
+    const { client } = scripted(["ok", "409", "409", "ok", "ok", "ok"], {
+      lockStuck: true,
+    });
+    await expect(
+      singleWriter(client, PRF, {
+        writers: 3,
+        readers: 2,
+        withinMs: 50,
+        lockWaitMs: 200,
+      }),
+    ).rejects.toThrow(/to be free/);
+  });
+
   const o = { writers: 3, readers: 2, withinMs: 1000 };
 
   it("passes one writer, the rest refused retryably on profile.id, and every reader", async () => {

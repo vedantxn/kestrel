@@ -137,11 +137,17 @@ export function lockFree(
   client: KestrelClient,
   profileId: ProfileId,
   ms = 60_000,
+  everyMs = 250,
 ) {
-  return until(`the lock on ${profileId} to be free`, ms, async () => {
-    const p = await client.getProfile(profileId);
-    return p.inUseBy === null ? p : false;
-  });
+  return until(
+    `the lock on ${profileId} to be free`,
+    ms,
+    async () => {
+      const p = await client.getProfile(profileId);
+      return p.inUseBy === null ? p : false;
+    },
+    everyMs,
+  );
 }
 
 const isProfileConflict = (e: unknown) =>
@@ -164,6 +170,8 @@ export async function singleWriter(
     readers: number;
     withinMs: number;
     waitForCapacityMs?: number;
+    /** How long to wait for the lock at all before failing (default 30 s). */
+    lockWaitMs?: number;
   },
 ): Promise<{ pass: boolean; detail: string; releaseMs: number | null }> {
   const create = (persist: boolean) =>
@@ -209,11 +217,16 @@ export async function singleWriter(
     if (r.ok) await client.stop(r.session.id).catch(() => undefined);
 
   let releaseMs: number | null = null;
+  let nextMs: number | null = null;
   if (started.length === 1) {
     const w = started[0]!;
     await client.stop(w.id);
     await client.waitFor(w.id, [...TERMINAL], 60_000, 50);
     const ended = Date.now();
+    // What one-writer-at-a-time promises: the lock is free once the writer has ended and its save
+    // has committed. Timed on the profile itself; a new writer may then also wait for a free slot.
+    await lockFree(client, profileId, o.lockWaitMs ?? 30_000, 25);
+    releaseMs = Date.now() - ended;
     // A client that wants to write next retries its 409 at once, as the SDKs do with backoff.
     const next = await until(
       "a new writer to start",
@@ -230,18 +243,16 @@ export async function singleWriter(
       },
       25,
     );
-    releaseMs = Date.now() - ended;
+    nextMs = Date.now() - ended;
     await client.stop(next.id).catch(() => undefined);
     if (releaseMs > o.withinMs)
-      problems.push(
-        `the next writer started ${releaseMs} ms after the first ended`,
-      );
+      problems.push(`the lock was free ${releaseMs} ms after the writer ended`);
   }
   return {
     pass: problems.length === 0,
     detail: problems.length
       ? problems.join("; ")
-      : `1 of ${o.writers} writers started, ${o.writers - 1} refused 409 on profile.id (retryable), ${o.readers} readers alongside; the next writer started ${releaseMs} ms after the first ended`,
+      : `1 of ${o.writers} writers started, ${o.writers - 1} refused 409 on profile.id (retryable), ${o.readers} readers alongside; the lock was free ${releaseMs} ms after the writer ended, and the next writer started ${nextMs} ms after (a slot included)`,
     releaseMs,
   };
 }
@@ -484,9 +495,12 @@ export async function runProfileCheck(c: ProfileCheckConfig): Promise<Report> {
     const problems: string[] = [];
     if (r.session.startPath !== "warm")
       problems.push(`started ${r.session.startPath}`);
-    const restored = (await client.eventList(r.session.id)).find(
-      (e) => e.type === "profile.restored",
-    );
+    // The node reports it through its queue, a moment after the session is ready: wait for it.
+    const restored = await until("profile.restored", 10_000, async () =>
+      (await client.eventList(r.session.id)).find(
+        (e) => e.type === "profile.restored",
+      ),
+    ).catch(() => undefined);
     const data = restored?.data as
       { version: number; bytes: number; ms: number } | undefined;
     if (data?.version !== version)
@@ -581,12 +595,16 @@ export async function runProfileCheck(c: ProfileCheckConfig): Promise<Report> {
     if (want(4))
       await check(
         "4",
-        "profiles.single_writer: of 10 concurrent writers exactly 1 starts and 9 get 409 on profile.id, 5 readers start alongside, and a new writer starts within 1 s of the first ending",
+        "profiles.single_writer: of 10 concurrent writers exactly 1 starts and 9 get 409 on profile.id, up to 5 readers start alongside, and the lock is free within 1 s of the writer ending",
         async () => {
           const profileId = await newProfile();
+          // Readers run alongside the one writer: at most 5, and no more than the slots left.
+          let slots = 0;
+          for (const n of c.host.nodes)
+            slots += (await agentState(n)).slotsTotal;
           const r = await singleWriter(client, profileId, {
             writers: 10,
-            readers: 5,
+            readers: Math.max(1, Math.min(5, slots - 1)),
             withinMs: 1000,
           });
           report.measure("singleWriterReleaseMs", r.releaseMs);
@@ -822,6 +840,7 @@ export async function runProfileCheck(c: ProfileCheckConfig): Promise<Report> {
                 const { session } = await client.create({
                   profile: { id: profileId, persist: false },
                   idleTimeout: CLEAN_IDLE,
+                  waitForCapacityMs: 30_000,
                 });
                 samples.push({
                   ms: Math.round(performance.now() - t0),
