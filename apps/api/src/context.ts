@@ -4,6 +4,7 @@ import type { Clock, Failpoints, Logger, TokenSigner } from "@kestrel/shared";
 import type { NodeConfig } from "./config.js";
 import type { NodeClient } from "./node-client.js";
 import type { Metrics } from "./metrics.js";
+import type { ProfilesConfig } from "./profiles.js";
 import type { RateLimiter } from "./rate-limit.js";
 
 /** Everything a service needs, passed explicitly so tests can substitute any of it. */
@@ -29,6 +30,11 @@ export interface Ctx {
    * of a session created with `captcha.solve`; never stored or returned (T-61).
    */
   captchaSolver?: CaptchaSolverConfig | undefined;
+  /**
+   * P18: the profile store and master key, or undefined when the deployment has no profiles. The
+   * master key unwraps data keys here and is never sent anywhere.
+   */
+  profiles?: ProfilesConfig | undefined;
 }
 
 export interface Auth {

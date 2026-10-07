@@ -3,6 +3,8 @@ import {
   AdminCreateOrgRequest,
   AdminCreateProjectRequest,
   CreateApiKeyRequest,
+  CreateProfileRequest,
+  ListProfilesQuery,
   CreateSessionRequest,
   UsageQuery,
   HeartbeatRequest,
@@ -31,6 +33,12 @@ import { newRequestId } from "./ids.js";
 import { LIVE_PAGE, LIVE_PAGE_HEADERS } from "./live-page.js";
 import { registerMcp, type McpOptions } from "./mcp.js";
 import { heartbeat, ingestReports, registerNode } from "./nodes.js";
+import {
+  createProfile,
+  deleteProfile,
+  getProfile,
+  listProfiles,
+} from "./profiles.js";
 import {
   adminCreateApiKey,
   adminCreateOrg,
@@ -296,6 +304,44 @@ export function buildPublicApp(
       );
     },
   );
+
+  // P18: profiles.
+  app.post(
+    "/v1/profiles",
+    { schema: { body: CreateProfileRequest } },
+    async (req, reply) => {
+      const profile = await createProfile(
+        ctx,
+        await authed(req),
+        req.body as CreateProfileRequest,
+      );
+      return reply.status(201).send(profile);
+    },
+  );
+
+  app.get(
+    "/v1/profiles",
+    { schema: { querystring: ListProfilesQuery } },
+    async (req) =>
+      listProfiles(
+        ctx,
+        await authed(req),
+        req.query as z.infer<typeof ListProfilesQuery>,
+      ),
+  );
+
+  app.get("/v1/profiles/:id", async (req) =>
+    getProfile(ctx, await authed(req), (req.params as { id: string }).id),
+  );
+
+  app.delete("/v1/profiles/:id", async (req, reply) => {
+    await deleteProfile(
+      ctx,
+      await authed(req),
+      (req.params as { id: string }).id,
+    );
+    return reply.status(204).send();
+  });
 
   // P17: the project, its keys and usage (the dashboard reads these).
   app.get("/v1/project", async (req) => getProject(ctx, await authed(req)));

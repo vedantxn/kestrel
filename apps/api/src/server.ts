@@ -14,7 +14,7 @@ import {
   parseEnv,
   systemClock,
 } from "@kestrel/shared";
-import { Env, loadNodes, loadSolver } from "./config.js";
+import { Env, loadNodes, loadProfiles, loadSolver } from "./config.js";
 import type { Ctx } from "./context.js";
 import { buildInternalApp, buildPublicApp } from "./http.js";
 import { createMetrics } from "./metrics.js";
@@ -50,6 +50,7 @@ const ctx: Ctx = {
   state: { waiters: 0, waitersByProject: new Map() },
   monotonic: () => performance.now(),
   captchaSolver: loadSolver(env),
+  profiles: loadProfiles(env),
 };
 if (ctx.captchaSolver)
   log.info(
@@ -58,6 +59,12 @@ if (ctx.captchaSolver)
       custom: Boolean(ctx.captchaSolver.url),
     },
     "CAPTCHA solving is available",
+  );
+
+if (ctx.profiles)
+  log.info(
+    { store: env.PROFILE_STORE_DIR, maxBytes: ctx.profiles.maxBytes },
+    "profiles are available",
   );
 
 const sweeper = new Sweeper(ctx);

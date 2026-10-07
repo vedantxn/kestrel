@@ -7,6 +7,8 @@ export type {
   IdempotencyKey,
   Node,
   Org,
+  Profile,
+  ProfileVersion,
   Project,
   Session,
   SessionEvent,

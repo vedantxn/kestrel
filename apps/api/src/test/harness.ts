@@ -1,6 +1,12 @@
+import { randomBytes } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PROFILE_LIMITS } from "@kestrel/contracts";
 import { createPrisma, type PrismaClient } from "@kestrel/db";
 import {
   FakeClock,
+  FsProfileStore,
   Failpoints,
   TokenSigner,
   TokenVerifier,
@@ -44,7 +50,7 @@ export interface Env {
     key?: string,
   ): Promise<LightMyRequestResponse>;
   call(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "DELETE",
     url: string,
     key?: string,
   ): Promise<LightMyRequestResponse>;
@@ -61,9 +67,13 @@ export interface EnvOptions {
   failpoints?: string;
   log?: Logger;
   captchaSolver?: Ctx["captchaSolver"];
+  /** P18: give the deployment profiles, with a store in a fresh temporary directory. */
+  profiles?: boolean | { maxBytes?: number };
 }
 
 const TABLES = [
+  "profile_versions",
+  "profiles",
   "session_events",
   "sessions",
   "idempotency_keys",
@@ -150,6 +160,17 @@ export async function makeEnv(opts: EnvOptions = {}): Promise<Env> {
     state: { waiters: 0, waitersByProject: new Map() },
     monotonic: () => clock.now(),
     ...(opts.captchaSolver ? { captchaSolver: opts.captchaSolver } : {}),
+    ...(opts.profiles
+      ? {
+          profiles: {
+            store: new FsProfileStore(mkdtempSync(join(tmpdir(), "kpf-api-"))),
+            master: randomBytes(32),
+            maxBytes:
+              (typeof opts.profiles === "object" && opts.profiles.maxBytes) ||
+              PROFILE_LIMITS.maxBytes,
+          },
+        }
+      : {}),
   };
   const sweeper = new Sweeper(ctx);
   const api = buildPublicApp(ctx);

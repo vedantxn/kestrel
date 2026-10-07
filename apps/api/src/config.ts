@@ -1,5 +1,10 @@
 import { readFileSync } from "node:fs";
-import { CaptchaSolverConfig, CaptchaSolverService } from "@kestrel/contracts";
+import {
+  CaptchaSolverConfig,
+  CaptchaSolverService,
+  PROFILE_LIMITS,
+} from "@kestrel/contracts";
+import { FsProfileStore } from "@kestrel/shared";
 import { z } from "zod";
 
 const NodeConfig = z.object({
@@ -40,6 +45,22 @@ export const Env = z.object({
   CAPTCHA_SOLVER_KEY_FILE: unsetIfEmpty(z.string().optional()),
   /** The service's API base: the operator's override (required for `custom`). */
   CAPTCHA_SOLVER_URL: unsetIfEmpty(z.string().optional()),
+  /**
+   * P18 (docs/lld/p18-profiles.md 4.5): the profile store, shared with the node agents, and the
+   * master key file (32 random bytes, or their hex or base64), readable by the API only. Without
+   * both, profile calls and sessions with a profile are refused.
+   */
+  PROFILE_STORE_DIR: unsetIfEmpty(z.string().optional()),
+  PROFILE_MASTER_KEY_FILE: unsetIfEmpty(z.string().optional()),
+  /** Bytes of files in one profile version (64 MiB by default, at most 256 MiB). */
+  PROFILE_MAX_BYTES: unsetIfEmpty(
+    z.coerce
+      .number()
+      .int()
+      .min(1024 * 1024)
+      .max(PROFILE_LIMITS.maxBytesCeiling)
+      .default(PROFILE_LIMITS.maxBytes),
+  ),
 });
 export type Env = z.infer<typeof Env>;
 
@@ -69,6 +90,38 @@ export function loadSolver(
         .join(", ")}`,
     );
   return parsed.data;
+}
+
+/** The master key from its file: exactly 32 bytes, as raw bytes, hex or base64. */
+export function parseMasterKey(raw: Buffer): Buffer {
+  if (raw.length === 32) return raw;
+  const text = raw.toString("utf8").trim();
+  if (/^[0-9a-f]{64}$/i.test(text)) return Buffer.from(text, "hex");
+  if (/^[A-Za-z0-9+/]{43}=$/.test(text)) {
+    const b = Buffer.from(text, "base64");
+    if (b.length === 32) return b;
+  }
+  throw new Error("PROFILE_MASTER_KEY_FILE does not hold a 32-byte key");
+}
+
+/** Profiles, or undefined when the deployment has none. Half a configuration fails the start. */
+export function loadProfiles(
+  env: Pick<
+    Env,
+    "PROFILE_STORE_DIR" | "PROFILE_MASTER_KEY_FILE" | "PROFILE_MAX_BYTES"
+  >,
+  read: (path: string) => Buffer = (p) => readFileSync(p),
+): { store: FsProfileStore; master: Buffer; maxBytes: number } | undefined {
+  if (!env.PROFILE_STORE_DIR && !env.PROFILE_MASTER_KEY_FILE) return undefined;
+  if (!env.PROFILE_STORE_DIR || !env.PROFILE_MASTER_KEY_FILE)
+    throw new Error(
+      "profiles need both PROFILE_STORE_DIR and PROFILE_MASTER_KEY_FILE",
+    );
+  return {
+    store: new FsProfileStore(env.PROFILE_STORE_DIR),
+    master: parseMasterKey(read(env.PROFILE_MASTER_KEY_FILE)),
+    maxBytes: env.PROFILE_MAX_BYTES,
+  };
 }
 
 export function loadNodes(json: string): NodeConfig[] {
