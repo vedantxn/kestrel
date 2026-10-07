@@ -4,13 +4,14 @@
 # cannot be seen from outside (v1 plan H3). Run as root; `bin/host bench` does.
 #   sudo infra/host/bench.sh m1 [VAR=value ...]        QUICK=1 for a short pass
 #   sudo infra/host/bench.sh invariants                one invariant check, nothing expected on
+#   sudo infra/host/bench.sh profiles [VAR=value ...]  the profile checks (docs/lld/p18-profiles.md 10)
 #
 # For m1 and m2 the node agents are recreated with their probe controls on (KESTREL_HARNESS=on,
 # docs/harness.md) and recreated with them off again when the run ends, however it ends.
 # On a microVM node (RUNTIME_A=microvm) the harness reads VMs from the host: it runs privileged,
 # in the host's PID and cgroup namespaces, with /run/netns and the VM directory (threat model G-25).
 set -euo pipefail
-cmd=${1:?usage: bench.sh m1|m2|invariants|churn|proxy|captcha [VAR=value ...]}; shift
+cmd=${1:?usage: bench.sh m1|m2|invariants|churn|proxy|captcha|profiles [VAR=value ...]}; shift
 cd "$(dirname "$0")/../.."
 # shellcheck disable=SC1091
 set -a; . /var/lib/kestrel/compose.env; set +a
@@ -19,7 +20,8 @@ TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-met
 INSTANCE_TYPE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type)
 TWO_NODES=0; [ -n "${SLOTS_B:-}" ] && TWO_NODES=1
 extra=(-e "SLOTS=$(( ${SLOTS_A:-0} + ${SLOTS_B:-0} ))" -e "POOL=$(( ${POOL_A:-0} + ${POOL_B:-0} ))"
-  -e "TWO_NODES=$TWO_NODES" -e "RUNTIME_A=${RUNTIME_A:-docker}" -e "MICROVM_RECORDING=${MICROVM_RECORDING:-vm}")
+  -e "TWO_NODES=$TWO_NODES" -e "RUNTIME_A=${RUNTIME_A:-docker}" -e "MICROVM_RECORDING=${MICROVM_RECORDING:-vm}"
+  -e "MICROVM_PROFILES=${MICROVM_PROFILES:-vm}")
 for kv in "$@"; do extra+=(-e "$kv"); done
 
 # The node agents' probe controls, as deploy.sh composes them.

@@ -6,6 +6,7 @@ import { m2ConfigFromEnv, runM2 } from "./m2.js";
 import { captchaCheckConfigFromEnv, runCaptchaCheck } from "./captcha-check.js";
 import { churnConfigFromEnv, runChurn } from "./churn.js";
 import { proxyCheckConfigFromEnv, runProxyCheck } from "./proxy-check.js";
+import { profileCheckConfigFromEnv, runProfileCheck } from "./profile-check.js";
 
 const [command] = process.argv.slice(2);
 const log = (m: string): void =>
@@ -41,12 +42,17 @@ if (command === "m1") {
     captchaCheckConfigFromEnv(process.env, log),
   );
   process.exit(finish(report, process.env.REPORT_DIR ?? "/reports"));
+} else if (command === "profiles") {
+  const report = await runProfileCheck(
+    profileCheckConfigFromEnv(process.env, log),
+  );
+  process.exit(finish(report, process.env.REPORT_DIR ?? "/reports"));
 } else if (command === "churn") {
   const report = await runChurn(churnConfigFromEnv(process.env, log));
   process.exit(finish(report, process.env.REPORT_DIR ?? "/reports"));
 } else {
   console.error(
-    "usage: cli m1|m2|invariants|churn|proxy|captcha   (configuration from the environment; see bench/framework/src/m1.ts)",
+    "usage: cli m1|m2|invariants|churn|proxy|captcha|profiles   (configuration from the environment; see bench/framework/src/m1.ts)",
   );
   process.exit(2);
 }
