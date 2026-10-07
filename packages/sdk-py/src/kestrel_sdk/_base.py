@@ -16,7 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from ._errors import ApiError, KestrelError
-from ._types import CaptchaOptions, NetworkPolicy, ProxyConfig, Viewport
+from ._types import CaptchaOptions, NetworkPolicy, ProxyConfig, SessionProfile, Viewport
 
 SDK_VERSION = "0.1.0"
 DEFAULT_BASE_URL = "http://localhost:8080"
@@ -78,6 +78,7 @@ def create_body(
     proxy: ProxyConfig | Mapping[str, Any] | None,
     timezone: str | None,
     captcha: CaptchaOptions | Mapping[str, Any] | None,
+    profile: SessionProfile | Mapping[str, Any] | None,
     wait_for_capacity_ms: int | None,
     idempotency_key: str | None,
 ) -> dict[str, Any]:
@@ -95,6 +96,7 @@ def create_body(
         "proxy": proxy.to_dict() if isinstance(proxy, ProxyConfig) else proxy,
         "timezone": timezone,
         "captcha": captcha.to_dict() if isinstance(captcha, CaptchaOptions) else captcha,
+        "profile": profile.to_dict() if isinstance(profile, SessionProfile) else profile,
         "waitForCapacityMs": wait_for_capacity_ms,
         "idempotencyKey": idempotency_key or str(uuid.uuid4()),
     }

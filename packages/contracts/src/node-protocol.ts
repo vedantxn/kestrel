@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { EventBody, NODE_REPORTABLE_EVENT_TYPES } from "./events.js";
-import { NodeId, ProjectId, SessionId } from "./ids.js";
+import { NodeId, ProfileId, ProjectId, SessionId } from "./ids.js";
+import {
+  Base64Key32,
+  PROFILE_LIMITS,
+  ProfileSaveFailure,
+  Sha256Hex,
+} from "./profile.js";
 import { Timezone } from "./geo.js";
 import { CaptchaSolverConfig } from "./captcha.js";
 import { UpstreamProxy } from "./proxy.js";
@@ -47,6 +53,33 @@ export const StartNetwork = NetworkPolicy.extend({
 });
 export type StartNetwork = z.infer<typeof StartNetwork>;
 
+/**
+ * P18 (docs/lld/p18-profiles.md section 4.1). `restore` is the version to start from (absent for
+ * a profile with nothing saved yet); `save` is present only for `persist: true`. The keys are the
+ * versions' plaintext data keys, sent here and nowhere else. The node builds the blob's path from
+ * `projectId`, `profileId` and the version, never from anything a browser said.
+ */
+export const StartProfile = z.strictObject({
+  profileId: ProfileId,
+  restore: z
+    .strictObject({
+      version: z.number().int().positive(),
+      chromeMajor: z.number().int().positive(),
+      bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      sha256: Sha256Hex,
+      key: Base64Key32,
+    })
+    .optional(),
+  save: z
+    .strictObject({
+      version: z.number().int().positive(),
+      key: Base64Key32,
+      maxBytes: z.number().int().positive().max(PROFILE_LIMITS.maxBytesCeiling),
+    })
+    .optional(),
+});
+export type StartProfile = z.infer<typeof StartProfile>;
+
 /** Strict: a field this node does not know is refused, never silently dropped. */
 export const StartRequest = z.strictObject({
   sessionId: SessionId,
@@ -71,19 +104,26 @@ export const StartRequest = z.strictObject({
    * node from before solving refuses the start rather than drop it. The node keeps it in memory.
    */
   captcha: z.strictObject({ solver: CaptchaSolverConfig }).optional(),
+  /** P18. Sent only for a profile session, so a node from before profiles refuses it (strict). */
+  profile: StartProfile.optional(),
 });
 export type StartRequest = z.infer<typeof StartRequest>;
 
 export const StartResponse = z.discriminatedUnion("result", [
   z.object({
     result: z.literal("ready"),
-    startPath: z.enum(["hot", "cold"]),
+    startPath: z.enum(["hot", "warm", "cold"]),
     readyMs: z.number().nonnegative(),
     deviceScaleFactor: z.number().positive(),
   }),
   /** The node cannot or will not start it: stale epoch, stop already remembered (G14), no slot. */
   z.object({ result: z.literal("refused"), reason: z.string() }),
-  z.object({ result: z.literal("failed"), reason: z.string() }),
+  z.object({
+    result: z.literal("failed"),
+    reason: z.string(),
+    /** P18: the profile's blob is missing, damaged or does not decrypt. No other browser would do better. */
+    code: z.literal("profile_unavailable").optional(),
+  }),
 ]);
 export type StartResponse = z.infer<typeof StartResponse>;
 
@@ -117,6 +157,8 @@ export const NodeState = z.object({
   }),
   /** Hot browsers ready now. Used only to order node choice, never for correctness (K4). */
   hotCount: z.number().int().nonnegative(),
+  /** P18: warm browsers (runtimed up, Chrome not launched) ready now, for profile sessions. Ordering only. */
+  warmCount: z.number().int().nonnegative().optional(),
   /** Every session the agent holds: the list the API reconciles against. */
   sessions: z.array(NodeSessionSummary),
   /** Reports waiting to be sent, so the API can see a backlog. */
@@ -134,6 +176,11 @@ export const RegisterRequest = z.object({
   /** Where the API reaches this agent. */
   address: z.string(),
   runtimeVersion: z.string(),
+  /**
+   * P18: the Chrome major of the node's own pinned runtime image (not what a browser says). A
+   * profile is restored only on a node whose Chrome is the same or newer than the one that saved it.
+   */
+  chromeMajor: z.number().int().positive().max(10_000).optional(),
 });
 export const RegisterResponse = z.object({
   epoch: z.number().int().positive(),
@@ -195,6 +242,22 @@ export const Report = z.union([
     /** G-20: bytes through the egress gateway, from the browser and to it. Absent from older nodes. */
     egressBytesUp: EgressBytes.optional(),
     egressBytesDown: EgressBytes.optional(),
+  }),
+  /**
+   * P18: the outcome of a writer session's save, exactly one per session started with
+   * `profile.save`. `saved` names the blob the node wrote; the API commits it only if the
+   * session still holds the profile's lock and the version follows the current one.
+   */
+  z.object({
+    ...ReportCommon,
+    kind: z.literal("profile"),
+    sessionId: SessionId,
+    profileId: ProfileId,
+    outcome: z.enum(["saved", "failed"]),
+    version: z.number().int().positive(),
+    bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    sha256: Sha256Hex.optional(),
+    reason: ProfileSaveFailure.optional(),
   }),
 ]);
 export type Report = z.infer<typeof Report>;

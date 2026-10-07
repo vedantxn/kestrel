@@ -14,6 +14,7 @@ export const ID_PREFIXES = {
   node: "nod",
   session: "ses",
   event: "evt",
+  profile: "prf",
 } as const;
 
 export type IdPrefix = (typeof ID_PREFIXES)[keyof typeof ID_PREFIXES];
@@ -89,6 +90,7 @@ export const ProjectId = idSchema(ID_PREFIXES.project);
 export const OrgId = idSchema(ID_PREFIXES.org);
 export const ApiKeyId = idSchema(ID_PREFIXES.apiKey);
 export const EventId = idSchema(ID_PREFIXES.event);
+export const ProfileId = idSchema(ID_PREFIXES.profile);
 
 /**
  * Node ids are chosen by configuration, not generated ("a", "b" in v1), because they name
@@ -107,4 +109,5 @@ export type ProjectId = z.infer<typeof ProjectId>;
 export type OrgId = z.infer<typeof OrgId>;
 export type ApiKeyId = z.infer<typeof ApiKeyId>;
 export type EventId = z.infer<typeof EventId>;
+export type ProfileId = z.infer<typeof ProfileId>;
 export type NodeId = z.infer<typeof NodeId>;

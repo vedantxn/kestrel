@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { LIMITS } from "./timings.js";
 import { HostPattern } from "./host-pattern.js";
-import { NodeId, SessionId } from "./ids.js";
+import { NodeId, ProfileId, SessionId } from "./ids.js";
 import { CaptchaOptions, SessionCaptcha } from "./captcha.js";
 import { PlainText } from "./plain-text.js";
 import { Timezone } from "./geo.js";
@@ -41,6 +41,7 @@ export const END_REASONS = [
   "start_timeout",
   "disk_limit",
   "node_refused",
+  "profile_unavailable", // P18: the saved profile could not be read, checked or decrypted. Ends `failed`.
 ] as const;
 export const EndReason = z.enum(END_REASONS);
 export type EndReason = z.infer<typeof EndReason>;
@@ -132,6 +133,24 @@ export const NetworkPolicy = z
   .meta({ id: "NetworkPolicy" });
 export type NetworkPolicy = z.infer<typeof NetworkPolicy>;
 
+/**
+ * P18 (docs/lld/p18-profiles.md). Start with a saved profile's cookies, `localStorage` and
+ * IndexedDB; with `persist`, also write the state back as its next version when the session
+ * ends cleanly. One session at a time may persist a profile.
+ */
+export const SessionProfile = z
+  .strictObject({
+    id: ProfileId,
+    persist: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Save the browser's state back into the profile when the session ends cleanly. Only one session at a time may persist a profile.",
+      ),
+  })
+  .meta({ id: "SessionProfile" });
+export type SessionProfile = z.infer<typeof SessionProfile>;
+
 export const Metadata = z
   .record(PlainText(1, 64), PlainText(0, 512))
   .refine((m) => Object.keys(m).length <= 16, "at most 16 keys")
@@ -177,6 +196,9 @@ export const SessionOptions = z
       "The browser's time zone, as pages see it in `Date` and `Intl`. Defaults to the zone of the proxy's exit `country` where that country has one clear zone; otherwise the host's (UTC).",
     ),
     captcha: CaptchaOptions.default({ solve: false }),
+    profile: SessionProfile.optional().describe(
+      "Start with a saved profile (`/v1/profiles`). Use the browser's default context: other contexts are not saved.",
+    ),
   })
   .meta({ id: "SessionOptions" });
 export type SessionOptions = z.infer<typeof SessionOptions>;
@@ -206,7 +228,8 @@ export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
 // --- The session object (A7) --------------------------------------------------------------
 
-export const StartPath = z.enum(["hot", "cold"]);
+/** `warm`: a browser whose Chrome was launched for this session, on its restored profile (P18). */
+export const StartPath = z.enum(["hot", "warm", "cold"]);
 export type StartPath = z.infer<typeof StartPath>;
 
 const IsoTime = z.iso.datetime({ offset: true });

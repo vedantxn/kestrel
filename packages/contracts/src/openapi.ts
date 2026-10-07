@@ -5,6 +5,7 @@ import "./session.js"; // registers the session schemas
 import "./tokens.js"; // MintTokenRequest, SessionToken (W1)
 import "./computer.js"; // ComputerRequest, ComputerResponse (W4)
 import "./project.js"; // Project, ApiKey, UsageReport, admin schemas (P17)
+import "./profile.js"; // Profile, CreateProfileRequest, ListProfiles* (P18)
 
 /**
  * The public API's OpenAPI document, generated from the same Zod schemas the API validates
@@ -48,6 +49,8 @@ function componentSchemas(): Record<string, Json> {
     MintTokenRequest: inp.MintTokenRequest!,
     ComputerRequest: inp.ComputerRequest!,
     UsageQuery: inp.UsageQuery!,
+    CreateProfileRequest: inp.CreateProfileRequest!,
+    ListProfilesQuery: inp.ListProfilesQuery!,
   };
 }
 
@@ -257,6 +260,69 @@ export function buildOpenApiDocument(): Json {
               description: "A page of events, oldest first.",
               ...jsonBody("ListEventsResponse"),
             },
+            ...errors(
+              "invalid_request",
+              "unauthorized",
+              "not_found",
+              "internal",
+            ),
+          },
+        },
+      },
+      "/v1/profiles": {
+        post: {
+          operationId: "createProfile",
+          summary: "Create a profile",
+          description:
+            "An empty profile: saved browser state (cookies, `localStorage` and IndexedDB) that sessions start from with `profile: { id }` and save into with `profile: { id, persist: true }`. `quota_exceeded` past the project's profile limit; `invalid_request` on a deployment without profiles.",
+          requestBody: { required: true, ...jsonBody("CreateProfileRequest") },
+          responses: {
+            "201": { description: "The profile.", ...jsonBody("Profile") },
+            ...errors(
+              "invalid_request",
+              "unauthorized",
+              "conflict",
+              "quota_exceeded",
+              "internal",
+            ),
+          },
+        },
+        get: {
+          operationId: "listProfiles",
+          summary: "List profiles, newest first",
+          parameters: queryParams(schemas, "ListProfilesQuery"),
+          responses: {
+            "200": {
+              description: "A page of profiles.",
+              ...jsonBody("ListProfilesResponse"),
+            },
+            ...errors("invalid_request", "unauthorized", "internal"),
+          },
+        },
+      },
+      "/v1/profiles/{id}": {
+        get: {
+          operationId: "getProfile",
+          summary: "Get a profile",
+          parameters: [idParam("prf")],
+          responses: {
+            "200": { description: "The profile.", ...jsonBody("Profile") },
+            ...errors(
+              "invalid_request",
+              "unauthorized",
+              "not_found",
+              "internal",
+            ),
+          },
+        },
+        delete: {
+          operationId: "deleteProfile",
+          summary: "Delete a profile",
+          description:
+            "Removes the profile and its saved state. Sessions already running keep their browser state; a running writer's save is discarded. A second delete is `not_found`.",
+          parameters: [idParam("prf")],
+          responses: {
+            "204": { description: "Deleted." },
             ...errors(
               "invalid_request",
               "unauthorized",

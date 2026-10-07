@@ -21,6 +21,7 @@ from ._types import (
     ProxyConfig,
     Session,
     SessionEvent,
+    SessionProfile,
     SessionToken,
     TokenScope,
     Viewport,
@@ -101,6 +102,7 @@ class Sessions:
         proxy: ProxyConfig | Mapping[str, Any] | None = None,
         timezone: str | None = None,
         captcha: CaptchaOptions | Mapping[str, Any] | None = None,
+        profile: SessionProfile | Mapping[str, Any] | None = None,
         wait_for_capacity_ms: int | None = None,
         idempotency_key: str | None = None,
     ) -> Session:
@@ -117,6 +119,7 @@ class Sessions:
             proxy=proxy,
             timezone=timezone,
             captcha=captcha,
+            profile=profile,
             wait_for_capacity_ms=wait_for_capacity_ms,
             idempotency_key=idempotency_key,
         )

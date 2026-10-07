@@ -61,12 +61,26 @@ export const RUNTIME_PATHS = {
   captchaChallenges: "/captcha/challenges",
   /** `POST` a `CaptchaInjectRequest`: put the token in the page (`RuntimeCaptchaInject`). */
   captchaInject: "/captcha/inject",
+  /**
+   * P18 (docs/lld/p18-profiles.md section 4.4). `PUT` a profile archive into a warm browser's
+   * empty profile directory, before Chrome is launched. 409 once Chrome has started or a profile
+   * was already written; 400 for an archive that fails a check.
+   */
+  profile: "/profile",
+  /** P18. `POST` a `LaunchRequest`: start Chrome in a warm browser (`KESTREL_CHROME=deferred`). */
+  launch: "/launch",
+  /**
+   * P18. `POST`: read the cookies, close Chrome cleanly, and answer the profile archive. Repeatable
+   * once Chrome has exited cleanly; 409 if Chrome did not exit in time (`unclean`).
+   */
+  profileSave: "/profile/save",
 } as const;
 
 /** `GET /health`. A pooled container is "hot" only when this says `ready`. */
 export const RuntimeHealth = z.object({
   protocolVersion: z.literal(RUNTIME_PROTOCOL_VERSION),
-  status: z.enum(["starting", "ready", "failed"]),
+  /** `warm`: runtimed and the display are up and Chrome waits for `POST /launch` (P18). */
+  status: z.enum(["starting", "warm", "ready", "failed"]),
   /** Chrome's debugging port answered. */
   chromeReady: z.boolean(),
   chromeVersion: z.string().nullable(),
@@ -138,8 +152,29 @@ export const RekeyRequest = z
   .strict();
 export type RekeyRequest = z.infer<typeof RekeyRequest>;
 
-export const RekeyResponse = z.object({ ok: z.literal(true) });
+export const RekeyResponse = z.object({
+  ok: z.literal(true),
+  /** P18: the guest's clock (ms since the epoch) when it answered, checked by the agent. Absent from older runtimeds. */
+  now: z.number().int().nonnegative().optional(),
+});
 export type RekeyResponse = z.infer<typeof RekeyResponse>;
+
+/**
+ * `POST /launch` (P18): start Chrome on the profile directory with the same arguments as any
+ * browser, at the session's window size, then set the restored cookies on the browser target.
+ */
+export const LaunchRequest = z.strictObject({ viewport: Viewport });
+export type LaunchRequest = z.infer<typeof LaunchRequest>;
+
+export const LaunchResponse = z.object({
+  chromeVersion: z.string().max(128),
+  /** Cookies set from the restored profile. */
+  cookies: z.number().int().nonnegative(),
+});
+export type LaunchResponse = z.infer<typeof LaunchResponse>;
+
+/** The `POST /profile/save` error that means Chrome did not exit in time, so nothing is saved. */
+export const PROFILE_SAVE_UNCLEAN = "unclean";
 
 /**
  * `POST /probe` (G-23). Each target is one attempt from inside the guest, with no proxy: a TCP

@@ -334,6 +334,9 @@ async function applyReport(
     return;
   }
 
+  // P18-5 commits profile saves; until then a profile report is recorded nowhere.
+  if (r.kind === "profile") return;
+
   // removed: the container is gone and the slot released. Idempotent without a dedupe key:
   // once the session is terminal, neither call below matches anything.
   if (NON_TERMINAL.includes(session.status) && session.status !== "stopping") {

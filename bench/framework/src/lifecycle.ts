@@ -20,7 +20,7 @@ export interface LifecycleResult {
   phase?: string;
   error?: string;
   sessionId?: string;
-  startPath?: "hot" | "cold" | null;
+  startPath?: "hot" | "warm" | "cold" | null;
   createMs: number;
   connectMs?: number;
   navMs?: number;

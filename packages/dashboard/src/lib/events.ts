@@ -118,5 +118,23 @@ export function describeEvent(e: SessionEvent): {
         detail: humanize(e.data.reason),
         tone: "warn",
       };
+    case "profile.restored":
+      return {
+        title: "Profile restored",
+        detail: `${e.data.profileId} v${e.data.version} · ${e.data.bytes} bytes in ${Math.round(e.data.ms)} ms`,
+        tone: "default",
+      };
+    case "profile.saved":
+      return {
+        title: "Profile saved",
+        detail: `${e.data.profileId} v${e.data.version} · ${e.data.bytes} bytes`,
+        tone: "good",
+      };
+    case "profile.save_failed":
+      return {
+        title: "Profile not saved",
+        detail: `${e.data.profileId} · ${humanize(e.data.reason)}`,
+        tone: "warn",
+      };
   }
 }

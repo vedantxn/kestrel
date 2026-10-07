@@ -34,7 +34,8 @@ export type EndReason =
   | "node_lost"
   | "start_timeout"
   | "disk_limit"
-  | "node_refused";
+  | "node_refused"
+  | "profile_unavailable";
 
 /** The page's inner size in CSS pixels. */
 export interface Viewport {
@@ -144,6 +145,16 @@ export interface ProxyConfig extends ProxyExit {
   password?: string | undefined;
 }
 
+/**
+ * Start with a saved profile (cookies, `localStorage` and IndexedDB of the default context).
+ * With `persist`, the session's state is saved back as the profile's next version when it ends
+ * cleanly; only one session at a time may persist a profile.
+ */
+export interface SessionProfile {
+  id: string;
+  persist: boolean;
+}
+
 /** A session's options as the API applied them, defaults filled in. */
 export interface SessionOptions {
   /** Maximum lifetime. */
@@ -162,6 +173,8 @@ export interface SessionOptions {
   /** The browser's IANA time zone, if one was set or derived from the proxy's exit country. */
   timezone?: string | undefined;
   captcha: CaptchaOptions;
+  /** The profile the session started from, if any. */
+  profile?: SessionProfile | undefined;
 }
 
 /** What `sessions.create` accepts. Every field is optional. */
@@ -180,6 +193,8 @@ export interface CreateSessionRequest {
   timezone?: string | undefined;
   /** `{ solve: true }`: solve CAPTCHAs with the deployment's solver service. Default off. */
   captcha?: { solve?: boolean | undefined } | undefined;
+  /** Start from a saved profile; `persist: true` also saves into it. Use the browser's default context. */
+  profile?: { id: string; persist?: boolean | undefined } | undefined;
   /**
    * Repeating a create with the same key returns the original session. The SDK makes one
    * up for every call that does not pass one, so its own retries never create two sessions.
@@ -202,7 +217,7 @@ export interface Session {
   deviceScaleFactor: number;
   options: SessionOptions;
   nodeId: string | null;
-  startPath: "hot" | "cold" | null;
+  startPath: "hot" | "warm" | "cold" | null;
   /** Filled in when the session ends. */
   usage: {
     browserSeconds: number;
@@ -236,6 +251,47 @@ export interface Page<T> {
   nextCursor: string | null;
 }
 
+/** Why a writer session's state was not saved into its profile. */
+export type ProfileSaveFailure =
+  | "unclean_end"
+  | "not_started"
+  | "browser_gone"
+  | "chrome_did_not_exit"
+  | "timeout"
+  | "too_large"
+  | "invalid_archive"
+  | "storage_full"
+  | "storage_error"
+  | "project_quota"
+  | "deleted"
+  | "stale"
+  | "node_lost"
+  | "no_report";
+
+/** Saved browser state that sessions start from (`profile: { id }`). */
+export interface Profile {
+  id: string;
+  name: string | null;
+  metadata: Record<string, string>;
+  /** The current version; 0 until a session has saved one. */
+  version: number;
+  /** The current version's stored size. */
+  bytes: number;
+  savedAt: string | null;
+  savedBySessionId: string | null;
+  /** The Chrome major that saved the current version. */
+  chromeMajor: number | null;
+  /** The session that will save the next version, if one is running. */
+  inUseBy: string | null;
+  createdAt: string;
+}
+
+export interface CreateProfileRequest {
+  /** Unique among the project's profiles. */
+  name?: string | undefined;
+  metadata?: Record<string, string> | undefined;
+}
+
 export type EgressDenyReason =
   | "blocked_address"
   | "port_not_allowed"
@@ -257,7 +313,7 @@ export type EventBody =
   | { type: "session.starting"; data: Record<string, never> }
   | {
       type: "session.ready";
-      data: { startPath: "hot" | "cold"; readyMs: number };
+      data: { startPath: "hot" | "warm" | "cold"; readyMs: number };
     }
   | { type: "session.attached"; data: { connections: number } }
   | { type: "session.detached"; data: { connections: number } }
@@ -323,6 +379,18 @@ export type EventBody =
         host: string | null;
         reason: CaptchaSolveFailure;
       };
+    }
+  | {
+      type: "profile.restored";
+      data: { profileId: string; version: number; bytes: number; ms: number };
+    }
+  | {
+      type: "profile.saved";
+      data: { profileId: string; version: number; bytes: number };
+    }
+  | {
+      type: "profile.save_failed";
+      data: { profileId: string; reason: ProfileSaveFailure };
     };
 
 /**

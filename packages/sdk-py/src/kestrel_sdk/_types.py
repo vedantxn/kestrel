@@ -41,6 +41,7 @@ EndReason = Literal[
     "start_timeout",
     "disk_limit",
     "node_refused",
+    "profile_unavailable",
 ]
 
 # A newer server may send event types not listed here; they are passed through as they are.
@@ -61,6 +62,9 @@ EventType = Literal[
     "captcha.solving",
     "captcha.solved",
     "captcha.failed",
+    "profile.restored",
+    "profile.saved",
+    "profile.save_failed",
 ]
 
 EgressDenyReason = Literal[
@@ -245,6 +249,23 @@ class CaptchaOptions:
 
 
 @dataclass(frozen=True)
+class SessionProfile:
+    """Start from a saved profile (cookies, ``localStorage`` and IndexedDB of the default
+    context). With ``persist=True`` the session's state is saved back as the profile's next
+    version when it ends cleanly; one session at a time may persist a profile."""
+
+    id: str
+    persist: bool = False
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> SessionProfile:
+        return cls(id=d["id"], persist=bool(d.get("persist", False)))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "persist": self.persist}
+
+
+@dataclass(frozen=True)
 class SessionOptions:
     """A session's options as the API applied them, defaults filled in."""
 
@@ -258,6 +279,7 @@ class SessionOptions:
     proxy: SessionProxy | None = None
     timezone: str | None = None
     captcha: CaptchaOptions = field(default_factory=CaptchaOptions)
+    profile: SessionProfile | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> SessionOptions:
@@ -272,6 +294,7 @@ class SessionOptions:
             proxy=SessionProxy.from_dict(d["proxy"]) if d.get("proxy") else None,
             timezone=d.get("timezone"),
             captcha=CaptchaOptions.from_dict(d.get("captcha") or {}),
+            profile=SessionProfile.from_dict(d["profile"]) if d.get("profile") else None,
         )
 
 

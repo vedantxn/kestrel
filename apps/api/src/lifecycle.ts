@@ -128,7 +128,12 @@ export async function beginStop(
     id,
     from: BEFORE_STOPPING,
     to: "stopping",
-    data: { endReason: reason, stoppingAt: at, captcha: Prisma.DbNull },
+    // The database's enum gains `profile_unavailable` in the profiles migration (P18-2).
+    data: {
+      endReason: reason as Exclude<EndReason, "profile_unavailable">,
+      stoppingAt: at,
+      captcha: Prisma.DbNull,
+    },
     events: [{ type: "session.stopping", data: { endReason: reason } }],
     at,
   });

@@ -6,8 +6,16 @@ import {
   CaptchaSolvedData,
   CaptchaSolvingData,
 } from "./captcha.js";
-import { EventId, NodeId, SessionId } from "./ids.js";
+import { EventId, NodeId, ProfileId, SessionId } from "./ids.js";
+import { ProfileSaveFailure } from "./profile.js";
 import { EndReason, SessionStatus, StartPath } from "./session.js";
+
+const ProfileVersionNumber = z.number().int().positive();
+const ProfileBytes = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER);
 
 /**
  * C8. Events explain a session's history (K12). Events about a session are written in the
@@ -109,6 +117,30 @@ export const EventBody = z.discriminatedUnion("type", [
     type: z.literal("captcha.failed"),
     data: CaptchaFailedData,
   }),
+  /** P18: the session started on this saved version. Reported by the node. */
+  z.object({
+    type: z.literal("profile.restored"),
+    data: z.object({
+      profileId: ProfileId,
+      version: ProfileVersionNumber,
+      bytes: ProfileBytes,
+      ms: z.number().nonnegative(),
+    }),
+  }),
+  /** P18: the session's state is the profile's new current version. */
+  z.object({
+    type: z.literal("profile.saved"),
+    data: z.object({
+      profileId: ProfileId,
+      version: ProfileVersionNumber,
+      bytes: ProfileBytes,
+    }),
+  }),
+  /** P18: a writer session's state was not saved; the profile keeps its previous version. */
+  z.object({
+    type: z.literal("profile.save_failed"),
+    data: z.object({ profileId: ProfileId, reason: ProfileSaveFailure }),
+  }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 export type EventType = EventBody["type"];
@@ -124,6 +156,7 @@ export const NODE_REPORTABLE_EVENT_TYPES = [
   "captcha.solving",
   "captcha.solved",
   "captcha.failed",
+  "profile.restored",
 ] as const satisfies readonly EventType[];
 
 export const SessionEvent = z
