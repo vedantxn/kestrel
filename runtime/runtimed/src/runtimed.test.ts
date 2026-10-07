@@ -743,7 +743,7 @@ describe("the control API (C5)", () => {
     const now = 1_791_369_000_000;
     expect(
       (await call("POST", "/rekey", { token: "c".repeat(48), now })).json,
-    ).toEqual({ ok: true });
+    ).toEqual({ ok: true, now: expect.any(Number) });
     // Set while only the snapshot's page existed: the new page starts with the right time.
     expect(set).toEqual([{ epochMs: now, pagesThen: ["T1"] }]);
     expect(chrome!.pages).toEqual(["T2"]);
