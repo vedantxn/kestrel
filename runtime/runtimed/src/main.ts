@@ -11,6 +11,7 @@ import { Recorder } from "./recorder.js";
 import { Tabs } from "./page.js";
 import { Supervisor, type Proc } from "./supervisor.js";
 import { TimezoneOverride } from "./timezone.js";
+import { pipeClock } from "./clock.js";
 
 const parsed = Env.safeParse(process.env);
 if (!parsed.success) {
@@ -65,6 +66,8 @@ const control = new ControlServer(
   cfg.SNAPSHOT === "on",
   captcha,
   new TimezoneOverride(cfg.CHROME_PORT, log),
+  // Made by the guest's init (runtime/microvm/init); only a snapshot clone has a clock to correct.
+  cfg.SNAPSHOT === "on" ? pipeClock("/run/kestrel/clock") : undefined,
 );
 
 await forward.listen(cfg.FORWARD_PORT);

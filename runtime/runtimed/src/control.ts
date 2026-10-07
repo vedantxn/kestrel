@@ -31,6 +31,7 @@ import { runProbe } from "./probe.js";
 import type { Recorder } from "./recorder.js";
 import type { Supervisor } from "./supervisor.js";
 import type { TimezoneOverride } from "./timezone.js";
+import type { GuestClock } from "./clock.js";
 
 const same = (a: string, b: string): boolean =>
   timingSafeEqual(
@@ -76,6 +77,8 @@ export class ControlServer {
     private readonly captcha?: CaptchaWatcher,
     /** The session's time zone, held for its life (docs/lld/upstream-proxy.md). */
     private readonly timezone?: TimezoneOverride,
+    /** A clone's wall clock, set at rekey from the host's (threat model 9.1). */
+    private readonly clock?: GuestClock,
   ) {}
 
   async listen(port: number, host = "0.0.0.0"): Promise<number> {
@@ -230,6 +233,10 @@ export class ControlServer {
           });
         this.token = parsed.data.token;
         this.rekeyed = true;
+        // Before the session's page is made, so its first Date.now() is already the host's time. A
+        // clock that cannot be set is not fatal here: m1 check 4b measures every clone's clock.
+        if (parsed.data.now !== undefined && this.clock)
+          await this.clock.set(parsed.data.now);
         // A probe keeps the snapshot's page: nothing is ever shown in it, and it is never configured.
         if (parsed.data.probe) this.probe = true;
         else await this.freshPage();

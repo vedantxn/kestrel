@@ -21,6 +21,7 @@ import { Recorder } from "./recorder.js";
 import { Supervisor, type Proc, type SpawnFn } from "./supervisor.js";
 import { stream } from "./test/mp4.js";
 import type { Env } from "./config.js";
+import type { GuestClock } from "./clock.js";
 
 const PROOF = "ab".repeat(32);
 const TOKEN = "control-token-0123456789";
@@ -564,6 +565,7 @@ describe("the control API (C5)", () => {
       captcha?: boolean;
       recorder?: Recorder;
       timezone?: boolean;
+      clock?: GuestClock;
     } = {},
   ) {
     chrome = new FakeChrome();
@@ -588,6 +590,7 @@ describe("the control API (C5)", () => {
       opts.snapshot ?? false,
       opts.captcha ? new CaptchaWatcher(port) : undefined,
       opts.timezone ? new TimezoneOverride(port) : undefined,
+      opts.clock,
     );
     const cport = await control.listen(0, "127.0.0.1");
     closers.push(() => control.close());
@@ -723,6 +726,25 @@ describe("the control API (C5)", () => {
     expect(
       (await call("POST", "/rekey", { token: "d".repeat(48) }, fresh)).status,
     ).toBe(409);
+  });
+
+  it("sets a clone's clock to the host's at rekey, before the session's page is made (9.1)", async () => {
+    const set: { epochMs: number; pagesThen: string[] }[] = [];
+    const clock: GuestClock = {
+      set: async (epochMs) => {
+        set.push({ epochMs, pagesThen: [...chrome!.pages] });
+        return true;
+      },
+    };
+    const { sup, call } = await rig({ snapshot: true, clock });
+    await sup.start();
+    const now = 1_791_369_000_000;
+    expect(
+      (await call("POST", "/rekey", { token: "c".repeat(48), now })).json,
+    ).toEqual({ ok: true });
+    // Set while only the snapshot's page existed: the new page starts with the right time.
+    expect(set).toEqual([{ epochMs: now, pagesThen: ["T1"] }]);
+    expect(chrome!.pages).toEqual(["T2"]);
   });
 
   it("answers GET /captcha only with the token and once configured; 404 without detection", async () => {

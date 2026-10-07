@@ -13,6 +13,17 @@ mount -t tmpfs -o size=64m,mode=1777,noexec,nosuid,nodev tmpfs /tmp
 mount -t tmpfs -o size=64m,uid=10001,gid=10001,mode=0700,noexec,nosuid,nodev tmpfs /home/kestrel
 mount -t tmpfs -o size=8m,mode=0755 tmpfs /run
 ip link set lo up 2>/dev/null || true
+# A clone resumes with the template's wall clock (threat model 9.1). At rekey runtimed, which cannot
+# set the clock, writes the host's time (seconds since the epoch) into this pipe; only its user can
+# write it, and this loop sets the clock from it as root. Double-forked, so the reaper below does not
+# wait for it. A blocked open of the pipe is a reader, so runtimed's non-blocking write finds it.
+mkdir -p /run/kestrel
+if mkfifo -m 0600 /run/kestrel/clock && chown 10001:10001 /run/kestrel/clock; then
+  ( while :; do
+      read -r t < /run/kestrel/clock || continue
+      case "$t" in ''|*[!0-9.]*) ;; *) date -s "@$t" >/dev/null 2>&1 ;; esac
+    done & )
+fi
 # The browser runs unprivileged, with no way to gain privileges, as in the container (R10).
 setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs \
   env -i HOME=/home/kestrel NODE_ENV=production PATH=/usr/local/bin:/usr/bin:/bin \

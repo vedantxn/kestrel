@@ -264,7 +264,10 @@ describe("the microVM driver", () => {
     );
     const rekey = rt.seen.find((s) => s.url.endsWith("/rekey"))!;
     expect(rekey.auth).toBe(`Bearer ${TEMPLATE_TOKEN}`);
-    expect(JSON.parse(rekey.body!)).toEqual({ token: "c".repeat(48) });
+    const sent = JSON.parse(rekey.body!) as { token: string; now: number };
+    // The host's clock goes with the new token: the clone resumed with the template's (9.1).
+    expect(sent).toEqual({ token: "c".repeat(48), now: expect.any(Number) });
+    expect(Math.abs(sent.now - Date.now())).toBeLessThan(5_000);
     expect((await vm.list()).map((c) => c.id)).toEqual([info.id]);
   });
 
@@ -379,6 +382,7 @@ describe("the microVM driver", () => {
     expect(JSON.parse(rekey.body!)).toEqual({
       token: "c".repeat(48),
       probe: true,
+      now: expect.any(Number),
     });
     expect(vm.describe()).toMatchObject({
       uid: 10002,

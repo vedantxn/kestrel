@@ -739,7 +739,12 @@ export class MicroVmDriver implements DockerDriver {
           authorization: `Bearer ${template}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify(probe ? { token, probe: true } : { token }),
+        // The host's clock, per attempt: the clone resumed with the template's (threat model 9.1).
+        body: JSON.stringify({
+          token,
+          ...(probe ? { probe: true } : {}),
+          now: Date.now(),
+        }),
         signal: AbortSignal.timeout(10_000),
       });
     let res: Response;
