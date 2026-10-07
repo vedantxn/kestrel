@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { PROFILE_ALLOW } from "@kestrel/contracts";
 import {
   CLONE_ALLOWED,
   compareClones,
   flatten,
   looksRandom,
   parseListing,
+  WARM_CLONE_ALLOWED,
   type CloneObservation,
 } from "./clones.js";
 
@@ -173,6 +175,64 @@ describe("what a snapshot copies into every clone (G-24)", () => {
       a.json["Default/BrowsingTopicsState#hex_encoded_hmac_key"]!;
     expect(rules(compareClones(a, b))).toEqual([
       "Default/BrowsingTopicsState#hex_encoded_hmac_key",
+    ]);
+  });
+});
+
+describe("warm clones of one profile (P18 check 8, T-76)", () => {
+  const restored =
+    "Default/IndexedDB/https_example.com_0.indexeddb.leveldb/000003.log";
+
+  it("allows the files both sessions restored from their profile, and nothing else", () => {
+    const a = obs();
+    const b = obs();
+    a.files[restored] = { size: 512, digest: "9f86d081884c7d65" };
+    b.files[restored] = { size: 512, digest: "9f86d081884c7d65" };
+    // As a hot clone's, a generated-looking copy is a failure: the restored file is not.
+    expect(rules(compareClones(a, b))).toEqual([`file:${restored}`]);
+    const d = compareClones(a, b, undefined, WARM_CLONE_ALLOWED);
+    expect(d.failures).toEqual([]);
+    expect(d.shared.find((x) => x.item === `file:${restored}`)).toMatchObject({
+      verdict: "allowed",
+    });
+    // A per-profile salt is still a failure in a warm clone.
+    a.files["Default/Visited Links"] = {
+      size: 131072,
+      digest: "0a1b2c3d4e5f6a7b",
+    };
+    b.files["Default/Visited Links"] = {
+      size: 131072,
+      digest: "0a1b2c3d4e5f6a7b",
+    };
+    expect(rules(compareClones(a, b, undefined, WARM_CLONE_ALLOWED))).toEqual([
+      "file:Default/Visited Links",
+    ]);
+  });
+
+  it("allows exactly what a profile keeps", () => {
+    const ok = (item: string) =>
+      WARM_CLONE_ALLOWED.some((a) => a.pattern.test(item));
+    for (const p of PROFILE_ALLOW) {
+      const file = p.endsWith("/") ? `${p}000003.log` : p;
+      expect(ok(`file:${file}`), file).toBe(true);
+    }
+    expect(ok("file:Default/LocalStorage-wal")).toBe(true);
+    for (const item of [
+      "file:Default/Cookies",
+      "file:Default/LocalStorageX",
+      "file:Default/Session Storage/000003.log",
+      "file:Default/Preferences",
+      "Default/Preferences#profile.salt",
+    ])
+      expect(ok(item), item).toBe(false);
+  });
+
+  it("still fails on a restored session's storage of the test page's origin", () => {
+    const a = obs();
+    const b = obs();
+    a.page.cookie = "kb_session=x";
+    expect(rules(compareClones(a, b, undefined, WARM_CLONE_ALLOWED))).toEqual([
+      `storage.${a.sessionId}`,
     ]);
   });
 });

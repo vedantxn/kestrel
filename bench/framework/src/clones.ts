@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Session } from "@kestrel/contracts";
 import { chromium, type Browser, type Page } from "playwright-core";
 import type { KestrelClient } from "./client.js";
-import type { HostConfig } from "./collect.js";
+import { agentState, type HostConfig } from "./collect.js";
 import { nodeRuntimes, sessionsOn } from "./placement.js";
 
 /**
@@ -105,6 +105,20 @@ export const CLONE_ALLOWED: { pattern: RegExp; why: string }[] = [
   },
 ];
 
+/**
+ * P18 check 8: two warm clones of one profile start from the same saved files, which is what a
+ * profile is. Only those files, the ones a profile keeps (`PROFILE_ALLOW`), are the same by design;
+ * the warm template is taken before Chrome first runs, so none of them can come from it.
+ */
+export const WARM_CLONE_ALLOWED: { pattern: RegExp; why: string }[] = [
+  ...CLONE_ALLOWED,
+  {
+    pattern:
+      /^file:Default\/(Local Storage\/leveldb\/|IndexedDB\/|WebStorage\/|LocalStorage(-journal|-wal)?$)/,
+    why: "restored from the profile both sessions opened: every session of a profile starts with its saved web storage (the warm template is taken before Chrome runs, so it holds none)",
+  },
+];
+
 /** Names that hold secrets or identifiers: copied, they link clones. */
 const SENSITIVE_KEY =
   /(salt|seed|secret|token|nonce|entropy|random|hmac|guid|uuid|client_?id|machine_?id|device_?id|install|_id2?$|\bid$|key)/i;
@@ -141,6 +155,7 @@ export function compareClones(
   a: CloneObservation,
   b: CloneObservation,
   baseline?: [CloneObservation, CloneObservation],
+  allowList: { pattern: RegExp; why: string }[] = CLONE_ALLOWED,
 ): CloneDiff {
   const shared: CloneItem[] = [];
   const failures: CloneItem[] = [];
@@ -212,7 +227,7 @@ export function compareClones(
     get: (o: CloneObservation) => unknown,
     sensitive: boolean,
   ) => {
-    const allowed = CLONE_ALLOWED.find((x) => x.pattern.test(item));
+    const allowed = allowList.find((x) => x.pattern.test(item));
     const inBaseline = differsInBaseline(get);
     if (inBaseline === false) {
       shared.push({
@@ -486,9 +501,12 @@ async function observePair(
   client: KestrelClient,
   node: string,
   testPageUrl: string,
+  opts: Record<string, unknown> = {},
+  check: (s: Session) => Promise<void> = async () => undefined,
 ): Promise<[CloneObservation, CloneObservation]> {
-  const sessions = await sessionsOn(client, node, 2);
+  const sessions = await sessionsOn(client, node, 2, opts);
   try {
+    for (const s of sessions) await check(s);
     return [
       await observe(sessions[0]!, testPageUrl),
       await observe(sessions[1]!, testPageUrl),
@@ -513,4 +531,57 @@ export async function runCloneDiff(
     ? await observePair(client, dockerNode, testPageUrl)
     : undefined;
   return { node: vmNode, ...compareClones(a, b, baseline) };
+}
+
+/**
+ * P18 check 8 (T-76): the same comparison on two warm clones, restored from the warm template
+ * (taken before Chrome starts) for sessions that open a saved profile, with two warm containers
+ * as the baseline. `profileId` names a profile whose saved version holds nothing of the test
+ * page's origin, so whatever the page finds stored came from the template, not the profile.
+ */
+export async function runWarmCloneDiff(
+  client: KestrelClient,
+  host: HostConfig,
+  testPageUrl: string,
+  profileId: string,
+): Promise<(CloneDiff & { node: string }) | { skipped: string }> {
+  const runtimes = await nodeRuntimes(host);
+  const vmNode = [...runtimes].find(([, r]) => r === "microvm")?.[0];
+  if (!vmNode) return { skipped: "no microVM node in this deployment" };
+  const dockerNode = [...runtimes].find(([, r]) => r === "docker")?.[0];
+  const opts = { profile: { id: profileId } };
+  const warm = async (s: Session) => {
+    if (s.startPath !== "warm")
+      throw new Error(
+        `${s.id} on node ${s.nodeId} started ${s.startPath}, not warm: the profile has no saved version?`,
+      );
+  };
+  // A microVM node may send profile sessions to Docker (MICROVM_PROFILES=docker): then there is no
+  // warm clone to compare.
+  let inDocker = false;
+  const node = host.nodes.find((x) => x.id === vmNode)!;
+  const [a, b] = await observePair(
+    client,
+    vmNode,
+    testPageUrl,
+    opts,
+    async (s) => {
+      await warm(s);
+      const browser = (await agentState(node)).sessions.find(
+        (x) => x.sessionId === s.id,
+      )?.containerId;
+      if (browser && !browser.startsWith("vm-")) inDocker = true;
+    },
+  );
+  if (inDocker)
+    return {
+      skipped: `node ${vmNode} runs profile sessions in Docker containers (MICROVM_PROFILES=docker): no warm clone to compare`,
+    };
+  const baseline = dockerNode
+    ? await observePair(client, dockerNode, testPageUrl, opts, warm)
+    : undefined;
+  return {
+    node: vmNode,
+    ...compareClones(a, b, baseline, WARM_CLONE_ALLOWED),
+  };
 }
