@@ -14,6 +14,11 @@ import {
   realHost,
   type HostReader,
 } from "./collect-vm.js";
+import {
+  profileView,
+  readProfileStoreDir,
+  type ProfileRows,
+} from "./collect-profiles.js";
 import type {
   AgentView,
   DockerContainer,
@@ -43,6 +48,8 @@ export interface HostConfig {
   apiInternal: string;
   databaseUrlFile: string;
   dockerSocket?: string;
+  /** P18: the profile store's directory, mounted read-only; absent here means it is not judged. */
+  profileStoreDir?: string;
 }
 
 export const DEFAULT_HOST: HostConfig = {
@@ -59,6 +66,7 @@ export const DEFAULT_HOST: HostConfig = {
   ],
   apiInternal: "http://127.0.0.1:8081",
   databaseUrlFile: "/secrets/database-url",
+  profileStoreDir: "/var/lib/kestrel/profiles",
 };
 
 function unixGet(socketPath: string, path: string): Promise<unknown> {
@@ -167,6 +175,7 @@ export async function collectSnapshot(
     max: 1,
   });
   let api: Snapshot["api"];
+  let profileRows: ProfileRows;
   try {
     const rows = await db.$queryRaw<
       { id: string; status: string; node_id: string | null; age: number }[]
@@ -179,6 +188,62 @@ export async function collectSnapshot(
       nodeId: r.node_id,
       ageSeconds: r.age,
     }));
+    // P18: locks and pending versions with their writer's state; the version rows the store's
+    // blobs belong to (a deleted profile's rows count as none, as the API's collection counts them).
+    profileRows = {
+      locks: (
+        await db.$queryRaw<
+          {
+            profile_id: string;
+            session_id: string;
+            status: string | null;
+            age: number | null;
+          }[]
+        >`
+        SELECT p.id::text AS profile_id, p.writer_session_id::text AS session_id, s.status::text AS status,
+          extract(epoch FROM (now() - coalesce(s.ended_at, s.stopping_at, s.created_at)))::float8 AS age
+        FROM profiles p LEFT JOIN sessions s ON s.id = p.writer_session_id
+        WHERE p.writer_session_id IS NOT NULL`
+      ).map((r) => ({
+        profileUuid: r.profile_id,
+        sessionUuid: r.session_id,
+        status: r.status,
+        age: r.age,
+      })),
+      pending: (
+        await db.$queryRaw<
+          {
+            profile_id: string;
+            version: number;
+            session_id: string;
+            status: string | null;
+            age: number | null;
+          }[]
+        >`
+        SELECT v.profile_id::text AS profile_id, v.version, v.session_id::text AS session_id, s.status::text AS status,
+          extract(epoch FROM (now() - coalesce(s.ended_at, s.stopping_at, s.created_at)))::float8 AS age
+        FROM profile_versions v LEFT JOIN sessions s ON s.id = v.session_id
+        WHERE v.state = 'pending'`
+      ).map((r) => ({
+        profileUuid: r.profile_id,
+        version: r.version,
+        sessionUuid: r.session_id,
+        status: r.status,
+        age: r.age,
+      })),
+      versions: (
+        await db.$queryRaw<
+          { project_id: string; profile_id: string; version: number }[]
+        >`
+        SELECT p.project_id::text AS project_id, v.profile_id::text AS profile_id, v.version
+        FROM profile_versions v JOIN profiles p ON p.id = v.profile_id
+        WHERE p.deleted_at IS NULL`
+      ).map((r) => ({
+        projectUuid: r.project_id,
+        profileUuid: r.profile_id,
+        version: r.version,
+      })),
+    };
   } finally {
     await db.$disconnect();
   }
@@ -214,6 +279,7 @@ export async function collectSnapshot(
       poolHeadroom: st.poolHeadroom,
       sessions: st.sessions,
       pool: st.pool,
+      warm: st.warm,
       retiring: st.retiring,
       creating: st.creating,
       pendingReports: st.pendingReports,
@@ -313,6 +379,12 @@ export async function collectSnapshot(
     harnessExpected: Boolean(opts.harnessExpected),
     vms,
     hugepages: microvmNodes.length ? await readHugePages(host) : null,
+    profiles: profileView(
+      profileRows,
+      cfg.profileStoreDir
+        ? await readProfileStoreDir(cfg.profileStoreDir)
+        : null,
+    ),
   };
 }
 

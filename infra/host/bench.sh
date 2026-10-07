@@ -52,7 +52,7 @@ docker run -d --name "$name" --network host -u 0:0 --privileged --pid host --cgr
   -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/kestrel/secrets:/secrets:ro -v /run/kestrel:/run/kestrel \
   -v /run/xtables.lock:/run/xtables.lock -v /var/lib/kestrel/reports:/reports \
   --mount type=bind,source=/run/netns,target=/run/netns,bind-propagation=rslave \
-  -v /data/kestrel-vm:/data/kestrel-vm:ro \
+  -v /data/kestrel-vm:/data/kestrel-vm:ro -v /var/lib/kestrel/profiles:/var/lib/kestrel/profiles:ro \
   -v /usr/bin/docker:/usr/bin/docker:ro -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
   -v /srv/kestrel:/srv/kestrel:ro -v /var/lib/kestrel/compose.env:/var/lib/kestrel/compose.env:ro \
   -e PUBLIC_HOSTNAME="$PUBLIC_HOSTNAME" -e PUBLIC_IP="$PUBLIC_IP" -e API_KEY_FILE=/secrets/harness-api-key \

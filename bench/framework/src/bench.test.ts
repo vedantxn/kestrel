@@ -336,3 +336,129 @@ describe("the harness races and the harness surface", () => {
     expect(checkInvariants(a)).toEqual([]);
   });
 });
+
+describe("profiles and the warm pool (P18, check 12)", () => {
+  const DIR =
+    "0192aaaa-0000-7000-8000-000000000001/profiles/0192bbbb-0000-7000-8000-000000000002";
+  /** A writer running with its lock and pending version, a saved version, a write in progress. */
+  function withProfiles(): Snapshot {
+    const s = good();
+    s.agents[0]!.pool[0]!.level = "warm";
+    s.agents[0]!.warm = { target: 1, wanted: 1 };
+    s.profiles = {
+      locks: [
+        {
+          profileId: "prf_1",
+          sessionId: "ses_1",
+          sessionStatus: "ready",
+          ageSeconds: 5,
+        },
+      ],
+      pending: [
+        {
+          profileId: "prf_1",
+          version: 2,
+          sessionId: "ses_1",
+          sessionStatus: "ready",
+          ageSeconds: 5,
+        },
+      ],
+      store: {
+        blobs: [
+          { key: `${DIR}/1.kpf`, ageSeconds: 7200, hasRow: true },
+          // A save just written whose report has not arrived: no row yet, and young.
+          { key: `${DIR}/2.kpf`, ageSeconds: 3, hasRow: false },
+        ],
+        temporary: [{ path: `${DIR}/.0123456789abcdef.tmp`, ageSeconds: 1 }],
+      },
+    };
+    return s;
+  }
+
+  it("finds nothing wrong with a writer running, a saved version and a write in progress", () => {
+    expect(checkInvariants(withProfiles())).toEqual([]);
+  });
+
+  it("allows a lock and a pending version while the writer's report is on its way", () => {
+    const a = withProfiles();
+    a.api.push({ id: "ses_2", status: "stopped", nodeId: "a", ageSeconds: 4 });
+    for (const x of [a.profiles!.locks[0]!, a.profiles!.pending[0]!]) {
+      x.sessionId = "ses_2";
+      x.sessionStatus = "stopped";
+      x.ageSeconds = 4;
+    }
+    expect(checkInvariants(a)).toEqual([]);
+  });
+
+  it("finds a lock held by a session that ended, or that is gone", () => {
+    const a = withProfiles();
+    a.profiles!.locks[0] = {
+      profileId: "prf_1",
+      sessionId: "ses_0",
+      sessionStatus: "stopped",
+      ageSeconds: 45,
+    };
+    expect(rules(a)).toEqual(["profile-lock-after-session"]);
+    const b = withProfiles();
+    b.profiles!.locks[0]!.sessionStatus = null;
+    b.profiles!.locks[0]!.ageSeconds = null;
+    expect(rules(b)).toEqual(["profile-lock-after-session"]);
+  });
+
+  it("finds a pending version of a session that ended", () => {
+    const a = withProfiles();
+    a.profiles!.pending[0] = {
+      profileId: "prf_1",
+      version: 2,
+      sessionId: "ses_0",
+      sessionStatus: "failed",
+      ageSeconds: 600,
+    };
+    expect(rules(a)).toEqual(["profile-pending-after-session"]);
+  });
+
+  it("finds a temporary file older than the sweep window, and not before", () => {
+    const a = withProfiles();
+    a.profiles!.store!.temporary[0]!.ageSeconds = 10 * 60;
+    expect(checkInvariants(a)).toEqual([]);
+    a.profiles!.store!.temporary[0]!.ageSeconds = 12 * 60;
+    expect(rules(a)).toEqual(["profile-temporary-blob"]);
+  });
+
+  it("finds a blob with no row once it is past an hour, and not before", () => {
+    const a = withProfiles();
+    a.profiles!.store!.blobs[1]!.ageSeconds = 50 * 60;
+    expect(checkInvariants(a)).toEqual([]);
+    a.profiles!.store!.blobs[1]!.ageSeconds = 62 * 60;
+    expect(rules(a)).toEqual(["profile-orphan-blob"]);
+  });
+
+  it("judges nothing of a store it cannot read", () => {
+    const a = withProfiles();
+    a.profiles!.store = null;
+    a.profiles!.locks = [];
+    a.profiles!.pending = [];
+    expect(checkInvariants(a)).toEqual([]);
+  });
+
+  it("finds warm browsers past what the agent wants, and allows its demand", () => {
+    const a = withProfiles();
+    const c3 = "c3".padEnd(64, "0");
+    a.agents[0]!.slotsTotal = 8;
+    a.agents[0]!.pool.push({
+      containerId: c3,
+      address: "172.30.1.7",
+      level: "warm",
+    });
+    a.docker.push(hardened(c3, "pool"));
+    expect(rules(a)).toEqual(["warm-pool-over-target"]);
+    a.agents[0]!.warm = { target: 1, wanted: 2 };
+    expect(checkInvariants(a)).toEqual([]);
+    // A node that keeps no warm browsers (a microVM node's default) has none at all.
+    const b = withProfiles();
+    b.agents[0]!.warm = { target: 0, wanted: 0 };
+    expect(rules(b)).toEqual(["warm-pool-over-target"]);
+    // An agent from before P18 reports no level: every pooled browser is hot.
+    expect(checkInvariants(good())).toEqual([]);
+  });
+});

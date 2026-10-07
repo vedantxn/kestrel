@@ -63,7 +63,9 @@ export interface AgentView {
     address: string | null;
     containerId: string | null;
   }[];
-  pool: { containerId: string; address: string }[];
+  pool: { containerId: string; address: string; level?: "hot" | "warm" }[];
+  /** P18: the warm level's target (`WARM_POOL`) and what the agent wants now, demand included. */
+  warm?: { target: number; wanted: number };
   /** Containers on their way out: frozen for the reaper, or being removed (their record may be gone). */
   retiring?: string[];
   /** Creation labels of containers (and VMs) the agent is making and has not recorded yet. */
@@ -90,6 +92,43 @@ export interface GatewayView {
   attachments: { sessionId: string; connections: number }[];
 }
 
+/**
+ * P18 (docs/lld/p18-profiles.md section 10, check 12): profile state as the API's database and the
+ * profile store hold it. A writer session's status is null when its row is gone.
+ */
+export interface ProfileView {
+  /** Profiles whose write lock is held, and the state of the session holding it. */
+  locks: {
+    profileId: string;
+    sessionId: string;
+    sessionStatus: string | null;
+    /** Seconds since the session ended (or entered its current status); null if it has no row. */
+    ageSeconds: number | null;
+  }[];
+  /** Versions still pending, and the state of the session that would write them. */
+  pending: {
+    profileId: string;
+    version: number;
+    sessionId: string;
+    sessionStatus: string | null;
+    ageSeconds: number | null;
+  }[];
+  /** The profile store, when the harness can read it (null: not mounted here). */
+  store: {
+    /** Every version file, and whether a live profile's version row names it. */
+    blobs: { key: string; ageSeconds: number; hasRow: boolean }[];
+    /** Temporary files of a write (`.<hex>.tmp`). */
+    temporary: { path: string; ageSeconds: number }[];
+  } | null;
+}
+
+/** A lock or a pending version may outlive its session while its report is on the way (rule 3 releases at 6 s). */
+export const PROFILE_RELEASE_GRACE_S = 30;
+/** The API's collection sweeps temporary files older than 10 minutes, once a minute. */
+export const PROFILE_TEMP_MAX_S = (10 + 1) * 60;
+/** The API's collection removes a blob with no row once it is an hour old, once a minute. */
+export const PROFILE_ORPHAN_MAX_S = (60 + 1) * 60;
+
 export interface Snapshot {
   docker: DockerContainer[];
   api: ApiSession[];
@@ -106,6 +145,8 @@ export interface Snapshot {
   hugepages?: HugePages | null;
   /** True while the harness has the agents' probe controls on on purpose. */
   harnessExpected?: boolean;
+  /** P18: profile locks, pending versions and the profile store. */
+  profiles?: ProfileView | null;
 }
 
 export interface Violation {
@@ -300,6 +341,15 @@ export function checkInvariants(s: Snapshot): Violation[] {
         "report-backlog",
         `agent ${a.node} has ${a.pendingReports} reports not yet acknowledged`,
       );
+    // P18: the warm level is topped up to what is wanted, never past it.
+    const warm = a.pool.filter((p) => p.level === "warm").length;
+    const target = a.warm?.target ?? 0;
+    const wanted = a.warm?.wanted ?? 0;
+    if (warm > Math.max(target, wanted))
+      bad(
+        "warm-pool-over-target",
+        `agent ${a.node} keeps ${warm} warm browser(s); its target is ${target} and it wants ${wanted} now`,
+      );
   }
 
   // 6. The firewall is as it must be (G17).
@@ -391,6 +441,42 @@ export function checkInvariants(s: Snapshot): Violation[] {
         .filter((id) => id.startsWith("vm-")),
     }));
     checkVms(s.vms ?? [], accounts, s.hugepages, bad);
+  }
+
+  // 10. Profiles (P18): no lock or pending version outlives its session, and the store keeps
+  // nothing the API's collection should have removed.
+  if (s.profiles) {
+    const ended = (status: string | null, age: number | null) =>
+      status === null ||
+      (!NON_TERMINAL.has(status) && (age ?? 0) > PROFILE_RELEASE_GRACE_S);
+    const what = (status: string | null, age: number | null) =>
+      status === null
+        ? "gone"
+        : `${status}${age === null ? "" : ` for ${Math.round(age)} s`}`;
+    for (const l of s.profiles.locks)
+      if (ended(l.sessionStatus, l.ageSeconds))
+        bad(
+          "profile-lock-after-session",
+          `profile ${l.profileId} is still locked by ${l.sessionId}, which is ${what(l.sessionStatus, l.ageSeconds)}`,
+        );
+    for (const p of s.profiles.pending)
+      if (ended(p.sessionStatus, p.ageSeconds))
+        bad(
+          "profile-pending-after-session",
+          `profile ${p.profileId} version ${p.version} is still pending for ${p.sessionId}, which is ${what(p.sessionStatus, p.ageSeconds)}`,
+        );
+    for (const t of s.profiles.store?.temporary ?? [])
+      if (t.ageSeconds > PROFILE_TEMP_MAX_S)
+        bad(
+          "profile-temporary-blob",
+          `${t.path} is a temporary file ${Math.round(t.ageSeconds / 60)} min old (swept after 10)`,
+        );
+    for (const b of s.profiles.store?.blobs ?? [])
+      if (!b.hasRow && b.ageSeconds > PROFILE_ORPHAN_MAX_S)
+        bad(
+          "profile-orphan-blob",
+          `${b.key} has no version row and is ${Math.round(b.ageSeconds / 60)} min old (collected after 60)`,
+        );
   }
 
   return v;
