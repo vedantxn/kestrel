@@ -157,7 +157,7 @@ if [ ! -f "$SECRETS/harness-api-key" ]; then
 fi
 
 log "start the platform"
-SERVICES=(api egress-a node-a gateway-a)
+SERVICES=(api egress-a node-a gateway-a web)
 if [ "$TWO" = 1 ]; then SERVICES+=(egress-b node-b gateway-b); COMPOSE=("${COMPOSE[@]}" --profile b); fi
 "${COMPOSE[@]}" up -d --remove-orphans "${SERVICES[@]}"
 if [ "$TWO" = 0 ]; then
@@ -166,6 +166,14 @@ if [ "$TWO" = 0 ]; then
   docker rm -f kestrel-egress-b-1 kestrel-node-b-1 kestrel-gateway-b-1 >/dev/null 2>&1 || true
   docker ps -aq --filter label=kestrel.node=b | xargs -r docker rm -f >/dev/null
   docker volume ls -q --filter label=kestrel.node=b | xargs -r docker volume rm -f >/dev/null
+fi
+# P17: a host made before the dashboard answers everything outside the API with a placeholder
+# (Terraform does not re-run the startup script); send it to the dashboard, as a fresh host does.
+caddy=/srv/kestrel-boot/Caddyfile
+if [ -f "$caddy" ] && grep -q 'respond "kestrel placeholder"' "$caddy"; then
+  log "route the dashboard through Caddy"
+  sed -i 's#respond "kestrel placeholder" 200#reverse_proxy 127.0.0.1:3000#' "$caddy"
+  docker restart kestrel-boot-caddy-1 >/dev/null
 fi
 sleep 8
 "${COMPOSE[@]}" ps
