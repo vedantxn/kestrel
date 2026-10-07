@@ -118,7 +118,20 @@ if [ "$NO_BUILD" != 1 ]; then
     echo "kestrel-runtime:dev is missing; build it with runtime/build.sh" >&2; exit 1
   fi
 fi
+if [ "$NO_BUILD" != 1 ]; then
+  # Every build leaves the previous images untagged, and nothing removed them: 58 of them, 32 GB,
+  # had filled the data volume to 95% on 2026-10-07, when a template snapshot no longer fit (its
+  # Firecracker call answered 400). Untagged images no container uses go; a running or pooled
+  # browser's image stays.
+  docker image prune -f >/dev/null
+fi
 if [ "$RUNTIME_A" = microvm ] && { [ "$NO_BUILD" != 1 ] || [ ! -f /data/kestrel-vm/template/mem ] || [ ! -f /data/kestrel-vm/template-warm/mem ]; }; then
+  # Each template is a 2 GiB memory snapshot plus its state; say so plainly rather than let
+  # Firecracker fail the snapshot with a bare 400.
+  free_gib=$(df --output=avail -B1G /data | tail -1 | tr -d ' ')
+  if [ "$free_gib" -lt 6 ]; then
+    echo "only ${free_gib} GiB free on /data: the microVM templates need about 6 GiB (docker system df shows what to remove)" >&2; exit 1
+  fi
   log "microVM templates (the runtime image, booted once and snapshotted; warm: before Chrome starts, for profiles)"
   runtime/microvm/build-rootfs.sh
   runtime/microvm/build-template.sh
