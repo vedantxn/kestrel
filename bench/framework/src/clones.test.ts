@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLONE_ALLOWED,
   compareClones,
   flatten,
   looksRandom,
@@ -136,6 +137,31 @@ describe("what a snapshot copies into every clone (G-24)", () => {
     expect(
       d.shared.find((s) => s.item === "Local State#profile.created_by_version"),
     ).toMatchObject({ verdict: "same-everywhere" });
+  });
+
+  it("allows exactly the copies the first host run judged harmless, and nothing next to them", () => {
+    const ok = (item: string) =>
+      CLONE_ALLOWED.some((a) => a.pattern.test(item));
+    for (const item of [
+      "Default/Preferences#google.services.signin_scoped_device_id",
+      "Default/Preferences#enterprise_profile_guid",
+      "Default/Preferences#extensions.settings.mhjfbmdgcfjbbpaeojofohoefgiehjai.first_install_time",
+      "Default/Preferences#protection.super_encrypted_hash",
+      "file:Default/Service Worker/Database/000003.log",
+      "file:Default/Sync Data/LevelDB/LOG",
+      "Local State#user_experience_metrics.low_entropy_source3",
+    ])
+      expect(ok(item), item).toBe(true);
+    for (const item of [
+      "file:Default/Visited Links",
+      "Default/BrowsingTopicsState#hex_encoded_hmac_key",
+      "Local State#user_experience_metrics.client_id2",
+      "Default/Preferences#profile.salt",
+      "file:Default/Cookies",
+      "file:Default/Service Worker/Database/MANIFEST-000001",
+      "file:Default/IndexedDB/https_example.com_0.indexeddb.leveldb/000003.log",
+    ])
+      expect(ok(item), item).toBe(false);
   });
 
   it("without a baseline, fails on a generated-looking value two clones share", () => {

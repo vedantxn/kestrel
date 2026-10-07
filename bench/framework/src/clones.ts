@@ -74,7 +74,7 @@ export const CLONE_ALLOWED: { pattern: RegExp; why: string }[] = [
     why: "Chrome's own process id and default context id: seen only by the session's own CDP client, never by a page, and meaningless outside its browser",
   },
   {
-    pattern: /#protection\.(macs\.|super_mac)/,
+    pattern: /#protection\.(macs\.|super_mac|super_encrypted_hash$)/,
     why: "HMACs Chrome keeps to detect tampering with preference values: derived from the values themselves, not exposed to pages, and no secret between sessions",
   },
   {
@@ -83,6 +83,21 @@ export const CLONE_ALLOWED: { pattern: RegExp; why: string }[] = [
     pattern:
       /^Local State#(user_experience_metrics\.(low_entropy_source3|pseudo_low_entropy_source|limited_entropy_randomization_source)|autofill\.ablation_seed)$/,
     why: "Field-trial randomization made at Chrome's first run: it only picks groups within field trials, and Kestrel's Chrome has none (background networking is off, so no variations seed is fetched, and Local State holds no variations_* key). Never exposed to pages",
+  },
+  {
+    pattern:
+      /^Default\/Preferences#(google\.services\.signin_scoped_device_id|enterprise_profile_guid)$/,
+    why: "Ids Chrome sends only to Google's sign-in service and to enterprise cloud management: Kestrel's Chrome never signs in, syncs or is managed, and background networking is off. Never exposed to pages",
+  },
+  {
+    pattern:
+      /^Default\/Preferences#extensions\.settings\.[a-p]{32}\.first_install_time$/,
+    why: "When Chrome's built-in component extensions were installed: the template's build time, not exposed to pages",
+  },
+  {
+    pattern:
+      /^file:Default\/(Extension Rules|Extension Scripts|Extension State|Service Worker\/Database|shared_proto_db|shared_proto_db\/metadata|Site Characteristics Database|Sync Data\/LevelDB)\/(LOG|\d{6}\.log)$/,
+    why: "LevelDB's own text log and write-ahead log of databases Chrome made empty at template build: timestamps and bookkeeping, no page data (the case checks that storage and service workers are empty in a new session)",
   },
   {
     pattern: /^Local State#uninstall_metrics\.installation_date2$/,
