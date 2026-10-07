@@ -106,7 +106,11 @@ describe("what a snapshot copies into every clone (G-24)", () => {
     const b = obs();
     const c1 = obs();
     const c2 = obs();
-    // Every container drew its own entropy source and Visited Links salt; the clones share theirs.
+    // Every container drew its own client id, entropy source and Visited Links salt; the clones
+    // share theirs.
+    for (const o of [a, b, c2])
+      o.json["Local State#user_experience_metrics.client_id2"] = "id-template";
+    c1.json["Local State#user_experience_metrics.client_id2"] = "id-container";
     c1.json["Local State#user_experience_metrics.low_entropy_source3"] = "17";
     c1.files["Default/Visited Links"] = { size: 131072, digest: "other" };
     // Created at template build in the clones, at launch in each container: copied, but not a secret.
@@ -116,9 +120,16 @@ describe("what a snapshot copies into every clone (G-24)", () => {
     const d = compareClones(a, b, [c1, c2]);
     expect(d.baseline).toBe(true);
     expect(rules(d).sort()).toEqual([
-      "Local State#user_experience_metrics.low_entropy_source3",
+      "Local State#user_experience_metrics.client_id2",
       "file:Default/Visited Links",
     ]);
+    // Copied too, but field-trial randomization with no field trials: listed as allowed, with why.
+    expect(
+      d.shared.find(
+        (s) =>
+          s.item === "Local State#user_experience_metrics.low_entropy_source3",
+      ),
+    ).toMatchObject({ verdict: "allowed" });
     expect(
       d.shared.find((s) => s.item === "Local State#profile.creation_time"),
     ).toMatchObject({ verdict: "copied" });

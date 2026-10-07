@@ -77,6 +77,17 @@ export const CLONE_ALLOWED: { pattern: RegExp; why: string }[] = [
     pattern: /#protection\.(macs\.|super_mac)/,
     why: "HMACs Chrome keeps to detect tampering with preference values: derived from the values themselves, not exposed to pages, and no secret between sessions",
   },
+  {
+    // Found by the first host run, 2026-10-07; accepted rather than reset, since a new value needs a
+    // new Chrome in every clone (threat model 9.1). The owner may decide otherwise.
+    pattern:
+      /^Local State#(user_experience_metrics\.(low_entropy_source3|pseudo_low_entropy_source|limited_entropy_randomization_source)|autofill\.ablation_seed)$/,
+    why: "Field-trial randomization made at Chrome's first run: it only picks groups within field trials, and Kestrel's Chrome has none (background networking is off, so no variations seed is fetched, and Local State holds no variations_* key). Never exposed to pages",
+  },
+  {
+    pattern: /^Local State#uninstall_metrics\.installation_date2$/,
+    why: "Chrome's install time, kept for uninstall metrics: not exposed to pages, and the template's age is no secret between sessions",
+  },
 ];
 
 /** Names that hold secrets or identifiers: copied, they link clones. */
