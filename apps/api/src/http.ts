@@ -326,7 +326,7 @@ export function buildPublicApp(
     getUsage(ctx, await authed(req), req.query as z.infer<typeof UsageQuery>),
   );
 
-  // P17: admin keys only; `not_found` to any other key (threat model T-57). The check runs
+  // P17: admin keys only; `not_found` to any other key (threat model T-69). The check runs
   // before body validation, so a project key cannot tell these paths exist from a 400.
   const adminOnly = {
     preValidation: async (req: FastifyRequest) => {

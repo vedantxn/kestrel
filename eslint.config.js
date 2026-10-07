@@ -41,7 +41,7 @@ export default tseslint.config(
     },
   },
   {
-    // P17: the dashboard. Session data is hostile (threat model T-56): never raw HTML.
+    // P17: the dashboard. Session data is hostile (threat model T-68): never raw HTML.
     files: ["packages/dashboard/**/*.{ts,tsx}", "apps/web/**/*.{ts,tsx}"],
     plugins: { "react-hooks": reactHooks },
     rules: {
@@ -52,7 +52,7 @@ export default tseslint.config(
         {
           selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
           message:
-            "Session data is attacker-controlled (threat model T-56); render it as text.",
+            "Session data is attacker-controlled (threat model T-68); render it as text.",
         },
       ],
     },

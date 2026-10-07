@@ -3,7 +3,7 @@ import { humanize } from "@kestrel/dashboard/lib/format";
 
 /**
  * One line of plain text per event. Event data comes from inside a session and is hostile
- * (threat model T-56): it is only ever interpolated into strings React renders as text.
+ * (threat model T-68): it is only ever interpolated into strings React renders as text.
  */
 export const CAPTCHA_LABEL: Record<CaptchaProvider, string> = {
   recaptcha: "reCAPTCHA",

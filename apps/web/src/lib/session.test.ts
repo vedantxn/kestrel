@@ -8,7 +8,7 @@ const session = {
   admin: false,
 };
 
-describe("the session cookie (T-54)", () => {
+describe("the session cookie (T-66)", () => {
   it("round-trips, and the key is not readable in the cookie", async () => {
     const token = await sealSession(session, key);
     expect(token).not.toContain(session.apiKey);

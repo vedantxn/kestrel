@@ -93,7 +93,7 @@ export async function listApiKeys(
   return { data: rows.map(toApiKey) };
 }
 
-/** Keys made through the API are never admin keys (threat model T-57). */
+/** Keys made through the API are never admin keys (threat model T-69). */
 async function newKey(
   ctx: Ctx,
   projectId: string,
@@ -225,7 +225,7 @@ export async function getUsage(
 
 // --- Admin --------------------------------------------------------------------------------
 
-/** A10/A13: there is no `forbidden`; to a project key the admin paths do not exist (T-57). */
+/** A10/A13: there is no `forbidden`; to a project key the admin paths do not exist (T-69). */
 export function requireAdmin(auth: Auth): void {
   if (!auth.admin) throw new AppError("not_found", "No such endpoint.");
 }

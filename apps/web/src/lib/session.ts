@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { EncryptJWT, jwtDecrypt } from "jose";
 
 /**
- * The dashboard's sign-in (P17, threat model T-54): the API key, sealed in a JWE (`dir`,
+ * The dashboard's sign-in (P17, threat model T-66): the API key, sealed in a JWE (`dir`,
  * A256GCM) under a server-side secret. The browser holds only ciphertext it cannot read or forge.
  */
 export interface WebSession {

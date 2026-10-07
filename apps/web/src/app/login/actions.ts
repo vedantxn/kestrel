@@ -9,7 +9,7 @@ import {
 import type { LoginState } from "@kestrel/dashboard/components/login-card";
 import { API_URL, writeSession } from "@/lib/auth";
 
-/** Check the key against the API, then seal it into the session cookie (T-54). */
+/** Check the key against the API, then seal it into the session cookie (T-66). */
 export async function signIn(
   _state: LoginState,
   form: FormData,

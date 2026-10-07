@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const dev = process.env.NODE_ENV !== "production";
 
 /**
- * Threat model T-56: session data is attacker-controlled, so the dashboard allows no script
+ * Threat model T-68: session data is attacker-controlled, so the dashboard allows no script
  * but its own and no framing. Next.js needs inline scripts for hydration ('unsafe-inline'
  * without a nonce) and, in development only, eval.
  */

@@ -237,7 +237,7 @@ describe("admin endpoints", () => {
     ["POST", `/v1/admin/projects/prj_x/api-keys`, { name: "k" }],
   ];
 
-  it("do not exist for a project key (T-57)", async () => {
+  it("do not exist for a project key (T-69)", async () => {
     for (const [method, url, body] of paths) {
       const res = await send(method, url, env.key, body);
       expect(res.statusCode, url).toBe(404);

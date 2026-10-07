@@ -89,7 +89,7 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
     return null;
   }
 
-  // The one raw-HTML sink (T-56): CSS variables built from the chart's own config, which
+  // The one raw-HTML sink (T-68): CSS variables built from the chart's own config, which
   // is set in code, never from session data.
   return (
     <style

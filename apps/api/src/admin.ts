@@ -19,7 +19,7 @@ import { newUuid } from "./ids.js";
  *
  *   admin bootstrap                       create the organisation and project if absent
  *   admin create-key [--project NAME] [--name LABEL] [--admin]   print a new key, once;
- *                                         --admin lets it call /v1/admin/* (threat model T-57)
+ *                                         --admin lets it call /v1/admin/* (threat model T-69)
  *   admin revoke-key KEY_ID_OR_PREFIX     stop a key authenticating at once (threat model G-02)
  *   admin list-keys
  *   admin keygen --dir DIR                make the token signing keypair
