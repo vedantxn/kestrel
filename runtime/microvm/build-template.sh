@@ -43,7 +43,9 @@ cleanup() {
 }
 trap cleanup EXIT
 [ -f "$DIR/rootfs.ext4" ] || { echo "no $DIR/rootfs.ext4: run runtime/microvm/build-rootfs.sh" >&2; exit 1; }
-cp -f "$FC/vmlinux" "$DIR/vmlinux"   # same filesystem as the jail, so it can be linked in
+# Same filesystem as the jail, so it can be linked in; renamed into place, never rewritten in place,
+# since earlier builds' jails (and a build of the other template running now) link the old file.
+"$(dirname "$0")/install-file.sh" "$FC/vmlinux" "$DIR/vmlinux"
 ip netns del $NS 2>/dev/null || true; ip link del $HL 2>/dev/null || true
 rm -rf "$NEW"; mkdir -p "$NEW" "$DIR/jail"
 
