@@ -150,9 +150,9 @@ describe("a writer's save", () => {
     expect(parseProfileArchive(archive, MAX).files[0]!.data.toString()).toBe(
       "state",
     );
-    // The save, and its key, are gone from the agent's store, its files included.
+    // The save, and its key, are gone from the agent's store, its files included: the
+    // write-ahead log too, as the agent leaves it (no checkpoint here).
     expect(r.store.allProfileSaves()).toEqual([]);
-    r.store.db.pragma("wal_checkpoint(TRUNCATE)");
     const keyBytes = Buffer.from(req.profile!.save!.key);
     for (const f of readdirSync(dirname(r.dbPath)))
       expect(

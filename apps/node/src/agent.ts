@@ -1524,7 +1524,7 @@ export class NodeAgent {
     if (b.address) await this.clearPolicyBeforeRemoval(id, b.address);
     // Nothing needs the proxy's password once its policy is gone (T-45).
     const up = b.policy.upstream;
-    if (up?.password !== undefined)
+    if (up?.password !== undefined) {
       this.store.updateBinding(id, {
         policy: {
           ...b.policy,
@@ -1536,6 +1536,9 @@ export class NodeAgent {
           },
         },
       });
+      // and from the write-ahead log, which still holds the row as it was
+      this.store.scrubWal();
+    }
     await this.d.failpoints.hit("node.stop.after_policy_cleared");
     // P18: a writer's save, after the route and the policy are gone (no client can change the
     // state while it is read, no page can reach the network while Chrome closes), and before the

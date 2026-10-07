@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { createLogger } from "@kestrel/shared";
 import { describe, expect, it } from "vitest";
@@ -126,6 +128,13 @@ describe("a session's upstream proxy on the node (T-47)", () => {
       .map((x) => JSON.stringify(x))
       .join("");
     expect(raw).not.toContain(PASSWORD);
+    // Nor in the store's files, the write-ahead log included, as the agent leaves them.
+    const dir = dirname(r.dbPath);
+    for (const f of readdirSync(dir))
+      expect(
+        readFileSync(join(dir, f)).includes(Buffer.from(PASSWORD)),
+        f,
+      ).toBe(false);
   });
 
   it("passes the gateway's upstream denials on as events", async () => {

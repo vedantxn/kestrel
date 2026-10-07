@@ -641,7 +641,7 @@ export class Store {
       | { outcome: "failed"; reason: ProfileSaveFailure },
     at: string,
   ): Report | null {
-    return this.db.transaction(() => {
+    const report = this.db.transaction(() => {
       const s = this.getProfileSave(sessionId);
       if (!s) return null;
       this.db
@@ -657,6 +657,22 @@ export class Store {
         ...outcome,
       }));
     })();
+    if (report) this.scrubWal();
+    return report;
+  }
+
+  /**
+   * `secure_delete` zeroes a deleted or overwritten row in the database file, but the write-ahead
+   * log still holds the pages as they were until it is checkpointed. After a secret (a save's data
+   * key, a proxy's password) is scrubbed, copy the log into the database and empty it, so the
+   * secret is in neither file. Best effort: a failure leaves it to the next automatic checkpoint.
+   */
+  scrubWal(): void {
+    try {
+      this.db.pragma("wal_checkpoint(TRUNCATE)");
+    } catch {
+      /* busy: the next checkpoint does it */
+    }
   }
 
   /** Saves whose session is gone and whose report is not yet queued: reports still to come. */
