@@ -6,10 +6,10 @@
 >>> session.connect_url  # give this to Playwright or Puppeteer
 """
 
-from ._async import AsyncKestrel, AsyncKestrelBrowser, AsyncSessions
+from ._async import AsyncKestrel, AsyncKestrelBrowser, AsyncProfiles, AsyncSessions
 from ._base import DEFAULT_BASE_URL, SDK_VERSION
 from ._errors import ApiError, KestrelConnectionError, KestrelError, SessionEndedError
-from ._sync import Kestrel, KestrelBrowser, Sessions
+from ._sync import Kestrel, KestrelBrowser, Profiles, Sessions
 from ._types import (
     SESSION_STATUSES,
     TERMINAL_STATUSES,
@@ -24,6 +24,7 @@ from ._types import (
     EventType,
     NetworkPolicy,
     Page,
+    Profile,
     ProxyConfig,
     ProxyProvider,
     Session,
@@ -48,6 +49,7 @@ __all__ = [
     "ApiError",
     "AsyncKestrel",
     "AsyncKestrelBrowser",
+    "AsyncProfiles",
     "AsyncSessions",
     "CaptchaOptions",
     "CaptchaProvider",
@@ -64,6 +66,8 @@ __all__ = [
     "KestrelError",
     "NetworkPolicy",
     "Page",
+    "Profile",
+    "Profiles",
     "ProxyConfig",
     "Session",
     "SessionCaptcha",

@@ -18,17 +18,21 @@ import pytest
 
 from kestrel_sdk import (
     ApiError,
+    AsyncProfiles,
     AsyncSessions,
     CaptchaOptions,
     CaptchaSolveState,
     ComputerActionName,
     ComputerResponse,
     NetworkPolicy,
+    Profile,
+    Profiles,
     ProxyConfig,
     Session,
     SessionCaptcha,
     SessionEvent,
     SessionOptions,
+    SessionProfile,
     SessionProxy,
     Sessions,
     SessionToken,
@@ -89,6 +93,8 @@ def params(fn: Any, *skip: str) -> set[str]:
         (Usage, SCHEMAS["SessionUsage"]),
         (SessionToken, SCHEMAS["SessionToken"]),
         (ComputerResponse, SCHEMAS["ComputerResponse"]),
+        (SessionProfile, SCHEMAS["SessionProfile"]),
+        (Profile, SCHEMAS["Profile"]),
     ],
     ids=lambda x: getattr(x, "__name__", ""),
 )
@@ -127,7 +133,9 @@ def test_enums() -> None:
 
 @pytest.mark.parametrize("resource", [Sessions, AsyncSessions])
 def test_method_arguments_match_the_requests(resource: type) -> None:
-    assert params(resource.create) == props(SCHEMAS["CreateSessionRequest"])
+    # `wait_for_profile_ms` is the client's own: it is never sent.
+    assert params(resource.create, "wait_for_profile_ms") == props(SCHEMAS["CreateSessionRequest"])
+    assert "wait_for_profile_ms" in params(resource.create)
     assert params(resource.list) == props(SCHEMAS["ListSessionsQuery"])
     assert params(resource.events, "session_id") == props(SCHEMAS["ListEventsQuery"])
 
@@ -149,3 +157,9 @@ def test_token_and_computer_arguments_match_the_requests(resource: type) -> None
     assert params(resource.mint_token, "session_id") == props(SCHEMAS["MintTokenRequest"])
     every_action_field = set().union(*(props(v) for v in SCHEMAS["ComputerRequest"]["oneOf"]))
     assert params(resource.computer, "session_id") == every_action_field
+
+
+@pytest.mark.parametrize("resource", [Profiles, AsyncProfiles])
+def test_profile_arguments_match_the_requests(resource: type) -> None:
+    assert params(resource.create) == props(SCHEMAS["CreateProfileRequest"])
+    assert params(resource.list) == props(SCHEMAS["ListProfilesQuery"])

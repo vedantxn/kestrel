@@ -66,6 +66,18 @@ def session_path(session_id: str, suffix: str = "") -> str:
     return f"v1/sessions/{quote(session_id, safe='')}{suffix}"
 
 
+def profile_path(profile_id: str) -> str:
+    return f"v1/profiles/{quote(profile_id, safe='')}"
+
+
+def is_profile_busy(e: BaseException) -> bool:
+    """Another session holds the profile's write lock (a retryable ``409 conflict`` on
+    ``profile.id``). Retrying can work, but only once that session ends."""
+    return (
+        isinstance(e, ApiError) and e.code == "conflict" and e.param == "profile.id" and e.retryable
+    )
+
+
 def create_body(
     *,
     timeout: int | None,

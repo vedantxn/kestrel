@@ -6,14 +6,14 @@ import asyncio
 import contextlib
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from . import _base
-from ._errors import KestrelConnectionError, KestrelError, SessionEndedError
+from ._errors import ApiError, KestrelConnectionError, KestrelError, SessionEndedError
 from ._types import (
     TERMINAL_STATUSES,
     CaptchaOptions,
@@ -21,6 +21,7 @@ from ._types import (
     ComputerResponse,
     NetworkPolicy,
     Page,
+    Profile,
     ProxyConfig,
     Session,
     SessionEvent,
@@ -34,9 +35,7 @@ from ._types import (
 _sleep = asyncio.sleep
 
 
-class AsyncSessions:
-    """``/v1/sessions`` and everything under it; see ``Sessions`` for each method."""
-
+class _AsyncResource:
     def __init__(self, http: httpx.AsyncClient, config: _base.Config) -> None:
         self._http = http
         self._config = config
@@ -49,7 +48,10 @@ class AsyncSessions:
         json: Any = None,
         params: Mapping[str, Any] | None = None,
         stream: bool = False,
+        idempotent: bool = True,
+        retry: Callable[[ApiError], bool] | None = None,
     ) -> httpx.Response:
+        """See ``_Resource._send`` in ``_sync.py``."""
         attempt = 0
         while True:
             request = self._http.build_request(method, path, json=json, params=params)
@@ -59,7 +61,7 @@ class AsyncSessions:
                     await response.aread()
                     await response.aclose()
             except httpx.TransportError as e:
-                if attempt >= self._config.max_retries:
+                if not idempotent or attempt >= self._config.max_retries:
                     raise KestrelConnectionError(
                         f"{method} {self._config.base_url}{path} failed: {_base.describe(e)}"
                     ) from e
@@ -69,7 +71,12 @@ class AsyncSessions:
             if response.is_success:
                 return response
             err = _base.to_api_error(response)
-            if not err.retryable or attempt >= self._config.max_retries:
+            if (
+                not err.retryable
+                or attempt >= self._config.max_retries
+                or (not idempotent and err.code == "malformed_response")
+                or (retry is not None and not retry(err))
+            ):
                 raise err
             await _sleep(
                 err.retry_after
@@ -85,8 +92,18 @@ class AsyncSessions:
         *,
         json: Any = None,
         params: Mapping[str, Any] | None = None,
+        idempotent: bool = True,
+        retry: Callable[[ApiError], bool] | None = None,
     ) -> Any:
-        return _base.parse_ok(await self._send(method, path, json=json, params=params))
+        return _base.parse_ok(
+            await self._send(
+                method, path, json=json, params=params, idempotent=idempotent, retry=retry
+            )
+        )
+
+
+class AsyncSessions(_AsyncResource):
+    """``/v1/sessions`` and everything under it; see ``Sessions`` for each method."""
 
     async def create(
         self,
@@ -104,6 +121,7 @@ class AsyncSessions:
         profile: SessionProfile | Mapping[str, Any] | None = None,
         wait_for_capacity_ms: int | None = None,
         idempotency_key: str | None = None,
+        wait_for_profile_ms: int | None = None,
     ) -> Session:
         body = _base.create_body(
             timeout=timeout,
@@ -120,7 +138,31 @@ class AsyncSessions:
             wait_for_capacity_ms=wait_for_capacity_ms,
             idempotency_key=idempotency_key,
         )
-        return Session.from_dict(await self._request("POST", "v1/sessions", json=body))
+        deadline = (
+            None if wait_for_profile_ms is None else time.monotonic() + wait_for_profile_ms / 1000
+        )
+        attempt = 0
+        while True:
+            try:
+                return Session.from_dict(
+                    await self._request(
+                        "POST",
+                        "v1/sessions",
+                        json=body,
+                        retry=lambda e: not _base.is_profile_busy(e),
+                    )
+                )
+            except ApiError as e:
+                if deadline is None or not _base.is_profile_busy(e):
+                    raise
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise
+                wait = e.retry_after
+                if wait is None:
+                    wait = _base.backoff(self._config, attempt)
+                await _sleep(min(wait, left))
+                attempt += 1
 
     async def get(self, session_id: str) -> Session:
         return Session.from_dict(await self._request("GET", _base.session_path(session_id)))
@@ -281,6 +323,30 @@ class AsyncSessions:
         return size
 
 
+class AsyncProfiles(_AsyncResource):
+    """``/v1/profiles``; see ``Profiles`` for each method."""
+
+    async def create(
+        self, *, name: str | None = None, metadata: Mapping[str, str] | None = None
+    ) -> Profile:
+        body = _base.query(name=name, metadata=dict(metadata) if metadata is not None else None)
+        return Profile.from_dict(
+            await self._request("POST", "v1/profiles", json=body, idempotent=False)
+        )
+
+    async def get(self, profile_id: str) -> Profile:
+        return Profile.from_dict(await self._request("GET", _base.profile_path(profile_id)))
+
+    async def list(self, *, limit: int | None = None, cursor: str | None = None) -> Page[Profile]:
+        r = await self._request(
+            "GET", "v1/profiles", params=_base.query(limit=limit, cursor=cursor)
+        )
+        return Page([Profile.from_dict(p) for p in r["data"]], r.get("nextCursor"))
+
+    async def delete(self, profile_id: str) -> None:
+        await self._send("DELETE", _base.profile_path(profile_id))
+
+
 class AsyncKestrelBrowser:
     """A Playwright browser attached to a new session. ``await close()`` closes the browser
     and stops the session; it is also what leaving an ``async with`` block does."""
@@ -324,6 +390,7 @@ class AsyncKestrel:
         self._config = _base.make_config(api_key, base_url, timeout, max_retries, retry_base_delay)
         self._http = httpx.AsyncClient(**_base.client_kwargs(self._config))
         self.sessions = AsyncSessions(self._http, self._config)
+        self.profiles = AsyncProfiles(self._http, self._config)
 
     @property
     def base_url(self) -> str:

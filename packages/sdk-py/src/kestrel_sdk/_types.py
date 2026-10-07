@@ -266,6 +266,41 @@ class SessionProfile:
 
 
 @dataclass(frozen=True)
+class Profile:
+    """Saved browser state that sessions start from (``profile={"id": ...}``). ``version`` is 0
+    until a session has saved one; ``in_use_by`` is the session that will save the next version,
+    if one is running. Only a Chrome of ``chrome_major`` or newer opens it."""
+
+    id: str
+    name: str | None
+    metadata: dict[str, str]
+    version: int
+    bytes: int
+    saved_at: datetime | None
+    saved_by_session_id: str | None
+    chrome_major: int | None
+    in_use_by: str | None
+    created_at: datetime
+    raw: dict[str, Any] = field(repr=False, compare=False)
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> Profile:
+        return cls(
+            id=d["id"],
+            name=d.get("name"),
+            metadata=dict(d.get("metadata") or {}),
+            version=d["version"],
+            bytes=d["bytes"],
+            saved_at=_time(d.get("savedAt")),
+            saved_by_session_id=d.get("savedBySessionId"),
+            chrome_major=d.get("chromeMajor"),
+            in_use_by=d.get("inUseBy"),
+            created_at=_time(d["createdAt"]),  # type: ignore[arg-type]
+            raw=dict(d),
+        )
+
+
+@dataclass(frozen=True)
 class SessionOptions:
     """A session's options as the API applied them, defaults filled in."""
 

@@ -3,14 +3,14 @@ from __future__ import annotations
 import contextlib
 import os
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from . import _base
-from ._errors import KestrelConnectionError, KestrelError, SessionEndedError
+from ._errors import ApiError, KestrelConnectionError, KestrelError, SessionEndedError
 from ._types import (
     TERMINAL_STATUSES,
     CaptchaOptions,
@@ -18,6 +18,7 @@ from ._types import (
     ComputerResponse,
     NetworkPolicy,
     Page,
+    Profile,
     ProxyConfig,
     Session,
     SessionEvent,
@@ -31,9 +32,7 @@ from ._types import (
 _sleep = time.sleep
 
 
-class Sessions:
-    """``/v1/sessions`` and everything under it. New per-session endpoints belong here."""
-
+class _Resource:
     def __init__(self, http: httpx.Client, config: _base.Config) -> None:
         self._http = http
         self._config = config
@@ -46,11 +45,15 @@ class Sessions:
         json: Any = None,
         params: Mapping[str, Any] | None = None,
         stream: bool = False,
+        idempotent: bool = True,
+        retry: Callable[[ApiError], bool] | None = None,
     ) -> httpx.Response:
         """Send one call, retrying when the API says ``retryable`` or no answer came back.
-        Every endpoint is safe to repeat: reads, an idempotent stop, creates that carry an
-        idempotency key, token mints and single page actions. With ``stream``, a successful
-        answer is returned unread and the caller closes it."""
+        Almost every endpoint is safe to repeat: reads, an idempotent stop, session creates that
+        carry an idempotency key, token mints and single page actions. A call that is not
+        (``idempotent=False``) is retried only when the API itself answered ``retryable``,
+        which means it changed nothing. ``retry`` may refuse a retry of a retryable error. With
+        ``stream``, a successful answer is returned unread and the caller closes it."""
         attempt = 0
         while True:
             request = self._http.build_request(method, path, json=json, params=params)
@@ -60,7 +63,7 @@ class Sessions:
                     response.read()
                     response.close()
             except httpx.TransportError as e:
-                if attempt >= self._config.max_retries:
+                if not idempotent or attempt >= self._config.max_retries:
                     raise KestrelConnectionError(
                         f"{method} {self._config.base_url}{path} failed: {_base.describe(e)}"
                     ) from e
@@ -70,7 +73,12 @@ class Sessions:
             if response.is_success:
                 return response
             err = _base.to_api_error(response)
-            if not err.retryable or attempt >= self._config.max_retries:
+            if (
+                not err.retryable
+                or attempt >= self._config.max_retries
+                or (not idempotent and err.code == "malformed_response")
+                or (retry is not None and not retry(err))
+            ):
                 raise err
             _sleep(
                 err.retry_after
@@ -86,8 +94,16 @@ class Sessions:
         *,
         json: Any = None,
         params: Mapping[str, Any] | None = None,
+        idempotent: bool = True,
+        retry: Callable[[ApiError], bool] | None = None,
     ) -> Any:
-        return _base.parse_ok(self._send(method, path, json=json, params=params))
+        return _base.parse_ok(
+            self._send(method, path, json=json, params=params, idempotent=idempotent, retry=retry)
+        )
+
+
+class Sessions(_Resource):
+    """``/v1/sessions`` and everything under it. New per-session endpoints belong here."""
 
     def create(
         self,
@@ -105,9 +121,15 @@ class Sessions:
         profile: SessionProfile | Mapping[str, Any] | None = None,
         wait_for_capacity_ms: int | None = None,
         idempotency_key: str | None = None,
+        wait_for_profile_ms: int | None = None,
     ) -> Session:
         """Create a session. The API answers once the browser is ready to connect to.
-        Durations are milliseconds."""
+        Durations are milliseconds.
+
+        ``wait_for_profile_ms``: with ``profile={"id": ..., "persist": True}``, if another
+        session is saving into the profile (a retryable ``409 conflict`` on ``profile.id``),
+        keep trying for up to this long, with the client's backoff, before raising it. Without
+        it that answer is raised at once, since a writer may hold a profile for hours."""
         body = _base.create_body(
             timeout=timeout,
             idle_timeout=idle_timeout,
@@ -123,7 +145,33 @@ class Sessions:
             wait_for_capacity_ms=wait_for_capacity_ms,
             idempotency_key=idempotency_key,
         )
-        return Session.from_dict(self._request("POST", "v1/sessions", json=body))
+        deadline = (
+            None if wait_for_profile_ms is None else time.monotonic() + wait_for_profile_ms / 1000
+        )
+        attempt = 0
+        while True:
+            try:
+                return Session.from_dict(
+                    self._request(
+                        "POST",
+                        "v1/sessions",
+                        json=body,
+                        # A busy profile is retried here, and only when the caller asked to wait.
+                        retry=lambda e: not _base.is_profile_busy(e),
+                    )
+                )
+            except ApiError as e:
+                if deadline is None or not _base.is_profile_busy(e):
+                    raise
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise
+                # At the latest, a last attempt at the deadline.
+                wait = e.retry_after
+                if wait is None:
+                    wait = _base.backoff(self._config, attempt)
+                _sleep(min(wait, left))
+                attempt += 1
 
     def get(self, session_id: str) -> Session:
         return Session.from_dict(self._request("GET", _base.session_path(session_id)))
@@ -300,6 +348,35 @@ class Sessions:
         return size
 
 
+class Profiles(_Resource):
+    """``/v1/profiles``: saved browser state (cookies, ``localStorage`` and IndexedDB of the
+    default context) that sessions start from with ``profile={"id": ...}`` and save into with
+    ``profile={"id": ..., "persist": True}``. Every call raises ``400 invalid_request`` on a
+    deployment whose operator has not configured profiles."""
+
+    def create(
+        self, *, name: str | None = None, metadata: Mapping[str, str] | None = None
+    ) -> Profile:
+        """Create an empty profile (``version`` 0). There is no idempotency key for this call,
+        so it is sent again only when the API answered that it changed nothing; a create that
+        got no answer is not repeated, since it may have made the profile."""
+        body = _base.query(name=name, metadata=dict(metadata) if metadata is not None else None)
+        return Profile.from_dict(self._request("POST", "v1/profiles", json=body, idempotent=False))
+
+    def get(self, profile_id: str) -> Profile:
+        return Profile.from_dict(self._request("GET", _base.profile_path(profile_id)))
+
+    def list(self, *, limit: int | None = None, cursor: str | None = None) -> Page[Profile]:
+        """Newest first. Pass ``next_cursor`` back as ``cursor`` for the next page."""
+        r = self._request("GET", "v1/profiles", params=_base.query(limit=limit, cursor=cursor))
+        return Page([Profile.from_dict(p) for p in r["data"]], r.get("nextCursor"))
+
+    def delete(self, profile_id: str) -> None:
+        """Delete a profile and every saved version of it. Sessions already running keep their
+        browsers; a session saving into it saves nothing. Deleting it again is ``not_found``."""
+        self._send("DELETE", _base.profile_path(profile_id))
+
+
 class KestrelBrowser:
     """A Playwright browser attached to a new session. ``close()`` closes the browser and
     stops the session; it is also what leaving a ``with`` block does."""
@@ -353,6 +430,7 @@ class Kestrel:
         self._config = _base.make_config(api_key, base_url, timeout, max_retries, retry_base_delay)
         self._http = httpx.Client(**_base.client_kwargs(self._config))
         self.sessions = Sessions(self._http, self._config)
+        self.profiles = Profiles(self._http, self._config)
 
     @property
     def base_url(self) -> str:
