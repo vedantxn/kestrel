@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   Failpoints,
@@ -172,6 +173,21 @@ agent = new NodeAgent({
   },
   store,
   docker: driver,
+  // The newest of the runtime image and, on a microVM node, the templates (each build writes a new
+  // token): a browser pooled before it is from before a deploy, and boot removes it.
+  runtimeBuiltAt: async () => {
+    const times = [await docker.imageCreatedAt(env.RUNTIME_IMAGE)];
+    if (env.RUNTIME === "microvm")
+      for (const t of ["template", "template-warm"])
+        times.push(
+          await stat(join(env.MICROVM_DIR, t, "token")).then(
+            (s) => s.mtimeMs,
+            () => null,
+          ),
+        );
+    const known = times.filter((t): t is number => typeof t === "number");
+    return known.length ? Math.max(...known) : null;
+  },
   runtime: new HttpRuntimeClient(),
   egress,
   firewall,

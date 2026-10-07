@@ -200,6 +200,11 @@ export interface AgentDeps {
   solver?: (config: CaptchaSolverConfig) => CaptchaSolver;
   /** P18: the profile store; without it the node takes no profile session. */
   profileStore?: ProfileStore;
+  /**
+   * When the newest runtime this node makes browsers from was built (epoch ms): the runtime image
+   * and, on a microVM node, its templates. A browser pooled before it is from before a deploy.
+   */
+  runtimeBuiltAt?: () => Promise<number | null>;
 }
 
 export interface MicroVmHooks {
@@ -482,6 +487,34 @@ export class NodeAgent {
    * resumed (G9); containers that are not ours to keep are removed; policies are pushed back to
    * the egress gateway; then the agent registers with the API and the loops begin.
    */
+  /**
+   * Browsers survive an agent restart, so pooled ones made before a deploy are still here after it,
+   * running the old runtime: one handed to a profile writer cannot save (its runtimed has no save
+   * route; found on the AWS host, 2026-10-07). Unbound pooled browsers made before the newest runtime
+   * was built go; a session's browser is never touched. A plain agent restart rebuilds nothing, so
+   * its pool stays.
+   */
+  private async dropPooledFromBefore(): Promise<void> {
+    const built = await this.d.runtimeBuiltAt?.().catch(() => null);
+    if (!built) return;
+    let dropped = 0;
+    for (const p of this.store.allPool().filter((p) => p.state === "hot")) {
+      const info = await this.d.docker.inspect(p.containerId).catch(() => null);
+      if (!info || info.createdAt >= built) continue;
+      if (!this.store.takePool(p.containerId)) continue;
+      const vol =
+        this.volumeOf.get(p.containerId) ?? info.labels["kestrel.volume"];
+      this.volumeOf.delete(p.containerId);
+      await this.removeWithVolume(p.containerId, vol).catch(() => undefined);
+      dropped++;
+    }
+    if (dropped)
+      this.d.log.info(
+        { dropped, builtAt: new Date(built).toISOString() },
+        "removed pooled browsers made before the current runtime",
+      );
+  }
+
   async boot(): Promise<void> {
     await this.checkFirewall();
     const now = this.now();
@@ -512,6 +545,7 @@ export class NodeAgent {
     }
     await this.idle();
     await this.reconcile();
+    await this.dropPooledFromBefore();
     // A deploy may have lowered the pool's size: hot browsers past it are left over, not wanted.
     const keep = Math.max(
       this.c.poolTarget,

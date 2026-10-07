@@ -638,6 +638,8 @@ export interface Rig {
   volumes: FakeVolumes | undefined;
   /** P18: the profile store, when the rig has one. */
   profileStore: FsProfileStore | undefined;
+  /** When the runtime was last built (a deploy); null: unknown, and nothing is dropped at boot. */
+  runtimeBuiltAt: number | null;
   /** A new agent process over the same durable store and the same world (a restart after a crash). */
   restart(): NodeAgent;
 }
@@ -748,6 +750,7 @@ export function makeRig(
       ...(opts.microvm ? { microvm: opts.microvm } : {}),
       ...(opts.solver ? { solver: opts.solver } : {}),
       ...(profileStore ? { profileStore } : {}),
+      runtimeBuiltAt: async () => rig.runtimeBuiltAt,
     });
   const rig: Rig = {
     agent: build(),
@@ -764,6 +767,7 @@ export function makeRig(
     dbPath,
     volumes,
     profileStore,
+    runtimeBuiltAt: null,
     restart: () => (rig.agent = build()),
   };
   return rig;

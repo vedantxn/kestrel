@@ -276,6 +276,47 @@ describe("pool refill under demand", () => {
     expect(r.docker.listCalls - before).toBe(2);
   });
 
+  it("drops pooled browsers made before the current runtime when it boots after a deploy, never a session's", async () => {
+    const r = makeRig({ slotsTotal: 6, poolTarget: 2, refillAtOnce: 2 });
+    await bootWithPool(r);
+    const before = r.store.allPool().map((p) => p.containerId);
+    expect(before).toHaveLength(2);
+    const s = startReq();
+    await r.agent.start(s);
+    const bound = r.store.getBinding(s.sessionId)!.containerId as string;
+    expect(bound).toBeTruthy();
+    // A deploy: the runtime is rebuilt after those browsers were made, then the agent restarts.
+    r.clock.advance(60_000);
+    r.runtimeBuiltAt = r.clock.now();
+    await r.restart().boot();
+    const pooled = new Set(r.store.allPool().map((p) => p.containerId));
+    for (const id of before) {
+      if (id === bound) continue;
+      expect(pooled.has(id)).toBe(false);
+      expect(r.docker.containers.has(id)).toBe(false);
+    }
+    // The session's browser stays, and so does the session.
+    expect(r.docker.containers.has(bound)).toBe(true);
+    expect(r.store.getBinding(s.sessionId)?.state).toBe("ready");
+  });
+
+  it("keeps its pool across a plain restart, when no runtime was built since", async () => {
+    const r = makeRig({ slotsTotal: 6, poolTarget: 2, refillAtOnce: 2 });
+    r.runtimeBuiltAt = r.clock.now() - 60_000;
+    await bootWithPool(r);
+    const before = r.store
+      .allPool()
+      .map((p) => p.containerId)
+      .sort();
+    await r.restart().boot();
+    expect(
+      r.store
+        .allPool()
+        .map((p) => p.containerId)
+        .sort(),
+    ).toEqual(before);
+  });
+
   it("removes hot browsers left over from a larger pool when it boots with a smaller one", async () => {
     const r = makeRig({ slotsTotal: 6, poolTarget: 4, refillAtOnce: 4 });
     await bootWithPool(r);

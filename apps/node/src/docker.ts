@@ -146,6 +146,15 @@ export class DockerodeDriver implements DockerDriver {
     this.docker = new Docker(opts);
   }
 
+  /** When an image was built (epoch ms), or null if it is not there. */
+  async imageCreatedAt(name: string): Promise<number | null> {
+    const i = await this.docker
+      .getImage(name)
+      .inspect()
+      .catch(() => null);
+    return i ? Date.parse(i.Created) || null : null;
+  }
+
   private toInfo(i: Docker.ContainerInspectInfo): ContainerInfo {
     return {
       id: i.Id,
