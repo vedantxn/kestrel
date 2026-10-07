@@ -65,6 +65,7 @@ import {
 import type { EgressClient } from "./egress-client.js";
 import type { Firewall } from "./firewall.js";
 import type { GatewayHub } from "./gateway-hub.js";
+import { WarmCloneError } from "./microvm.js";
 import { RecordingPuller } from "./recording-pull.js";
 import {
   CLEAN_ENDS,
@@ -869,6 +870,17 @@ export class NodeAgent {
         // Another browser would meet the same gateway: do not spend the pool on it.
         if (e instanceof EgressUnsupported || e instanceof RuntimeUnsupported)
           break;
+        // P18: no warm clone here can take the profile (no warm template, or its clock is off).
+        if (e instanceof WarmCloneError) {
+          this.startMarks.delete(id);
+          this.store.deleteBinding(id);
+          this.finishSave(id, { outcome: "failed", reason: "not_started" });
+          return {
+            result: "failed",
+            reason: lastError,
+            code: "profile_unavailable",
+          };
+        }
       }
     }
     this.startMarks.delete(id);

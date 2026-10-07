@@ -28,6 +28,7 @@ fi
 setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs \
   env -i HOME=/home/kestrel NODE_ENV=production PATH=/usr/local/bin:/usr/bin:/bin \
   KESTREL_CONTROL_TOKEN="$KESTREL_CONTROL_TOKEN" KESTREL_PROXY="$KESTREL_PROXY" KESTREL_NODE="${KESTREL_NODE:-a}" SNAPSHOT=on \
+  KESTREL_CHROME="${KESTREL_CHROME:-now}" \
   /usr/local/bin/node /opt/runtimed/runtimed.mjs &
 # Reap orphans; when the runtime exits, the VM ends (panic=1 reboots, and Firecracker exits).
 while kill -0 $! 2>/dev/null; do wait; done

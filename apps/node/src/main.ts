@@ -105,12 +105,15 @@ if (env.RUNTIME === "microvm") {
     { run: exec, log },
   );
   await microvm.start();
-  driver = new RoutedDriver(microvm, docker);
+  driver = new RoutedDriver(microvm, docker, {
+    profilesOnDocker: env.MICROVM_PROFILES === "docker",
+  });
   log.info(
     {
       octets: env.MICROVM_OCTETS,
       pages: microvm.pages,
       recording: env.MICROVM_RECORDING,
+      profiles: env.MICROVM_PROFILES,
     },
     "browsers are microVMs",
   );
@@ -156,8 +159,11 @@ agent = new NodeAgent({
     address:
       env.ADVERTISE_ADDRESS ?? `http://${env.LISTEN_HOST}:${env.LISTEN_PORT}`,
     runtimeVersion: env.RUNTIME_VERSION,
-    // P18: a Docker node keeps one warm browser; a microVM node restores a warm clone instead.
-    warmPool: env.WARM_POOL ?? (env.RUNTIME === "microvm" ? 0 : 1),
+    // P18: a Docker node keeps one warm browser; a microVM node restores a warm clone instead,
+    // unless its profile sessions run in Docker containers (MICROVM_PROFILES=docker).
+    warmPool:
+      env.WARM_POOL ??
+      (env.RUNTIME === "microvm" && env.MICROVM_PROFILES === "vm" ? 0 : 1),
     ...(profileStore && chromeMajor !== undefined ? { chromeMajor } : {}),
   },
   store,

@@ -90,6 +90,22 @@ export const exec: Exec = (cmd, args, input) =>
     if (input !== undefined) p.stdin?.end(input);
   });
 
+/**
+ * P18: a clone that would take a profile cannot (docs/lld/p18-profiles.md 4.3): the node has no
+ * warm template, or the guest's clock is more than `PROFILE_CLOCK_SKEW_MS` off the host's after
+ * rekey, so cookies would be judged by the wrong time. Every clone here would do the same, so the
+ * agent ends the start `profile_unavailable` instead of trying another.
+ */
+export class WarmCloneError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WarmCloneError";
+  }
+}
+
+/** The most a warm clone's clock may differ from the host's, after rekey set it (4.3). */
+export const PROFILE_CLOCK_SKEW_MS = 2_000;
+
 /** The guest's address and its gateway, the same in every clone (the snapshot holds them). */
 export const GUEST = {
   ip: "172.16.0.2",
@@ -511,11 +527,26 @@ export class MicroVmDriver implements DockerDriver {
     };
   }
 
+  /**
+   * P18: the template a spec's level is restored from. `template/` has Chrome running (hot);
+   * `template-warm/` was snapshotted with runtimed and the display up and Chrome not launched, so
+   * a profile goes in before Chrome first starts (section 4.3, option B).
+   */
+  private templateDir(level: "hot" | "warm"): string {
+    return join(this.c.dir, level === "warm" ? "template-warm" : "template");
+  }
+
   /** Read at every restore: a rebuilt template has a new token (and the old clones keep theirs). */
-  private async token(): Promise<string> {
-    return (
-      await readFile(join(this.c.dir, "template", "token"), "utf8")
-    ).trim();
+  private async token(level: "hot" | "warm" = "hot"): Promise<string> {
+    try {
+      return (
+        await readFile(join(this.templateDir(level), "token"), "utf8")
+      ).trim();
+    } catch (e) {
+      if (level === "warm")
+        throw new WarmCloneError("this node has no warm template");
+      throw e;
+    }
   }
 
   private async metas(): Promise<Meta[]> {
@@ -590,6 +621,9 @@ export class MicroVmDriver implements DockerDriver {
     // (docs/lld/microvm-recording.md). Refused rather than silently left unrecorded.
     if ((spec.HostConfig?.Mounts?.length ?? 0) > 0)
       throw new Error("microvm: a VM cannot mount a volume");
+    const level = spec.Labels?.["kestrel.level"] === "warm" ? "warm" : "hot";
+    // Before anything is made: a node without the warm template cannot restore a profile.
+    if (level === "warm") await this.token("warm");
     const id = `vm-${randomBytes(12).toString("hex")}`;
     const t0 = performance.now();
     const marks: Record<string, number> = {};
@@ -604,9 +638,9 @@ export class MicroVmDriver implements DockerDriver {
     };
     try {
       await this.writeMeta(meta);
-      await this.restore(meta, mark);
+      await this.restore(meta, mark, level);
       const address = this.netns.address(octet);
-      await this.rekey(address, token, mark, probe);
+      await this.rekey(address, token, mark, probe, level);
       if (performance.now() - t0 > 500)
         this.d.log.info({ vm: id, phases: marks }, "microvm: slow restore");
       return this.info(meta, true);
@@ -619,6 +653,7 @@ export class MicroVmDriver implements DockerDriver {
   private async restore(
     meta: Meta,
     mark: (k: string) => void = () => undefined,
+    level: "hot" | "warm" = "hot",
   ): Promise<void> {
     const { id, octet } = meta;
     const c = this.c;
@@ -661,7 +696,7 @@ export class MicroVmDriver implements DockerDriver {
     const root = this.root(id);
     // The snapshot's files, linked (not copied) into the chroot: the memory file is mapped
     // copy-on-write, so clones share every page none of them has written.
-    const t = join(c.dir, "template");
+    const t = this.templateDir(level);
     mark("jailer");
     for (const f of ["vmstate", "mem", "rootfs.ext4"])
       await link(join(t, f), join(root, f));
@@ -707,8 +742,9 @@ export class MicroVmDriver implements DockerDriver {
     token: string,
     mark: (k: string) => void = () => undefined,
     probe = false,
+    level: "hot" | "warm" = "hot",
   ): Promise<void> {
-    const template = await this.token();
+    const template = await this.token(level);
     const base = `http://${address}:${RUNTIME_PORTS.control}`;
     const until = Date.now() + 10_000;
     for (;;) {
@@ -721,7 +757,8 @@ export class MicroVmDriver implements DockerDriver {
             })
           ).json(),
         );
-        if (h.status === "ready") {
+        // A warm clone's Chrome waits for its profile: runtimed says `warm`, never `ready`.
+        if (h.status === (level === "warm" ? "warm" : "ready")) {
           mark("health");
           break;
         }
@@ -764,8 +801,20 @@ export class MicroVmDriver implements DockerDriver {
       });
     }
     if (!res.ok) throw new Error(`microvm: rekey refused (${res.status})`);
-    RekeyResponse.parse(await res.json());
+    const answer = RekeyResponse.parse(await res.json());
     mark("rekey");
+    // P18: cookies are judged by the guest's clock. Rekey set it from the host's; a warm clone
+    // whose clock is still off (or that cannot say) does not take a profile (4.3, T-76).
+    if (level === "warm") {
+      const skew =
+        answer.now === undefined ? Infinity : Math.abs(answer.now - Date.now());
+      if (skew > PROFILE_CLOCK_SKEW_MS)
+        throw new WarmCloneError(
+          answer.now === undefined
+            ? "the warm clone did not say its clock"
+            : `the warm clone's clock is ${Math.round(skew)} ms off the host's`,
+        );
+    }
   }
 
   async inspect(id: string): Promise<ContainerInfo | null> {
@@ -905,6 +954,11 @@ export class RoutedDriver implements DockerDriver {
   constructor(
     private readonly vm: DockerDriver,
     private readonly docker: DockerDriver,
+    /**
+     * P18, `MICROVM_PROFILES=docker` (the escape hatch): a warm browser, for a session that
+     * restores a profile, is a Docker container on this node rather than a warm clone.
+     */
+    private readonly opts: { profilesOnDocker?: boolean } = {},
   ) {}
 
   private pick(id: string): DockerDriver {
@@ -912,7 +966,9 @@ export class RoutedDriver implements DockerDriver {
   }
 
   run(spec: Docker.ContainerCreateOptions): Promise<ContainerInfo> {
-    return (spec.HostConfig?.Mounts?.length ?? 0) > 0
+    const warm = spec.Labels?.["kestrel.level"] === "warm";
+    return (spec.HostConfig?.Mounts?.length ?? 0) > 0 ||
+      (warm && this.opts.profilesOnDocker === true)
       ? this.docker.run(spec)
       : this.vm.run(spec);
   }

@@ -52,6 +52,12 @@ export const Env = z.object({
    * escape hatch, a Docker container with a recording volume, as before 2026-10-06.
    */
   MICROVM_RECORDING: z.enum(["vm", "docker"]).default("vm"),
+  /**
+   * P18, on a microVM node: where a session that restores a profile runs. "vm" (default): a clone
+   * of the warm template (runtime/microvm/build-template.sh with TEMPLATE=warm). "docker": the
+   * escape hatch, a warm Docker container on this node.
+   */
+  MICROVM_PROFILES: z.enum(["vm", "docker"]).default("vm"),
   MICROVM_DIR: z.string().default("/data/kestrel-vm"),
   FIRECRACKER_DIR: z.string().default("/opt/firecracker"),
   MICROVM_CGROUP: z.string().default("kestrel-vm"),

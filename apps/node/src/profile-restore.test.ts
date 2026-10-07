@@ -13,6 +13,7 @@ import {
 } from "@kestrel/shared";
 import { describe, expect, it } from "vitest";
 import { buildContainerSpec } from "./docker.js";
+import { WarmCloneError } from "./microvm.js";
 import { makeRig, prj, startReq, SPEC, type Rig } from "./test/fakes.js";
 
 /*
@@ -302,6 +303,30 @@ describe("a start that restores a profile", () => {
     expect(
       await bare.agent.start(startReq({ projectId, profile })),
     ).toMatchObject({ result: "refused" });
+  });
+
+  it("ends profile_unavailable at once when no warm clone can take it (microVM: no warm template, or its clock is off)", async () => {
+    const r = await rig({ warmPool: 0, startRetries: 2 });
+    const projectId = prj();
+    const profile = await savedVersion(r.profileStore!, projectId);
+    const run = r.docker.run.bind(r.docker);
+    let warmRuns = 0;
+    r.docker.run = async (spec) => {
+      if (spec.Labels?.["kestrel.level"] === "warm") {
+        warmRuns++;
+        throw new WarmCloneError(
+          "the warm clone's clock is 3000 ms off the host's",
+        );
+      }
+      return run(spec);
+    };
+    const res = await r.agent.start(startReq({ projectId, profile }));
+    expect(res).toMatchObject({
+      result: "failed",
+      code: "profile_unavailable",
+    });
+    expect(warmRuns).toBe(1); // no other clone is tried: each would be the same
+    expect(r.store.allBindings()).toEqual([]);
   });
 
   it("starts an empty profile (nothing saved yet) on the hot path", async () => {
