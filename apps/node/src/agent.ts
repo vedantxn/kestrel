@@ -499,7 +499,7 @@ export class NodeAgent {
     const warm = this.store
       .allPool()
       .filter((p) => p.state === "hot" && p.level === "warm");
-    for (const p of warm.slice(this.c.warmPool ?? 0)) {
+    for (const p of warm.slice(this.warmTarget())) {
       if (!this.store.takePool(p.containerId)) continue;
       await this.removeContainer(p.containerId).catch(() => undefined);
     }
@@ -1185,11 +1185,21 @@ export class NodeAgent {
   }
 
   /**
+   * P18: the warm pool's target. None on a node that takes no profile session (no profile store,
+   * or no Chrome version to tell the API): a warm browser there would only hold a slot's worth of
+   * room for nothing.
+   */
+  private warmTarget(): number {
+    if (!this.d.profileStore || this.c.chromeMajor === undefined) return 0;
+    return this.c.warmPool ?? 0;
+  }
+
+  /**
    * P18: warm browsers wanted now: `warmPool`, grown by the profile restores of the last
    * DEMAND_WINDOW_MS, as the hot pool is by its starts. None when the node keeps none.
    */
   private warmWanted(): number {
-    const target = this.c.warmPool ?? 0;
+    const target = this.warmTarget();
     if (target === 0) return 0;
     const now = this.now();
     this.recentWarmStarts = this.recentWarmStarts.filter(

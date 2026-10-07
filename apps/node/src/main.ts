@@ -159,11 +159,15 @@ agent = new NodeAgent({
     address:
       env.ADVERTISE_ADDRESS ?? `http://${env.LISTEN_HOST}:${env.LISTEN_PORT}`,
     runtimeVersion: env.RUNTIME_VERSION,
-    // P18: a Docker node keeps one warm browser; a microVM node restores a warm clone instead,
-    // unless its profile sessions run in Docker containers (MICROVM_PROFILES=docker).
+    // P18: a Docker node that takes profile sessions keeps one warm browser; a microVM node
+    // restores a warm clone instead, unless its profile sessions run in Docker containers
+    // (MICROVM_PROFILES=docker). A node without profiles keeps none (the agent also ensures it).
     warmPool:
       env.WARM_POOL ??
-      (env.RUNTIME === "microvm" && env.MICROVM_PROFILES === "vm" ? 0 : 1),
+      (!profileStore ||
+      (env.RUNTIME === "microvm" && env.MICROVM_PROFILES === "vm")
+        ? 0
+        : 1),
     ...(profileStore && chromeMajor !== undefined ? { chromeMajor } : {}),
   },
   store,

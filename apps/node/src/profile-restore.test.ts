@@ -121,6 +121,27 @@ describe("the warm pool level", () => {
     expect(s.store.allPool().every((p) => p.level === "hot")).toBe(true);
   });
 
+  it("is kept only on a node that takes profile sessions (a store and a Chrome version)", async () => {
+    const warmMade = async (r: Rig) => {
+      await r.agent.boot();
+      for (let i = 0; i < 3; i++) {
+        await r.agent.refillPool();
+        await r.agent.idle();
+      }
+      return r.store.allPool().filter((p) => p.level === "warm").length;
+    };
+    expect(await warmMade(makeRig({ warmPool: 1 }))).toBe(0);
+    expect(await warmMade(makeRig({ warmPool: 1 }, { profiles: true }))).toBe(
+      0,
+    );
+    expect(await warmMade(makeRig({ warmPool: 1, chromeMajor: 154 }))).toBe(0);
+    expect(
+      await warmMade(
+        makeRig({ warmPool: 1, chromeMajor: 154 }, { profiles: true }),
+      ),
+    ).toBe(1);
+  });
+
   it("is never taken by a session without a profile", async () => {
     const r = await rig({ poolTarget: 0, warmPool: 1 });
     const res = await r.agent.start(startReq());
