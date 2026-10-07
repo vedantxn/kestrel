@@ -518,6 +518,42 @@ export async function observe(
  */
 export const BASELINE_SETTLE_MS = 15_000;
 
+const itemsOf = (o: CloneObservation) =>
+  [...Object.keys(o.json), ...Object.keys(o.files).map((f) => `file:${f}`)]
+    .sort()
+    .join("\n");
+
+/**
+ * A pooled container's Chrome has settled; a cold one may still be writing its first preferences
+ * and files, even after BASELINE_SETTLE_MS (m1 4b on the AWS host, 2026-10-07). Until the two
+ * containers hold the same items (values may differ, salts must), wait and read their profiles
+ * again, without loading the test page again. After four rounds the comparison goes ahead with what
+ * it has, so a real difference is still reported.
+ */
+async function settleBaseline(
+  sessions: Session[],
+  pair: [CloneObservation, CloneObservation],
+): Promise<void> {
+  for (
+    let round = 0;
+    round < 4 && itemsOf(pair[0]) !== itemsOf(pair[1]);
+    round++
+  ) {
+    await new Promise((r) => setTimeout(r, 10_000));
+    for (const i of [0, 1] as const) {
+      const browser = await chromium.connectOverCDP(
+        sessions[i]!.connectUrl as string,
+        { timeout: 30_000 },
+      );
+      try {
+        Object.assign(pair[i], await readProfile(browser));
+      } finally {
+        await browser.close().catch(() => undefined);
+      }
+    }
+  }
+}
+
 async function observePair(
   client: KestrelClient,
   node: string,
@@ -530,10 +566,12 @@ async function observePair(
   try {
     for (const s of sessions) await check(s);
     if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs));
-    return [
+    const pair: [CloneObservation, CloneObservation] = [
       await observe(sessions[0]!, testPageUrl),
       await observe(sessions[1]!, testPageUrl),
     ];
+    if (settleMs > 0) await settleBaseline(sessions, pair);
+    return pair;
   } finally {
     for (const s of sessions) await client.stop(s.id).catch(() => undefined);
   }
