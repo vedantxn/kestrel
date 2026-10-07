@@ -1586,6 +1586,7 @@ export class NodeAgent {
   ): Promise<{ archive?: Buffer; failure?: ProfileSaveFailure }> {
     const s = this.store.getProfileSave(id);
     if (!s || s.state === "written") return {};
+    if (!this.d.profileStore) return { failure: "storage_error" };
     // HLD 8.11: a failed session does not write back.
     if (b.readyAt === null) return { failure: "not_started" };
     if (!CLEAN_ENDS.includes(reason)) return { failure: "unclean_end" };
@@ -1690,7 +1691,7 @@ export class NodeAgent {
    * reported; otherwise its browser is gone with the session, and the save failed.
    */
   async resolveSaves(): Promise<void> {
-    if (this.resolvingSaves || !this.d.profileStore) return;
+    if (this.resolvingSaves) return;
     this.resolvingSaves = true;
     try {
       const live = new Set(this.store.allBindings().map((b) => b.sessionId));
@@ -1701,6 +1702,16 @@ export class NodeAgent {
             outcome: "saved",
             bytes: s.bytes,
             sha256: s.sha256,
+          });
+          continue;
+        }
+        // A node whose store has gone (its settings were removed) cannot finish a save, but must
+        // still end it: a row left would keep its key, and count as a report to come for ever,
+        // which stops the API's repairs for the whole node (section 5).
+        if (!this.d.profileStore) {
+          this.finishSave(s.sessionId, {
+            outcome: "failed",
+            reason: "storage_error",
           });
           continue;
         }

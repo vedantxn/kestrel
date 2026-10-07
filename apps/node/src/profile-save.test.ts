@@ -490,6 +490,39 @@ describe("a writer's save", () => {
 });
 
 describe("a save across an agent restart", () => {
+  it("ends saves left behind even on a node that no longer has a profile store", async () => {
+    const r = makeRig({ chromeMajor: 154 });
+    const written = writer();
+    const pulled = writer();
+    for (const q of [written, pulled])
+      r.store.addProfileSave({
+        sessionId: q.sessionId,
+        projectId: q.projectId,
+        profileId: q.profile!.profileId,
+        version: 4,
+        saveKey: q.profile!.save!.key,
+        maxBytes: MAX,
+      });
+    r.store.advanceProfileSave(written.sessionId, "pending", "written", {
+      bytes: 99,
+      sha256: "a".repeat(64),
+    });
+    r.store.advanceProfileSave(pulled.sessionId, "pending", "pulled");
+    expect(r.agent.describe().pendingReports).toBe(2);
+    await r.agent.boot();
+    expect(profileReports(r, written.sessionId)).toMatchObject([
+      { outcome: "saved", bytes: 99 },
+    ]);
+    expect(profileReports(r, pulled.sessionId)).toMatchObject([
+      { outcome: "failed", reason: "storage_error" },
+    ]);
+    // nothing left: no key in the store, no report counted as still to come
+    expect(r.store.allProfileSaves()).toEqual([]);
+    expect(r.agent.describe().pendingReports).toBe(
+      r.store.pendingReportCount(),
+    );
+  });
+
   it("asks the browser again when the agent died after the pull, and reports once", async () => {
     const r = await rig(
       {},
