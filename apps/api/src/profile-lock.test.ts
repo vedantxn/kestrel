@@ -729,6 +729,49 @@ describe("releasing the lock (section 5)", () => {
     });
   });
 
+  it("lets only one of two concurrent commits into one project pass its byte quota", async () => {
+    const e = await setup({
+      profiles: true,
+      nodes: [
+        { id: "a", slots: 5 },
+        { id: "b", slots: 5 },
+      ],
+    });
+    // Each save is about 1,100 bytes (random, so gzip cannot shrink it); the project allows one.
+    for (const n of Object.values(e.nodes))
+      n.profileArchive = randomBytes(1000);
+    await e.db.project.update({
+      where: { id: e.projectId },
+      data: { maxProfileBytes: 1500n },
+    });
+    const p1 = await newProfile(e);
+    const p2 = await newProfile(e);
+    const w1 = await start(e, { id: p1.id, persist: true });
+    const w2 = await start(e, { id: p2.id, persist: true });
+    expect([w1.nodeId, w2.nodeId].sort()).toEqual(["a", "b"]);
+    for (const w of [w1, w2])
+      expect(
+        (await e.call("POST", `/v1/sessions/${w.id}/stop`)).statusCode,
+      ).toBe(200);
+    // Each commit waits after summing: without the project's lock both would pass.
+    e.failpoints.set("api.profile.commit.after_sum", "stall:300");
+    await Promise.all([
+      e.nodes.a!.flushReports(e.internal),
+      e.nodes.b!.flushReports(e.internal),
+    ]);
+    e.failpoints.clear();
+    const outcomes = await e.db.sessionEvent.findMany({
+      where: { type: { startsWith: "profile." } },
+    });
+    expect(outcomes.map((x) => x.type).sort()).toEqual([
+      "profile.save_failed",
+      "profile.saved",
+    ]);
+    expect(
+      outcomes.find((x) => x.type === "profile.save_failed")?.data,
+    ).toMatchObject({ reason: "project_quota" });
+  });
+
   it("writes no profile event for a reader", async () => {
     const e = await setup();
     const p = await newProfile(e);

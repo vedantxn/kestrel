@@ -19,6 +19,7 @@ export const FAILPOINT_NAMES = [
   "api.node_start", // use `drop` to lose the start message
   "api.node_stop", // use `drop` to lose the stop message
   "api.sweeper.tick",
+  "api.profile.commit.after_sum", // a profile commit has summed its project's bytes, not yet committed
   // Node agent: a process that dies at one of these leaves exactly the state a crash there would.
   "node.start.after_binding", // the binding is written, no container yet
   "node.start.after_acquire", // a container is bound, no policy yet

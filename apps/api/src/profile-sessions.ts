@@ -318,7 +318,14 @@ export async function applyProfileReport(
   if (await tx.sessionEvent.findUnique({ where: { dedupeKey } })) return;
   const profileUuid = toProfileUuid(r.profileId);
   if (!profileUuid) return;
-  // Lock the profile row: the checks below and the commit see one state.
+  // Lock the project row, then the profile row, in the order admission takes them: commits into one
+  // project's profiles then run one at a time, so two cannot both pass its byte quota, and the
+  // checks below and the commit see one state.
+  const [owner] = await tx.$queryRaw<{ project_id: string }[]>`
+    SELECT project_id FROM profiles WHERE id = ${profileUuid}::uuid`;
+  if (!owner) return;
+  await tx.$queryRaw`
+    SELECT id FROM projects WHERE id = ${owner.project_id}::uuid FOR NO KEY UPDATE`;
   const [profile] = await tx.$queryRaw<
     {
       project_id: string;
@@ -369,6 +376,7 @@ export async function applyProfileReport(
     where: { id: profile.project_id },
     select: { maxProfileBytes: true },
   });
+  await ctx.failpoints.hit("api.profile.commit.after_sum");
   if ((usage?.bytes ?? 0n) + BigInt(r.bytes) > project.maxProfileBytes)
     return fail("project_quota");
 
