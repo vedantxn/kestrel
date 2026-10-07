@@ -9,6 +9,7 @@ import {
   readdirSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -416,6 +417,20 @@ describe("collecting the files to save", () => {
       code: "too_large",
     });
     expect(await collectProfileFiles(dir, 120)).toHaveLength(2);
+  });
+
+  it("refuses a huge file from its size, without reading it into memory", async () => {
+    const dir = tmp();
+    plant(dir, {
+      "Default/LocalStorage": "ls",
+      "Default/IndexedDB/o/huge": "",
+    });
+    // 3 GiB, sparse: reading it whole would need 3 GiB of memory (and Node refuses past 2 GiB).
+    truncateSync(join(dir, "Default/IndexedDB/o/huge"), 3 * 1024 ** 3);
+    await expect(collectProfileFiles(dir, MAX)).rejects.toMatchObject({
+      status: 413,
+      code: "too_large",
+    });
   });
 
   it("skips a file it cannot read rather than fail", async () => {

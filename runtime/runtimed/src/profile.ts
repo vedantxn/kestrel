@@ -1,12 +1,5 @@
 import { constants } from "node:fs";
-import {
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  type FileHandle,
-} from "node:fs/promises";
+import { lstat, mkdir, open, readdir, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import {
   PROFILE_LIMITS,
@@ -165,15 +158,13 @@ export async function collectProfileFiles(
         continue;
       }
       if (!e.isFile() || profilePathProblem(path) !== null) continue;
-      const data = await readRegular(join(dir, path));
+      if (out.length + 1 > PROFILE_LIMITS.maxFiles)
+        throw new ProfileError(413, "too_large", "the profile is too large");
+      // The size is checked against what is left of the cap before anything is read, and the
+      // read is bounded by it: a huge IndexedDB file is refused, never loaded into memory.
+      const data = await readRegular(join(dir, path), maxBytes - total);
       if (data === null) continue;
       total += data.length;
-      if (
-        out.length + 1 > PROFILE_LIMITS.maxFiles ||
-        data.length > maxBytes ||
-        total > maxBytes
-      )
-        throw new ProfileError(413, "too_large", "the profile is too large");
       out.push({ path, data });
     }
   };
@@ -192,7 +183,11 @@ function mayHoldAllowed(dirPath: string): boolean {
   );
 }
 
-async function readRegular(path: string): Promise<Buffer | null> {
+/** A regular file's bytes, at most `limit` of them (`too_large` if it is bigger), or null. */
+async function readRegular(
+  path: string,
+  limit: number,
+): Promise<Buffer | null> {
   let fh: FileHandle;
   try {
     fh = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -202,9 +197,29 @@ async function readRegular(path: string): Promise<Buffer | null> {
   try {
     const st = await fh.stat();
     if (!st.isFile()) return null;
-    return await readFile(fh);
+    if (st.size > limit)
+      throw new ProfileError(413, "too_large", "the profile is too large");
+    // Exactly the size seen, never more: a file that grows while it is read is cut there.
+    const out = Buffer.alloc(st.size);
+    let off = 0;
+    while (off < out.length) {
+      const { bytesRead } = await fh.read(out, off, out.length - off, off);
+      if (bytesRead === 0) break;
+      off += bytesRead;
+    }
+    return out.subarray(0, off);
   } finally {
     await fh.close();
+  }
+}
+
+/** Write all of `data`: a write may take fewer bytes than it was given. */
+async function writeAll(fh: FileHandle, data: Uint8Array): Promise<void> {
+  let off = 0;
+  while (off < data.length) {
+    const { bytesWritten } = await fh.write(data, off, data.length - off);
+    if (bytesWritten <= 0) throw new Error("a write wrote nothing");
+    off += bytesWritten;
   }
 }
 
@@ -231,6 +246,21 @@ export async function restoreProfileArchive(
   let files = 0;
   let bytes = 0;
   const made = new Set<string>();
+  // Each file is checked to hold exactly the bytes its manifest entry says.
+  let expected = 0;
+  let written = 0;
+  const finishFile = async () => {
+    if (!fh) return;
+    await fh.close();
+    fh = undefined;
+    if (written !== expected)
+      throw new ProfileError(
+        400,
+        "write_failed",
+        "a file was not written whole",
+      );
+    written = 0;
+  };
   const ensureDirs = async (path: string) => {
     const segments = path.split("/").slice(0, -1);
     let cur = "";
@@ -254,8 +284,8 @@ export async function restoreProfileArchive(
       for (const part of parser.push(chunk)) {
         if (part.kind === "cookies") cookies = part.cookies;
         else if (part.kind === "file") {
-          await fh?.close();
-          fh = undefined;
+          await finishFile();
+          expected = part.bytes;
           if (profilePathProblem(part.path) !== null)
             throw new ProfileError(400, "invalid_archive", "bad path");
           await ensureDirs(part.path);
@@ -269,11 +299,11 @@ export async function restoreProfileArchive(
           );
           files++;
         } else if (part.kind === "data") {
-          await fh!.write(part.data);
+          await writeAll(fh!, part.data);
+          written += part.data.length;
           bytes += part.data.length;
         } else if (part.kind === "end") {
-          await fh?.close();
-          fh = undefined;
+          await finishFile();
         }
       }
     }
