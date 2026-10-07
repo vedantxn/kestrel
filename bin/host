@@ -147,7 +147,7 @@ cmd_sync() {
   remote "sudo mkdir -p $REMOTE_DIR && sudo chown ec2-user:ec2-user $REMOTE_DIR && find $REMOTE_DIR -mindepth 1 -delete"
   # A tar stream over the same SSH transport: no rsync (the macOS one cannot take this remote shell).
   (cd "$ROOT" && COPYFILE_DISABLE=1 tar -czf - \
-    --exclude '.git' --exclude 'node_modules' --exclude 'dist' --exclude '*.tsbuildinfo' --exclude 'coverage' \
+    --exclude '.git' --exclude './.claude' --exclude 'node_modules' --exclude 'dist' --exclude '*.tsbuildinfo' --exclude 'coverage' \
     --exclude '.terraform' --exclude '*.tfstate*' --exclude './reports' --exclude '.DS_Store' \
     --exclude 'packages/db/src/generated' --exclude '.env*' --exclude 'tfplan' --exclude 'backend.hcl' .) \
     | remote "tar -xzf - -C $REMOTE_DIR"

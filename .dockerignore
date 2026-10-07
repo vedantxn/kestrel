@@ -7,3 +7,5 @@ reports
 runtime/runtimed.mjs
 docs
 **/*.tsbuildinfo
+.claude
+**/.next
