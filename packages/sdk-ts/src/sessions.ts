@@ -1,4 +1,4 @@
-import { KestrelError, SessionEndedError } from "./errors.js";
+import { ApiError, KestrelError, SessionEndedError } from "./errors.js";
 import { sleep, type Http } from "./http.js";
 import {
   TERMINAL_STATUSES,
@@ -17,6 +17,16 @@ import {
 export interface CallOptions {
   /** Abort the call, including any retries and waits it is in the middle of. */
   signal?: AbortSignal | undefined;
+}
+
+export interface CreateOptions extends CallOptions {
+  /**
+   * For `profile: { id, persist: true }`: if another session is saving into the profile (a
+   * retryable `409 conflict` on `profile.id`), keep trying for up to this long, with the
+   * client's backoff, before throwing it. Without it that answer is thrown at once, since a
+   * writer may hold a profile for hours.
+   */
+  waitForProfileMs?: number | undefined;
 }
 
 export interface WaitOptions extends CallOptions {
@@ -44,6 +54,16 @@ export interface LiveViewOptions extends CallOptions {
 
 const id = (sessionId: string) => encodeURIComponent(sessionId);
 
+/** Another session holds the profile's write lock. Retrying can work, but only once it ends. */
+export function isProfileBusy(e: unknown): e is ApiError {
+  return (
+    e instanceof ApiError &&
+    e.code === "conflict" &&
+    e.param === "profile.id" &&
+    e.retryable
+  );
+}
+
 /** `/v1/sessions` and everything under it. New per-session endpoints belong here. */
 export class Sessions {
   constructor(private readonly http: Http) {}
@@ -52,21 +72,41 @@ export class Sessions {
    * Create a session. The API answers once the browser is ready to connect to. Every call
    * carries an idempotency key, made up here unless the caller passes one, so a retry after
    * a lost answer returns the same session instead of starting a second browser.
+   * `waitForProfileMs` waits for a profile another session is saving into.
    */
   async create(
     req: CreateSessionRequest = {},
-    opts: CallOptions = {},
+    opts: CreateOptions = {},
   ): Promise<Session> {
     const body = {
       ...req,
       idempotencyKey: req.idempotencyKey ?? crypto.randomUUID(),
     };
-    return (
-      await this.http.request<Session>("POST", "v1/sessions", {
-        body,
-        signal: opts.signal,
-      })
-    ).body;
+    const deadline =
+      opts.waitForProfileMs === undefined
+        ? undefined
+        : Date.now() + opts.waitForProfileMs;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return (
+          await this.http.request<Session>("POST", "v1/sessions", {
+            body,
+            signal: opts.signal,
+            // A busy profile is retried here, and only when the caller asked to wait.
+            retry: (e) => !isProfileBusy(e),
+          })
+        ).body;
+      } catch (e) {
+        if (deadline === undefined || !isProfileBusy(e)) throw e;
+        const left = deadline - Date.now();
+        if (left <= 0) throw e;
+        // At the latest, a last attempt at the deadline.
+        await sleep(
+          Math.min(e.retryAfterMs ?? this.http.backoff(attempt), left),
+          opts.signal,
+        );
+      }
+    }
   }
 
   async get(sessionId: string, opts: CallOptions = {}): Promise<Session> {

@@ -7,9 +7,12 @@ export {
   SessionEndedError,
 } from "./errors.js";
 export { SDK_VERSION } from "./http.js";
+export { Profiles } from "./profiles.js";
 export {
   Sessions,
+  isProfileBusy,
   type CallOptions,
+  type CreateOptions,
   type IterEventsOptions,
   type LiveViewOptions,
   type WaitOptions,

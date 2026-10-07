@@ -48,7 +48,9 @@ ok<SameShape<C.Session["usage"], S.Session["usage"]>>();
 // the parsed form, with every field optional as a caller sees it.
 ok<SameShape<Partial<C.ListSessionsQuery>, S.ListSessionsQuery>>();
 ok<SameShape<Partial<z.output<typeof C.ListEventsQuery>>, S.ListEventsQuery>>();
+ok<SameShape<Partial<C.ListProfilesQuery>, S.ListProfilesQuery>>();
 ok<SameShape<C.ListSessionsResponse, S.Page<S.Session>>>();
+ok<SameShape<C.ListProfilesResponse, S.Page<S.Profile>>>();
 ok<SameShape<C.ListEventsResponse, S.Page<S.SessionEvent>>>();
 ok<SameShape<C.EventBody, S.EventBody>>();
 ok<SameShape<C.EventBody["type"], S.EventBody["type"]>>();

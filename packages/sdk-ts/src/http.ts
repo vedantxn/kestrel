@@ -16,16 +16,26 @@ export interface RequestOptions {
   body?: unknown;
   query?: Record<string, string | number | undefined>;
   signal?: AbortSignal | undefined;
+  /**
+   * False for a call that is not safe to repeat blindly (a create with no idempotency key): it is
+   * then retried only when the API itself answered `retryable`, which means it changed nothing.
+   * A call that got no answer, or an answer from something other than the API, may have taken
+   * effect, so it is not sent again. Default true.
+   */
+  idempotent?: boolean | undefined;
+  /** Whether this call may retry a `retryable` error. Default: every one may be. */
+  retry?: ((err: ApiError) => boolean) | undefined;
 }
 
 /** The longest exponential backoff step; a `Retry-After` from the API may ask for longer. */
 const MAX_BACKOFF_MS = 8_000;
 
 /**
- * Sends one API call, retrying it when that is safe and useful. Every endpoint can be
- * repeated (reads, an idempotent stop, and creates that carry an idempotency key), so the
- * only question is whether a repeat could succeed: the API says so in `retryable`, and a
- * connection that failed before any answer may simply have been unlucky.
+ * Sends one API call, retrying it when that is safe and useful. Almost every endpoint can be
+ * repeated (reads, an idempotent stop, and session creates that carry an idempotency key), so
+ * the only question is whether a repeat could succeed: the API says so in `retryable`, and a
+ * connection that failed before any answer may simply have been unlucky. The exceptions say so
+ * with `idempotent: false`.
  */
 export class Http {
   constructor(private readonly config: HttpConfig) {}
@@ -91,7 +101,7 @@ export class Http {
       } catch (e) {
         // The caller cancelled: stop at once, whatever the retry budget says.
         if (opts.signal?.aborted) throw opts.signal.reason;
-        if (attempt >= this.config.maxRetries)
+        if (opts.idempotent === false || attempt >= this.config.maxRetries)
           throw new ConnectionError(
             `${method} ${url.origin}${url.pathname} failed: ${describe(e)}`,
             { cause: e },
@@ -103,7 +113,13 @@ export class Http {
       }
       if (res.ok) return { res, value: value as T };
       const err = toApiError(res, text);
-      if (!err.retryable || attempt >= this.config.maxRetries) throw err;
+      if (
+        !err.retryable ||
+        attempt >= this.config.maxRetries ||
+        (opts.idempotent === false && err.code === "malformed_response") ||
+        (opts.retry && !opts.retry(err))
+      )
+        throw err;
       await sleep(err.retryAfterMs ?? this.backoff(attempt), opts.signal);
     }
   }
@@ -138,7 +154,7 @@ export class Http {
   }
 
   /** Exponential backoff with full jitter, so many clients told "full" do not return together. */
-  private backoff(attempt: number): number {
+  backoff(attempt: number): number {
     const cap = Math.min(
       MAX_BACKOFF_MS,
       this.config.retryBaseDelayMs * 2 ** attempt,

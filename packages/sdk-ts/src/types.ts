@@ -292,6 +292,11 @@ export interface CreateProfileRequest {
   metadata?: Record<string, string> | undefined;
 }
 
+export interface ListProfilesQuery {
+  limit?: number | undefined;
+  cursor?: string | undefined;
+}
+
 export type EgressDenyReason =
   | "blocked_address"
   | "port_not_allowed"

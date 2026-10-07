@@ -7,6 +7,8 @@ import type { CreateSessionRequest, Session } from "./types.js";
 export interface ConnectOptions extends CreateSessionRequest {
   /** How long Playwright may take to attach over CDP. Default 30 s. */
   connectTimeoutMs?: number | undefined;
+  /** Wait this long for a profile another session is saving into; see `sessions.create`. */
+  waitForProfileMs?: number | undefined;
 }
 
 export interface KestrelBrowser {
@@ -25,10 +27,10 @@ export async function connect(
   sessions: Sessions,
   opts: ConnectOptions = {},
 ): Promise<KestrelBrowser> {
-  const { connectTimeoutMs = 30_000, ...req } = opts;
+  const { connectTimeoutMs = 30_000, waitForProfileMs, ...req } = opts;
   // Before creating anything, so a missing Playwright costs no session.
   const { chromium } = await loadPlaywright();
-  const session = await sessions.create(req);
+  const session = await sessions.create(req, { waitForProfileMs });
   let browser: Browser;
   try {
     if (!session.connectUrl)

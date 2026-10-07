@@ -5,6 +5,7 @@ import {
 } from "./connect.js";
 import { KestrelError } from "./errors.js";
 import { Http } from "./http.js";
+import { Profiles } from "./profiles.js";
 import { Sessions } from "./sessions.js";
 
 export interface KestrelOptions {
@@ -43,6 +44,7 @@ function env(name: string): string | undefined {
  */
 export class Kestrel {
   readonly sessions: Sessions;
+  readonly profiles: Profiles;
   readonly baseUrl: string;
 
   constructor(opts: KestrelOptions = {}) {
@@ -63,6 +65,7 @@ export class Kestrel {
       fetch: opts.fetch ?? globalThis.fetch,
     });
     this.sessions = new Sessions(http);
+    this.profiles = new Profiles(http);
   }
 
   /**
