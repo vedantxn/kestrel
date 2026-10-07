@@ -127,6 +127,13 @@ export const RekeyRequest = z
      * docs/harness.md); a runtimed from before it refuses the field.
      */
     probe: z.literal(true).optional(),
+    /**
+     * The host's clock, in milliseconds since the epoch, when the agent sent the rekey. A clone
+     * resumes with the template's wall clock, so every clone would be behind by the template's age,
+     * all by the same amount (threat model 9.1, G-24). The guest sets its clock to this before the
+     * session's page is made. A runtimed from before it refuses the field.
+     */
+    now: z.number().int().positive().optional(),
   })
   .strict();
 export type RekeyRequest = z.infer<typeof RekeyRequest>;
