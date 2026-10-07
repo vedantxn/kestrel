@@ -28,10 +28,14 @@ import {
   type RuntimeCaptchaInject,
   type RuntimeHealth,
   type StartRequest,
+  type LaunchRequest,
+  type LaunchResponse,
+  encodeProfileArchive,
 } from "@kestrel/contracts";
 import {
   FakeClock,
   Failpoints,
+  FsProfileStore,
   createLogger,
   type Logger,
 } from "@kestrel/shared";
@@ -52,7 +56,12 @@ import type {
   Volumes,
 } from "../docker.js";
 import type { EgressClient } from "../egress-client.js";
-import { RuntimeHttpError, type RuntimeClient } from "../runtime-client.js";
+import {
+  RuntimeHttpError,
+  type ProfileSaveAnswer,
+  type ProfileWritten,
+  type RuntimeClient,
+} from "../runtime-client.js";
 import { Store } from "../store.js";
 
 export class FakeDocker implements DockerDriver {
@@ -174,12 +183,114 @@ export class FakeRuntime implements RuntimeClient {
     this.calls.push({ op: "health", address });
     if (!this.alive(address)) throw new Error("connection refused");
     const ready = !this.neverReady.has(address);
+    if (ready && this.waiting(address))
+      return {
+        protocolVersion: 1,
+        status: "warm",
+        chromeReady: false,
+        chromeVersion: null,
+      };
     return {
       protocolVersion: 1,
       status: ready ? "ready" : "starting",
       chromeReady: ready,
       chromeVersion: "154.0.8037.92",
     };
+  }
+
+  // --- P18: warm browsers and profiles ---------------------------------------------------------
+
+  /** Addresses whose deferred Chrome has been launched. */
+  launched = new Set<string>();
+  /** Archives written into browsers, by address. */
+  profiles = new Map<string, Buffer>();
+  /** What `POST /launch` reports as the browser's Chrome. */
+  chromeVersion = "Chrome/154.0.8037.92";
+  /** How `POST /profile/save` answers, per address: default a small valid archive. */
+  saveAnswers = new Map<
+    string,
+    ProfileSaveAnswer | "hang" | "fail" | (() => Promise<ProfileSaveAnswer>)
+  >();
+  saveCalls: string[] = [];
+  /** `PUT /profile` refuses, per address. */
+  putFails = new Set<string>();
+
+  private specOf(address: string) {
+    const c = [...this.docker.containers.values()].find(
+      (x) => x.address === address,
+    );
+    return c ? this.docker.specs.get(c.id) : undefined;
+  }
+  /** A warm browser whose Chrome has not been launched yet. */
+  waiting(address: string): boolean {
+    return (
+      !this.launched.has(address) &&
+      (this.specOf(address)?.Env ?? []).includes("KESTREL_CHROME=deferred")
+    );
+  }
+
+  async putProfile(
+    address: string,
+    _token: string,
+    archive: Uint8Array,
+  ): Promise<ProfileWritten> {
+    this.calls.push({ op: "putProfile", address });
+    if (!this.alive(address)) throw new Error("connection refused");
+    if (!this.waiting(address) || this.profiles.has(address))
+      throw new RuntimeHttpError(RUNTIME_PATHS.profile, 409);
+    if (this.putFails.has(address))
+      throw new RuntimeHttpError(RUNTIME_PATHS.profile, 400);
+    this.profiles.set(address, Buffer.from(archive));
+    return { files: 1, bytes: archive.length, cookies: 0 };
+  }
+
+  async launch(
+    address: string,
+    _token: string,
+    req: LaunchRequest,
+  ): Promise<LaunchResponse> {
+    this.calls.push({
+      op: `launch:${req.viewport.width}x${req.viewport.height}`,
+      address,
+    });
+    if (!this.alive(address)) throw new Error("connection refused");
+    if (!this.waiting(address))
+      throw new RuntimeHttpError(RUNTIME_PATHS.launch, 409);
+    this.launched.add(address);
+    return { chromeVersion: this.chromeVersion, cookies: 0 };
+  }
+
+  async saveProfile(
+    address: string,
+    _token: string,
+    _maxBytes: number,
+    signal: AbortSignal,
+  ): Promise<ProfileSaveAnswer> {
+    this.calls.push({ op: "saveProfile", address });
+    this.saveCalls.push(address);
+    if (!this.alive(address)) throw new Error("connection refused");
+    const a = this.saveAnswers.get(address);
+    if (a === "fail") throw new Error("connection reset");
+    if (a === "hang")
+      return new Promise((_r, reject) => {
+        if (signal.aborted) return reject(signal.reason);
+        signal.addEventListener("abort", () => reject(signal.reason));
+      });
+    if (typeof a === "function") return a();
+    return (
+      a ?? {
+        ok: true,
+        body: encodeProfileArchive(
+          [],
+          [
+            {
+              path: "Default/LocalStorage",
+              data: Buffer.from(`saved by ${address}`),
+            },
+          ],
+        ),
+      }
+    );
   }
 
   async configure(
@@ -525,6 +636,8 @@ export interface Rig {
   config: AgentConfig;
   dbPath: string;
   volumes: FakeVolumes | undefined;
+  /** P18: the profile store, when the rig has one. */
+  profileStore: FsProfileStore | undefined;
   /** A new agent process over the same durable store and the same world (a restart after a crash). */
   restart(): NodeAgent;
 }
@@ -576,10 +689,15 @@ export function makeRig(
     harness?: boolean;
     microvm?: MicroVmHooks;
     solver?: AgentDeps["solver"];
+    /** P18: a profile store in a fresh directory. */
+    profiles?: boolean;
   } = {},
 ): Rig {
   const clock = new FakeClock();
   const volumes = opts.volumes ? new FakeVolumes(clock) : undefined;
+  const profileStore = opts.profiles
+    ? new FsProfileStore(mkdtempSync(join(tmpdir(), "agent-profiles-")))
+    : undefined;
   const docker = new FakeDocker(clock);
   const runtime = new FakeRuntime(docker);
   const egress = new FakeEgress();
@@ -629,6 +747,7 @@ export function makeRig(
       ...(opts.harness ? { harness: true } : {}),
       ...(opts.microvm ? { microvm: opts.microvm } : {}),
       ...(opts.solver ? { solver: opts.solver } : {}),
+      ...(profileStore ? { profileStore } : {}),
     });
   const rig: Rig = {
     agent: build(),
@@ -644,6 +763,7 @@ export function makeRig(
     config,
     dbPath,
     volumes,
+    profileStore,
     restart: () => (rig.agent = build()),
   };
   return rig;

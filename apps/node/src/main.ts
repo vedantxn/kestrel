@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   Failpoints,
+  FsProfileStore,
   createLogger,
   parseEnv,
   systemClock,
@@ -36,6 +37,28 @@ if (harness)
   );
 
 const secret = readFileSync(env.NODE_SECRET_FILE, "utf8").trim();
+
+// P18: profiles need the store and the pinned Chrome's version; without both, this node takes no
+// profile session (the API sends none to a node that did not say its Chrome).
+const chromeMajor = env.CHROME_VERSION
+  ? Number(env.CHROME_VERSION.split(".")[0])
+  : undefined;
+const profileStore =
+  env.PROFILE_STORE_DIR && chromeMajor !== undefined
+    ? new FsProfileStore(
+        env.PROFILE_STORE_DIR,
+        env.PROFILE_STORE_UID !== undefined
+          ? {
+              uid: env.PROFILE_STORE_UID,
+              gid: env.PROFILE_STORE_GID ?? env.PROFILE_STORE_UID,
+            }
+          : undefined,
+      )
+    : undefined;
+if (env.PROFILE_STORE_DIR && chromeMajor === undefined)
+  log.warn(
+    "PROFILE_STORE_DIR is set without CHROME_VERSION: no profile sessions",
+  );
 const store = new Store(env.STORE_PATH);
 // A hung Docker call must not wedge a teardown (and, with it, shutdown) forever.
 const docker = new DockerodeDriver(env.NODE_ID, env.NETWORK, {
@@ -133,6 +156,9 @@ agent = new NodeAgent({
     address:
       env.ADVERTISE_ADDRESS ?? `http://${env.LISTEN_HOST}:${env.LISTEN_PORT}`,
     runtimeVersion: env.RUNTIME_VERSION,
+    // P18: a Docker node keeps one warm browser; a microVM node restores a warm clone instead.
+    warmPool: env.WARM_POOL ?? (env.RUNTIME === "microvm" ? 0 : 1),
+    ...(profileStore && chromeMajor !== undefined ? { chromeMajor } : {}),
   },
   store,
   docker: driver,
@@ -156,6 +182,7 @@ agent = new NodeAgent({
     }
   },
   ...(microvm ? { microvm } : {}),
+  ...(profileStore ? { profileStore } : {}),
   harness,
   ...(env.RECORDING === "on"
     ? {

@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import type {
   CaptchaProvider,
   EndReason,
+  ProfileSaveFailure,
   Report,
   StartNetwork,
   Viewport,
@@ -32,15 +33,44 @@ export interface Binding {
   idleAt: number | null;
   attached: number;
   stopReason: EndReason | null;
-  startPath: "hot" | "cold" | null;
+  startPath: "hot" | "warm" | "cold" | null;
 }
+
+/**
+ * A pooled browser's level (P18, docs/lld/p18-profiles.md 4.2): `hot` has Chrome running on its
+ * own empty profile; `warm` has runtimed and the display up and Chrome not yet launched, so a
+ * saved profile can be written in first.
+ */
+export type PoolLevel = "hot" | "warm";
 
 export interface PoolEntry {
   containerId: string;
   address: string;
   controlToken: string;
+  /** `hot`: ready to take (at its level). */
   state: "starting" | "hot";
   createdAt: number;
+  level: PoolLevel;
+}
+
+/**
+ * P18 (section 4.7): a writer session's save. `pending` until its browser's profile is pulled and
+ * checked (`pulled`, the archive in memory only), `written` once the sealed blob is in the store;
+ * the row goes, its data key with it, in the transaction that queues the `profile` report.
+ */
+export type ProfileSaveState = "pending" | "pulled" | "written";
+
+export interface ProfileSave {
+  sessionId: string;
+  projectId: string;
+  profileId: string;
+  version: number;
+  /** The version's data key, base64: kept so a restarted agent can still finish the save. */
+  saveKey: string;
+  maxBytes: number;
+  state: ProfileSaveState;
+  bytes: number | null;
+  sha256: string | null;
 }
 
 const SCHEMA = `
@@ -95,6 +125,18 @@ CREATE TABLE IF NOT EXISTS recordings (
   volume TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+-- P18: a writer session's save, until its report is queued (the data key goes with the row).
+CREATE TABLE IF NOT EXISTS profile_saves (
+  session_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  save_key TEXT NOT NULL,
+  max_bytes INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  bytes INTEGER,
+  sha256 TEXT
+);
 CREATE TABLE IF NOT EXISTS recording_pulls (
   session_id TEXT PRIMARY KEY,
   seq INTEGER NOT NULL DEFAULT 0,
@@ -133,6 +175,14 @@ export class Store {
     // Deleted and overwritten rows are zeroed, so a scrubbed proxy password does not linger in free pages.
     this.db.pragma("secure_delete = ON");
     this.db.exec(SCHEMA);
+    // P18: pooled browsers gained a level. A store from before it holds only hot ones.
+    const poolCols = this.db.prepare("PRAGMA table_info(pool)").all() as {
+      name: string;
+    }[];
+    if (!poolCols.some((c) => c.name === "level"))
+      this.db.exec(
+        "ALTER TABLE pool ADD COLUMN level TEXT NOT NULL DEFAULT 'hot'",
+      );
   }
 
   close(): void {
@@ -184,7 +234,7 @@ export class Store {
       idleAt: (r.idle_at as number | null) ?? null,
       attached: r.attached as number,
       stopReason: (r.stop_reason as EndReason | null) ?? null,
-      startPath: (r.start_path as "hot" | "cold" | null) ?? null,
+      startPath: (r.start_path as Binding["startPath"]) ?? null,
     };
   }
 
@@ -395,13 +445,15 @@ export class Store {
 
   // --- pool -----------------------------------------------------------------------------------
 
-  upsertPool(p: PoolEntry): void {
+  upsertPool(
+    p: Omit<PoolEntry, "level"> & { level?: PoolLevel | undefined },
+  ): void {
     this.db
       .prepare(
-        `INSERT INTO pool (container_id, address, control_token, state, created_at) VALUES (@containerId, @address, @controlToken, @state, @createdAt)
+        `INSERT INTO pool (container_id, address, control_token, state, created_at, level) VALUES (@containerId, @address, @controlToken, @state, @createdAt, @level)
          ON CONFLICT(container_id) DO UPDATE SET state = excluded.state`,
       )
-      .run(p);
+      .run({ ...p, level: p.level ?? "hot" });
   }
 
   allPool(): PoolEntry[] {
@@ -416,6 +468,7 @@ export class Store {
       controlToken: r.control_token as string,
       state: r.state as "starting" | "hot",
       createdAt: r.created_at as number,
+      level: (r.level as PoolLevel | undefined) ?? "hot",
     }));
   }
 
@@ -512,6 +565,109 @@ export class Store {
   ackReports(ids: string[]): void {
     const del = this.db.prepare("DELETE FROM reports WHERE id = ?");
     this.db.transaction(() => ids.forEach((id) => del.run(id)))();
+  }
+
+  // --- profile saves (P18, docs/lld/p18-profiles.md 4.7) ------------------------------------------
+
+  private toSave(r: Record<string, unknown>): ProfileSave {
+    return {
+      sessionId: r.session_id as string,
+      projectId: r.project_id as string,
+      profileId: r.profile_id as string,
+      version: r.version as number,
+      saveKey: r.save_key as string,
+      maxBytes: r.max_bytes as number,
+      state: r.state as ProfileSaveState,
+      bytes: (r.bytes as number | null) ?? null,
+      sha256: (r.sha256 as string | null) ?? null,
+    };
+  }
+
+  addProfileSave(s: Omit<ProfileSave, "state" | "bytes" | "sha256">): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO profile_saves (session_id, project_id, profile_id, version, save_key, max_bytes, state)
+         VALUES (@sessionId, @projectId, @profileId, @version, @saveKey, @maxBytes, 'pending')`,
+      )
+      .run(s);
+  }
+
+  getProfileSave(sessionId: string): ProfileSave | undefined {
+    const r = this.db
+      .prepare("SELECT * FROM profile_saves WHERE session_id = ?")
+      .get(sessionId) as Record<string, unknown> | undefined;
+    return r ? this.toSave(r) : undefined;
+  }
+
+  allProfileSaves(): ProfileSave[] {
+    return (
+      this.db.prepare("SELECT * FROM profile_saves").all() as Record<
+        string,
+        unknown
+      >[]
+    ).map((r) => this.toSave(r));
+  }
+
+  /** Move a save on, only from the state the caller saw. False if anything else moved it. */
+  advanceProfileSave(
+    sessionId: string,
+    from: ProfileSaveState,
+    to: ProfileSaveState,
+    written?: { bytes: number; sha256: string },
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          "UPDATE profile_saves SET state = ?, bytes = coalesce(?, bytes), sha256 = coalesce(?, sha256) WHERE session_id = ? AND state = ?",
+        )
+        .run(
+          to,
+          written?.bytes ?? null,
+          written?.sha256 ?? null,
+          sessionId,
+          from,
+        ).changes === 1
+    );
+  }
+
+  /**
+   * Queue the save's `profile` report and drop its row, data key included (`secure_delete`), in one
+   * transaction: exactly one report per writer, and nothing of the key left after it.
+   */
+  finishProfileSave(
+    sessionId: string,
+    outcome:
+      | { outcome: "saved"; bytes: number; sha256: string }
+      | { outcome: "failed"; reason: ProfileSaveFailure },
+    at: string,
+  ): Report | null {
+    return this.db.transaction(() => {
+      const s = this.getProfileSave(sessionId);
+      if (!s) return null;
+      this.db
+        .prepare("DELETE FROM profile_saves WHERE session_id = ?")
+        .run(sessionId);
+      return this.enqueueReport((id) => ({
+        id,
+        at,
+        kind: "profile",
+        sessionId: sessionId as never,
+        profileId: s.profileId as never,
+        version: s.version,
+        ...outcome,
+      }));
+    })();
+  }
+
+  /** Saves whose session is gone and whose report is not yet queued: reports still to come. */
+  unreportedSaveCount(): number {
+    return (
+      this.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM profile_saves WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+        )
+        .get() as { n: number }
+    ).n;
   }
 
   // --- recordings (W3) ---------------------------------------------------------------------------

@@ -15,6 +15,8 @@ import {
   type ProbeResponse,
   type ProbeVm,
   NODE_PROTOCOL_VERSION,
+  PROFILE_LIMITS,
+  type ProfileSaveFailure,
   RECORDING_FILE,
   RECORDING_LIMITS,
   RUNTIME_PORTS,
@@ -50,6 +52,7 @@ import {
   type Clock,
   type Failpoints,
   type Logger,
+  type ProfileStore,
 } from "@kestrel/shared";
 import {
   buildContainerSpec,
@@ -63,9 +66,18 @@ import type { EgressClient } from "./egress-client.js";
 import type { Firewall } from "./firewall.js";
 import type { GatewayHub } from "./gateway-hub.js";
 import { RecordingPuller } from "./recording-pull.js";
-import type { RuntimeClient } from "./runtime-client.js";
+import {
+  CLEAN_ENDS,
+  ProfileUnavailable,
+  SaveFailed,
+  checkSaved,
+  readBack,
+  readRestore,
+  sealAndPut,
+} from "./profile.js";
+import { ResponseTooLarge, type RuntimeClient } from "./runtime-client.js";
 import { SolverError, createSolver, type CaptchaSolver } from "./solver.js";
-import type { Binding, Store } from "./store.js";
+import type { Binding, PoolLevel, Store } from "./store.js";
 
 /** The agent's calls to the API's internal listener (C4's repair path). */
 export interface ApiClient {
@@ -121,6 +133,21 @@ export interface AgentConfig {
   recordingStopMs?: number;
   /** Send a session's `removed` report as soon as it is queued, not with the next heartbeat. Default on. */
   reportOnRemoval?: boolean;
+  /**
+   * P18: warm browsers to keep (runtimed and the display up, Chrome not launched), for sessions
+   * that restore a profile; counted against the same slots and headroom as hot ones. Default 0 (a
+   * Docker node's deployment sets 1; a microVM node restores a warm clone instead).
+   */
+  warmPool?: number;
+  /**
+   * P18: the Chrome major of this node's pinned runtime image, told to the API at registration. A
+   * node without one takes no profile session; a launched browser must report it.
+   */
+  chromeMajor?: number;
+  /** P18: the most a save may take, Chrome's exit included (default PROFILE_LIMITS.saveMs). */
+  profileSaveMs?: number;
+  /** P18: saves sealed and written at once (default PROFILE_SAVES_AT_ONCE). */
+  profileSavesAtOnce?: number;
   /** Where the API reaches this agent, sent at registration. */
   address: string;
   runtimeVersion: string;
@@ -168,6 +195,8 @@ export interface AgentDeps {
   harness?: boolean;
   /** A solver for a session's solver service (`docs/lld/captcha.md`); tests give a fake. */
   solver?: (config: CaptchaSolverConfig) => CaptchaSolver;
+  /** P18: the profile store; without it the node takes no profile session. */
+  profileStore?: ProfileStore;
 }
 
 export interface MicroVmHooks {
@@ -206,6 +235,9 @@ const REAP_MIN_FREE_MB = 4_096;
 
 /** How far back starts count towards the pool's size. */
 const DEMAND_WINDOW_MS = 10_000;
+
+/** P18: at most this many saves seal and write at once on a node (memory: about 4 x 128 MiB). */
+const PROFILE_SAVES_AT_ONCE = 4;
 
 /** A VM's recording is pulled this often; its guest holds 32 MiB, minutes of video, between pulls. */
 const RECORDING_PULL_MS = 2_000;
@@ -251,8 +283,16 @@ export class NodeAgent {
   private reconciling: Promise<void> | null = null;
   /** When recent starts arrived, for the demand-sized pool. */
   private recentStarts: number[] = [];
-  /** Pooled browsers being made, from the first Docker call until they are hot (or failed). */
-  private makingPool = new Set<Promise<boolean>>();
+  /** Pooled browsers being made, from the first Docker call until they are hot (or failed), and their level. */
+  private makingPool = new Map<Promise<boolean>, PoolLevel>();
+  /** Of `spawning`, how many are warm browsers (P18). */
+  private spawningWarm = 0;
+  /** When recent starts that restore a profile arrived, for the warm pool's size. */
+  private recentWarmStarts: number[] = [];
+  /** P18: saves being sealed and written now (their sessions are gone), and the queue for a turn. */
+  private sealing = new Set<string>();
+  private sealWaiters: (() => void)[] = [];
+  private resolvingSaves = false;
   /** Each container's recording volume, as made here: saves a Docker call per teardown (a restart falls back to inspect). */
   private volumeOf = new Map<string, string>();
   /** Stopped sessions' containers, frozen and waiting to be removed (deferRemoval). */
@@ -327,7 +367,9 @@ export class NodeAgent {
 
   describe(): NodeState {
     const bindings = this.store.allBindings();
-    const hot = this.store.allPool().filter((p) => p.state === "hot").length;
+    const pool = this.store.allPool().filter((p) => p.state === "hot");
+    const hot = pool.filter((p) => p.level === "hot").length;
+    const warm = pool.filter((p) => p.level === "warm").length;
     return {
       nodeId: this.c.nodeId as NodeState["nodeId"],
       epoch: this.store.epoch,
@@ -338,11 +380,15 @@ export class NodeAgent {
         free: Math.max(0, this.c.slotsTotal - bindings.length),
       },
       hotCount: hot,
+      warmCount: warm,
       sessions: bindings.map((b) => ({
         sessionId: b.sessionId as NodeState["sessions"][number]["sessionId"],
         state: b.state,
       })),
-      pendingReports: this.store.pendingReportCount(),
+      // A save still on its way (its session gone, its report not yet queued) is a report to come:
+      // the API must not decide the report was lost (docs/lld/p18-profiles.md section 5, rule 3).
+      pendingReports:
+        this.store.pendingReportCount() + this.store.unreportedSaveCount(),
     };
   }
 
@@ -448,7 +494,19 @@ export class NodeAgent {
       this.c.poolTarget,
       this.pulls ? 0 : (this.c.recordingPool ?? (this.d.volumes ? 1 : 0)),
     );
-    let hot = this.store.allPool().filter((p) => p.state === "hot");
+    // P18: warm browsers past their target are left over too.
+    const warm = this.store
+      .allPool()
+      .filter((p) => p.state === "hot" && p.level === "warm");
+    for (const p of warm.slice(this.c.warmPool ?? 0)) {
+      if (!this.store.takePool(p.containerId)) continue;
+      await this.removeContainer(p.containerId).catch(() => undefined);
+    }
+    const hotLevel = () =>
+      this.store
+        .allPool()
+        .filter((p) => p.state === "hot" && p.level === "hot");
+    let hot = hotLevel();
     // A node that pulls recordings out of VMs never pools a browser with a volume. One that has
     // one is a container left from recording in containers (MICROVM_RECORDING=docker): a session
     // given it would be told to keep fragments for a pull it may not know, so it goes.
@@ -463,7 +521,7 @@ export class NodeAgent {
         this.volumeOf.delete(p.containerId);
         await this.removeWithVolume(p.containerId, vol);
       }
-      hot = this.store.allPool().filter((p) => p.state === "hot");
+      hot = hotLevel();
     }
     for (const p of this.c.poolTarget === 0 ? hot : hot.slice(keep)) {
       if (!this.store.takePool(p.containerId)) continue;
@@ -472,6 +530,8 @@ export class NodeAgent {
       await this.removeWithVolume(p.containerId, vol);
     }
     await this.syncEgress();
+    // P18: saves a crash left behind, whose sessions are gone (section 4.7).
+    await this.resolveSaves();
     this.booted = true;
   }
 
@@ -482,6 +542,9 @@ export class NodeAgent {
       slotsTotal: this.c.slotsTotal,
       address: this.c.address,
       runtimeVersion: this.c.runtimeVersion,
+      ...(this.c.chromeMajor !== undefined
+        ? { chromeMajor: this.c.chromeMajor }
+        : {}),
     });
     this.store.epoch = res.epoch;
   }
@@ -540,6 +603,22 @@ export class NodeAgent {
       return { result: "refused", reason: "stop already received" };
     if (this.sessionCount() >= this.c.slotsTotal)
       return { result: "refused", reason: "no slot" };
+    if (req.profile) {
+      // Another node may take it (K5): refused, not failed.
+      if (!this.d.profileStore || this.c.chromeMajor === undefined)
+        return {
+          result: "refused",
+          reason: "profiles are not configured on this node",
+        };
+      if (
+        req.profile.restore &&
+        req.profile.restore.chromeMajor > this.c.chromeMajor
+      )
+        return {
+          result: "refused",
+          reason: `the profile needs Chrome ${req.profile.restore.chromeMajor}; this node runs ${this.c.chromeMajor}`,
+        };
+    }
 
     const t0 = this.now();
     this.store.insertBinding({
@@ -568,6 +647,17 @@ export class NodeAgent {
       this.store.setSolves(id);
       this.solverConfigs.set(id, req.captcha.solver);
     }
+    // P18: a writer's save, with its data key, kept so a restarted agent can still finish it. The
+    // restore key stays in memory, for this start only (T-73).
+    if (req.profile?.save)
+      this.store.addProfileSave({
+        sessionId: id,
+        projectId: req.projectId as string,
+        profileId: req.profile.profileId as string,
+        version: req.profile.save.version,
+        saveKey: req.profile.save.key,
+        maxBytes: req.profile.save.maxBytes,
+      });
     await this.d.failpoints.hit("node.start.after_binding");
 
     const p = this.doStart(id, req, t0);
@@ -590,6 +680,28 @@ export class NodeAgent {
     t0: number,
   ): Promise<StartResponse> {
     let lastError = "unknown";
+    // P18: the profile is read, checked and decrypted before any browser is spent on it: a blob
+    // that is missing, damaged or does not decrypt would fail in every browser (section 4.1).
+    const restore = req.profile?.restore;
+    let archive: Buffer | undefined;
+    const r0 = this.now();
+    if (restore) {
+      try {
+        archive = await readRestore(
+          this.d.profileStore as ProfileStore,
+          req.projectId as string,
+          req.profile!,
+        );
+      } catch (e) {
+        const reason =
+          e instanceof ProfileUnavailable ? e.message : "profile unreadable";
+        this.d.log.warn({ session: id, reason }, "profile unavailable");
+        this.store.deleteBinding(id);
+        this.finishSave(id, { outcome: "failed", reason: "not_started" });
+        return { result: "failed", reason, code: "profile_unavailable" };
+      }
+    }
+    const level: PoolLevel = restore ? "warm" : "hot";
     for (let attempt = 0; attempt <= this.c.startRetries; attempt++) {
       let held: { containerId: string; address: string } | null = null;
       try {
@@ -599,6 +711,7 @@ export class NodeAgent {
         const got = await this.acquire(
           id,
           Boolean(req.recording) && !this.pulls,
+          level,
         );
         this.mark(id, `acquired:${got.path}`);
         held = { containerId: got.containerId, address: got.address };
@@ -608,6 +721,22 @@ export class NodeAgent {
         // The policy exists before the browser is usable (G7).
         await this.applyPolicy(got.address, id, req.network);
         await this.d.failpoints.hit("node.start.after_policy");
+
+        // P18: the profile goes into the empty profile directory, then Chrome starts on it.
+        if (archive) {
+          await this.d.runtime.putProfile(got.address, got.token, archive);
+          const launched = await this.d.runtime.launch(got.address, got.token, {
+            viewport: req.viewport,
+          });
+          // The browser is untrusted, and a profile opened by an older Chrome than wrote it is
+          // damaged: it must run this node's own Chrome (T-78).
+          const major = Number(/(\d+)\./.exec(launched.chromeVersion)?.[1]);
+          if (major !== this.c.chromeMajor)
+            throw new Error(
+              `the browser runs Chrome ${launched.chromeVersion}, not this node's ${this.c.chromeMajor}`,
+            );
+          this.mark(id, "profile");
+        }
 
         // W3. Recorded only if the container has a volume. The volume is kept from now on, so even a
         // start that fails later leaves nothing unaccounted for: retention removes it.
@@ -673,14 +802,33 @@ export class NodeAgent {
         const ready = this.now();
         this.mark(id, "configured");
         this.logSlowStart(id);
+        // A restored profile is the warm path, whichever browser it went into (section 6.2).
+        const startPath = restore ? "warm" : got.path;
         this.store.updateBinding(id, {
           state: "ready",
           readyAt: ready,
           idleAt: ready + req.idleTimeoutMs,
+          startPath,
         });
+        if (restore)
+          this.store.enqueueEvent((rid) => ({
+            id: rid,
+            at: new Date(ready).toISOString(),
+            kind: "event",
+            sessionId: id as never,
+            event: {
+              type: "profile.restored",
+              data: {
+                profileId: req.profile!.profileId,
+                version: restore.version,
+                bytes: restore.bytes,
+                ms: Math.max(0, ready - r0),
+              },
+            },
+          }));
         return {
           result: "ready",
-          startPath: got.path,
+          startPath,
           readyMs: ready - t0,
           deviceScaleFactor: cfg.deviceScaleFactor,
         };
@@ -725,6 +873,7 @@ export class NodeAgent {
     }
     this.startMarks.delete(id);
     this.store.deleteBinding(id);
+    this.finishSave(id, { outcome: "failed", reason: "not_started" });
     return { result: "failed", reason: lastError };
   }
 
@@ -737,13 +886,16 @@ export class NodeAgent {
   private async acquire(
     sessionId: string,
     recording = false,
+    /** P18: a profile restore takes a warm browser (Chrome not launched); never a hot one. */
+    level: PoolLevel = "hot",
   ): Promise<{
     containerId: string;
     address: string;
     token: string;
     path: "hot" | "cold";
   }> {
-    this.recentStarts.push(this.now());
+    if (level === "warm") this.recentWarmStarts.push(this.now());
+    else this.recentStarts.push(this.now());
     // The container is recorded against the session the moment it is ours, before anything slow:
     // reconciliation must never be able to judge a container that a start is still waiting on.
     const bind = (
@@ -766,7 +918,7 @@ export class NodeAgent {
     const takeHot = async (path: "hot" | "cold") => {
       const hot = this.store
         .allPool()
-        .filter((p) => p.state === "hot")
+        .filter((p) => p.state === "hot" && p.level === level)
         .filter((p) => !recording || this.volumeOf.has(p.containerId))
         .sort(
           (a, b) =>
@@ -782,7 +934,10 @@ export class NodeAgent {
         const alive = await this.d.runtime
           .health(p.address, p.controlToken)
           .then(
-            (h) => h.status === "ready" && h.chromeReady,
+            (h) =>
+              level === "warm"
+                ? h.status === "warm"
+                : h.status === "ready" && h.chromeReady,
             () => false,
           );
         if (alive) return taken;
@@ -809,10 +964,10 @@ export class NodeAgent {
       performance.now() + (recording ? 0 : (this.c.warmWaitMs ?? WARM_WAIT_MS));
     for (;;) {
       const warming = [
-        ...this.makingPool,
+        ...[...this.makingPool].filter(([, l]) => l === level).map(([p]) => p),
         ...this.store
           .allPool()
-          .filter((p) => p.state === "starting")
+          .filter((p) => p.state === "starting" && p.level === level)
           .map((p) => this.poolStarting.get(p.containerId))
           .filter((w): w is Promise<boolean> => w !== undefined),
       ];
@@ -871,10 +1026,16 @@ export class NodeAgent {
       (made, token) => {
         bound = bind(made.id, made.address as string, token, "cold");
       },
+      undefined,
+      level,
     );
     this.mark(sessionId, "cold:created");
     const info = created.info;
-    const isReady = await this.waitReady(info.address as string, created.token);
+    const isReady = await this.waitReady(
+      info.address as string,
+      created.token,
+      level,
+    );
     this.mark(sessionId, "cold:ready");
     if (!isReady) {
       this.store.updateBinding(sessionId, {
@@ -902,13 +1063,20 @@ export class NodeAgent {
     run: (spec: Docker.ContainerCreateOptions) => Promise<ContainerInfo> = (
       spec,
     ) => this.d.docker.run(spec),
+    level: PoolLevel = "hot",
   ): Promise<{ info: ContainerInfo; token: string }> {
     const token = hex(24);
     const creation = hex(8);
     this.creating.add(creation);
     try {
       const volume = withVolume ? await this.makeRecordingVolume() : undefined;
-      const spec = buildContainerSpec(this.d.dockerSpec, role, token, volume);
+      const spec = buildContainerSpec(
+        this.d.dockerSpec,
+        role,
+        token,
+        volume,
+        level,
+      );
       spec.Labels = { ...spec.Labels, [CREATION_LABEL]: creation };
       let info: ContainerInfo;
       try {
@@ -954,7 +1122,12 @@ export class NodeAgent {
    * listens, its health call is held until the browser is ready, so the agent learns it at once;
    * until then (and with an older runtimed) it polls briefly.
    */
-  private async waitReady(address: string, token: string): Promise<boolean> {
+  private async waitReady(
+    address: string,
+    token: string,
+    /** A warm browser is ready when runtimed and the display are up and Chrome waits (P18). */
+    level: PoolLevel = "hot",
+  ): Promise<boolean> {
     const until = this.now() + this.c.readyTimeoutMs;
     for (;;) {
       const left = until - this.now();
@@ -965,8 +1138,15 @@ export class NodeAgent {
           2000,
           Math.max(0, Math.min(5_000, left)),
         );
-        if (h.status === "ready" && h.chromeReady) return true;
+        if (
+          level === "warm"
+            ? h.status === "warm"
+            : h.status === "ready" && h.chromeReady
+        )
+          return true;
         if (h.status === "failed") return false;
+        // A warm browser whose Chrome is running is not one a profile can go into.
+        if (level === "warm" && h.status === "ready") return false;
       } catch {
         /* not up yet */
       }
@@ -993,6 +1173,23 @@ export class NodeAgent {
   }
 
   /**
+   * P18: warm browsers wanted now: `warmPool`, grown by the profile restores of the last
+   * DEMAND_WINDOW_MS, as the hot pool is by its starts. None when the node keeps none.
+   */
+  private warmWanted(): number {
+    const target = this.c.warmPool ?? 0;
+    if (target === 0) return 0;
+    const now = this.now();
+    this.recentWarmStarts = this.recentWarmStarts.filter(
+      (t) => now - t < DEMAND_WINDOW_MS,
+    );
+    return Math.min(
+      this.c.poolMax ?? this.c.slotsTotal + (this.c.poolHeadroom ?? 0),
+      Math.max(target, this.recentWarmStarts.length),
+    );
+  }
+
+  /**
    * Top the pool up from slots no session is using, a few at a time (G5). Runs every second, and
    * at once when a pooled browser is taken or a session ends, so its replacement starts warming
    * while the next request is still on its way rather than up to a second later.
@@ -1012,12 +1209,26 @@ export class NodeAgent {
     const inFlight =
       this.spawning +
       this.store.allPool().filter((p) => p.state === "starting").length;
-    const want = Math.min(
-      this.poolWanted() - have,
-      this.c.refillAtOnce - inFlight,
-      room,
+    // Each level is topped up to what it wants, hot first, within one budget of room and of
+    // browsers in flight (P18: warm browsers share the slots and the headroom).
+    const pool = this.store.allPool();
+    const warmHave =
+      pool.filter((p) => p.level === "warm").length + this.spawningWarm;
+    const budget = Math.min(this.c.refillAtOnce - inFlight, room);
+    const wantHot = Math.min(this.poolWanted() - (have - warmHave), budget);
+    const wantWarm = Math.min(
+      this.warmWanted() - warmHave,
+      budget - Math.max(0, wantHot),
     );
-    for (let i = 0; i < want; i++) {
+    for (let i = 0; i < wantWarm; i++) {
+      this.spawning++;
+      this.spawningWarm++;
+      const made = this.spawnPooled(false, "warm");
+      this.makingPool.set(made, "warm");
+      void made.finally(() => this.makingPool.delete(made));
+      this.spawn(made.then(() => undefined));
+    }
+    for (let i = 0; i < wantHot; i++) {
       this.spawning++;
       const withVolume =
         !this.pulls &&
@@ -1030,27 +1241,37 @@ export class NodeAgent {
       // Waitable from the moment it begins, not only once Docker has made the container: a start
       // finding the pool empty waits for whichever of these is ready first.
       const made = this.spawnPooled(withVolume);
-      this.makingPool.add(made);
+      this.makingPool.set(made, "hot");
       void made.finally(() => this.makingPool.delete(made));
       this.spawn(made.then(() => undefined));
     }
   }
 
   /** Resolves true once the new pooled browser is hot (and in the pool), false if it never is. */
-  private async spawnPooled(withVolume: boolean): Promise<boolean> {
+  private async spawnPooled(
+    withVolume: boolean,
+    level: PoolLevel = "hot",
+  ): Promise<boolean> {
     let created: { info: ContainerInfo; token: string };
     try {
-      created = await this.createContainer("pool", withVolume, (made, tok) =>
-        this.store.upsertPool({
-          containerId: made.id,
-          address: made.address as string,
-          controlToken: tok,
-          state: "starting",
-          createdAt: this.now(),
-        }),
+      created = await this.createContainer(
+        "pool",
+        withVolume,
+        (made, tok) =>
+          this.store.upsertPool({
+            containerId: made.id,
+            address: made.address as string,
+            controlToken: tok,
+            state: "starting",
+            createdAt: this.now(),
+            level,
+          }),
+        undefined,
+        level,
       );
     } catch (e) {
       this.spawning--;
+      if (level === "warm") this.spawningWarm--;
       if (withVolume) this.spawningWithVolume--;
       this.d.log.warn(
         { err: e instanceof Error ? e.message : String(e) },
@@ -1060,8 +1281,9 @@ export class NodeAgent {
     }
     const { info, token } = created;
     this.spawning--;
+    if (level === "warm") this.spawningWarm--;
     if (withVolume) this.spawningWithVolume--;
-    const ready = this.waitReady(info.address as string, token).then(
+    const ready = this.waitReady(info.address as string, token, level).then(
       async (ok) => {
         if (ok && this.store.allPool().some((p) => p.containerId === info.id)) {
           this.store.upsertPool({
@@ -1070,6 +1292,7 @@ export class NodeAgent {
             controlToken: token,
             state: "hot",
             createdAt: this.now(),
+            level,
           });
           return true;
         }
@@ -1292,6 +1515,10 @@ export class NodeAgent {
         },
       });
     await this.d.failpoints.hit("node.stop.after_policy_cleared");
+    // P18: a writer's save, after the route and the policy are gone (no client can change the
+    // state while it is read, no page can reach the network while Chrome closes), and before the
+    // browser goes. Only the pull holds the slot; sealing and writing come after the removal.
+    const save = await this.pullSave(id, b, reason);
     // Known from creation, or from the container's label after a restart (reconcile); a volume
     // missed here (a teardown during boot) is an orphan that volume reaping removes.
     const volume =
@@ -1315,6 +1542,8 @@ export class NodeAgent {
       // and the API should know it now, not at the next heartbeat
       if (this.c.reportOnRemoval ?? true) void this.flushSoon();
     });
+    // Counted as on its way before the binding goes, so nothing takes it for a save left behind.
+    if (save.archive) this.sealing.add(id);
     this.store.finishBinding(id, (rid) => ({
       id: rid,
       at: new Date(this.now()).toISOString(),
@@ -1326,6 +1555,165 @@ export class NodeAgent {
       egressBytesDown: bytes.down,
     }));
     this.gatewayAttachmentsDrop(id);
+    if (save.archive) this.spawn(this.writeSave(id, save.archive));
+    else if (save.failure)
+      this.finishSave(id, { outcome: "failed", reason: save.failure });
+  }
+
+  // --- profile saves (P18, docs/lld/p18-profiles.md 4.4 and 4.7) ------------------------------
+
+  /**
+   * Ask a writer's browser for its profile and check the answer as hostile (section 4.4), within
+   * the save's budget. Returns the checked archive, or why there is none; nothing for a session
+   * that does not save.
+   */
+  private async pullSave(
+    id: string,
+    b: Binding,
+    reason: EndReason,
+  ): Promise<{ archive?: Buffer; failure?: ProfileSaveFailure }> {
+    const s = this.store.getProfileSave(id);
+    if (!s || s.state === "written") return {};
+    // HLD 8.11: a failed session does not write back.
+    if (b.readyAt === null) return { failure: "not_started" };
+    if (!CLEAN_ENDS.includes(reason)) return { failure: "unclean_end" };
+    if (!b.address || !b.controlToken || !b.containerId)
+      return { failure: "browser_gone" };
+    const signal = AbortSignal.timeout(
+      this.c.profileSaveMs ?? PROFILE_LIMITS.saveMs,
+    );
+    let answer;
+    try {
+      answer = await this.d.runtime.saveProfile(
+        b.address,
+        b.controlToken,
+        s.maxBytes,
+        signal,
+      );
+    } catch (e) {
+      if (e instanceof ResponseTooLarge) return { failure: "too_large" };
+      return { failure: signal.aborted ? "timeout" : "browser_gone" };
+    }
+    if (!answer.ok)
+      return {
+        failure:
+          answer.status === 413
+            ? "too_large"
+            : answer.status === 409 && answer.code === "unclean"
+              ? "chrome_did_not_exit"
+              : answer.status === 409
+                ? "browser_gone"
+                : "invalid_archive",
+      };
+    let archive: Buffer;
+    try {
+      archive = checkSaved(answer.body, s.maxBytes);
+    } catch (e) {
+      return {
+        failure: e instanceof SaveFailed ? e.reason : "invalid_archive",
+      };
+    }
+    if (s.state === "pending")
+      this.store.advanceProfileSave(id, "pending", "pulled");
+    await this.d.failpoints.hit("node.profile.after_pull");
+    return { archive };
+  }
+
+  /** Seal and write a pulled archive, a few at a time, then queue the report. Off the slot's path. */
+  private async writeSave(id: string, archive: Buffer): Promise<void> {
+    const limit = this.c.profileSavesAtOnce ?? PROFILE_SAVES_AT_ONCE;
+    while (this.sealingNow >= limit)
+      await new Promise<void>((r) => this.sealWaiters.push(r));
+    this.sealingNow++;
+    try {
+      const s = this.store.getProfileSave(id);
+      if (!s) return;
+      let outcome:
+        | { outcome: "saved"; bytes: number; sha256: string }
+        | { outcome: "failed"; reason: ProfileSaveFailure };
+      try {
+        const written = await sealAndPut(
+          this.d.profileStore as ProfileStore,
+          s,
+          archive,
+        );
+        this.store.advanceProfileSave(id, s.state, "written", written);
+        await this.d.failpoints.hit("node.profile.after_write");
+        outcome = { outcome: "saved", ...written };
+      } catch (e) {
+        if (e instanceof FailpointError) throw e;
+        outcome = {
+          outcome: "failed",
+          reason: e instanceof SaveFailed ? e.reason : "storage_error",
+        };
+      }
+      this.finishSave(id, outcome);
+    } finally {
+      this.sealingNow--;
+      this.sealWaiters.shift()?.();
+      this.sealing.delete(id);
+    }
+  }
+  private sealingNow = 0;
+
+  /** Queue a writer's one `profile` report and drop its save, key included. */
+  private finishSave(
+    id: string,
+    outcome:
+      | { outcome: "saved"; bytes: number; sha256: string }
+      | { outcome: "failed"; reason: ProfileSaveFailure },
+  ): void {
+    const r = this.store.finishProfileSave(
+      id,
+      outcome,
+      new Date(this.now()).toISOString(),
+    );
+    if (r && (this.c.reportOnRemoval ?? true)) void this.flushSoon();
+  }
+
+  /**
+   * Saves whose session is gone and that nothing is writing: left by a crash (section 4.7). A
+   * written one only needs its report. Any other was pulled into a memory that is gone: if its
+   * version is in the store this writer wrote it before the crash, and it is read back and
+   * reported; otherwise its browser is gone with the session, and the save failed.
+   */
+  async resolveSaves(): Promise<void> {
+    if (this.resolvingSaves || !this.d.profileStore) return;
+    this.resolvingSaves = true;
+    try {
+      const live = new Set(this.store.allBindings().map((b) => b.sessionId));
+      for (const s of this.store.allProfileSaves()) {
+        if (live.has(s.sessionId) || this.sealing.has(s.sessionId)) continue;
+        if (s.state === "written" && s.bytes !== null && s.sha256 !== null) {
+          this.finishSave(s.sessionId, {
+            outcome: "saved",
+            bytes: s.bytes,
+            sha256: s.sha256,
+          });
+          continue;
+        }
+        let back;
+        try {
+          back = await readBack(this.d.profileStore, s);
+        } catch (e) {
+          this.finishSave(s.sessionId, {
+            outcome: "failed",
+            reason: e instanceof SaveFailed ? e.reason : "storage_error",
+          });
+          continue;
+        }
+        if (back) {
+          this.store.advanceProfileSave(s.sessionId, s.state, "written", back);
+          this.finishSave(s.sessionId, { outcome: "saved", ...back });
+        } else
+          this.finishSave(s.sessionId, {
+            outcome: "failed",
+            reason: "browser_gone",
+          });
+      }
+    } finally {
+      this.resolvingSaves = false;
+    }
   }
 
   /** A session's egress policy. Start and resync both use this, so neither can drop the proxy (T-47). */
@@ -1412,6 +1800,7 @@ export class NodeAgent {
   tick(): void {
     const now = this.now();
     this.expireProbes(now);
+    if (this.booted) this.spawn(this.resolveSaves());
     for (const b of this.store.allBindings()) {
       // A teardown that failed (Docker would not remove the container) is not forgotten: try again, at most every 5 s.
       if (

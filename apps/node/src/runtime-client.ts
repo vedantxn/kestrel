@@ -1,4 +1,8 @@
+import { z } from "zod";
 import {
+  LaunchResponse,
+  maxProfileArchiveBytes,
+  type LaunchRequest,
   RuntimeCaptchaChallenges,
   RuntimeCaptchaInject,
   type CaptchaInjectRequest,
@@ -85,6 +89,34 @@ export interface RuntimeClient {
     after: number,
     timeoutMs?: number,
   ): Promise<{ meta: RecordingFragments; body: Buffer }>;
+  /**
+   * P18: write a profile archive into a warm browser's empty profile directory (`PUT /profile`).
+   * The answer is only a summary, checked against what was sent by the caller.
+   */
+  putProfile(
+    address: string,
+    token: string,
+    archive: Uint8Array,
+    timeoutMs?: number,
+  ): Promise<ProfileWritten>;
+  /** P18: start Chrome in a warm browser and set its restored cookies (`POST /launch`). */
+  launch(
+    address: string,
+    token: string,
+    req: LaunchRequest,
+    timeoutMs?: number,
+  ): Promise<LaunchResponse>;
+  /**
+   * P18: close the browser's Chrome and read its profile archive (`POST /profile/save`). The body
+   * is read with a cap of the largest archive `maxBytes` allows, under `signal`, never following a
+   * redirect; nothing in it is checked here beyond its size: the caller parses it as hostile.
+   */
+  saveProfile(
+    address: string,
+    token: string,
+    maxBytes: number,
+    signal: AbortSignal,
+  ): Promise<ProfileSaveAnswer>;
   /** G-23: raw connections from inside a probe VM (a clone rekeyed as a probe). */
   probe(
     address: string,
@@ -92,6 +124,25 @@ export interface RuntimeClient {
     req: ProbeRequest,
     timeoutMs?: number,
   ): Promise<ProbeResponse>;
+}
+
+/** What `PUT /profile` answers: what runtimed wrote. */
+export const ProfileWritten = z.strictObject({
+  files: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+  cookies: z.number().int().nonnegative(),
+});
+export type ProfileWritten = z.infer<typeof ProfileWritten>;
+
+/** What `POST /profile/save` came to: the archive, or the browser's refusal (its status and code). */
+export type ProfileSaveAnswer =
+  { ok: true; body: Buffer } | { ok: false; status: number; code: string };
+
+/** Thrown when a body passes its cap. */
+export class ResponseTooLarge extends Error {
+  constructor() {
+    super("the container's response is too large");
+  }
 }
 
 const MAX_RESPONSE_BYTES = 16 * 1024;
@@ -112,7 +163,7 @@ async function readLimitedBytes(
     size += value.length;
     if (size > max) {
       await reader.cancel();
-      throw new Error("the container's response is too large");
+      throw new ResponseTooLarge();
     }
     chunks.push(value);
   }
@@ -359,6 +410,89 @@ export class HttpRuntimeClient implements RuntimeClient {
     if (body.length !== expected)
       throw new Error(`runtime ${path}: the body is not the size described`);
     return { meta, body };
+  }
+
+  async putProfile(
+    address: string,
+    token: string,
+    archive: Uint8Array,
+    timeoutMs = 15_000,
+  ): Promise<ProfileWritten> {
+    const path = RUNTIME_PATHS.profile;
+    let res: Response;
+    try {
+      res = await fetch(`http://${address}:${this.port}${path}`, {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/octet-stream",
+        },
+        body: archive,
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: "error",
+      });
+    } catch (e) {
+      throw detail(path, e);
+    }
+    const text = await readLimited(res);
+    if (!res.ok) throw new RuntimeHttpError(path, res.status);
+    return ProfileWritten.parse(JSON.parse(text));
+  }
+
+  launch(
+    address: string,
+    token: string,
+    req: LaunchRequest,
+    // Chrome's own start, waited for by runtimed (up to 30 s), and the cookies set after it.
+    timeoutMs = 40_000,
+  ): Promise<LaunchResponse> {
+    return this.call(
+      address,
+      token,
+      "POST",
+      RUNTIME_PATHS.launch,
+      LaunchResponse,
+      req,
+      timeoutMs,
+    );
+  }
+
+  async saveProfile(
+    address: string,
+    token: string,
+    maxBytes: number,
+    signal: AbortSignal,
+  ): Promise<ProfileSaveAnswer> {
+    const path = RUNTIME_PATHS.profileSave;
+    let res: Response;
+    try {
+      res = await fetch(`http://${address}:${this.port}${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+        signal,
+        // A guest must not be able to point this root process at another address.
+        redirect: "error",
+      });
+    } catch (e) {
+      if (signal.aborted) throw signal.reason;
+      throw detail(path, e);
+    }
+    if (res.status !== 200) {
+      // A refusal's body is a small JSON error; anything else in it is ignored.
+      const text = await readLimited(res).catch(() => "");
+      let code = "";
+      try {
+        const j = JSON.parse(text) as { error?: unknown };
+        if (typeof j.error === "string") code = j.error.slice(0, 64);
+      } catch {
+        /* not JSON */
+      }
+      return { ok: false, status: res.status, code };
+    }
+    return {
+      ok: true,
+      body: await readLimitedBytes(res, maxProfileArchiveBytes(maxBytes)),
+    };
   }
 
   probe(

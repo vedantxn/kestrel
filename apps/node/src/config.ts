@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+/** Compose passes an unset variable as an empty string. */
+const unsetIfEmpty = <T extends z.ZodType>(t: T) =>
+  z.preprocess((v) => (v === "" ? undefined : v), t);
+
 export const Env = z.object({
   NODE_ID: z.string().regex(/^[a-z][a-z0-9]{0,15}$/),
   /** The shared secret with the API (K6), or the path of a file holding it. */
@@ -72,6 +76,23 @@ export const Env = z.object({
    * harness runs. Served on HARNESS_SOCKET (default: harness.sock beside AGENT_SOCKET), mode 0600.
    */
   KESTREL_HARNESS: z.enum(["on", "off"]).default("off"),
+  /**
+   * P18 (docs/lld/p18-profiles.md 4.5): the profile store, shared with the API (one directory on
+   * the data volume). With CHROME_VERSION, it lets this node take profile sessions.
+   */
+  PROFILE_STORE_DIR: unsetIfEmpty(z.string().optional()),
+  /** Owner given to the store's directories and files this agent makes (the API's uid, which deletes). */
+  PROFILE_STORE_UID: unsetIfEmpty(z.coerce.number().int().min(0).optional()),
+  PROFILE_STORE_GID: unsetIfEmpty(z.coerce.number().int().min(0).optional()),
+  /** The pinned runtime image's Chrome (runtime/CHROME_VERSION), e.g. 154.0.8037.92: its major is told to the API. */
+  CHROME_VERSION: unsetIfEmpty(
+    z
+      .string()
+      .regex(/^\d{2,4}\.\d+\.\d+\.\d+$/)
+      .optional(),
+  ),
+  /** Warm browsers to keep for profile restores; default 1 on a Docker node, 0 on a microVM node. */
+  WARM_POOL: unsetIfEmpty(z.coerce.number().int().min(0).optional()),
   HARNESS_SOCKET: z.string().optional(),
   LOG_LEVEL: z.string().default("info"),
 });

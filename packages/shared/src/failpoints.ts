@@ -29,6 +29,8 @@ export const FAILPOINT_NAMES = [
   "node.stop.after_route_removed",
   "node.stop.after_policy_cleared",
   "node.stop.after_container_removed", // before the binding is deleted and the report queued
+  "node.profile.after_pull", // P18: a writer's profile is pulled and checked; its browser not yet removed
+  "node.profile.after_write", // P18: its blob is written and the save marked written; no report yet
 ] as const;
 
 export type FailpointName = (typeof FAILPOINT_NAMES)[number] | (string & {});

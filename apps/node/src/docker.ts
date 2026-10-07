@@ -31,6 +31,11 @@ export function buildContainerSpec(
   controlToken: string,
   /** W3: the container's recording volume, if the node could make one. */
   recordingVolume?: string,
+  /**
+   * P18: a `warm` browser starts runtimed and the display only; Chrome waits for a profile and
+   * `POST /launch` (KESTREL_CHROME=deferred). Its arguments, once launched, are any browser's.
+   */
+  level: "hot" | "warm" = "hot",
 ): Docker.ContainerCreateOptions {
   const tmpfs = (size: number) =>
     `rw,noexec,nosuid,nodev,size=${size}m,uid=10001,gid=10001,mode=0700`;
@@ -41,11 +46,13 @@ export function buildContainerSpec(
       `KESTREL_CONTROL_TOKEN=${controlToken}`,
       `KESTREL_PROXY=http://${cfg.bridgeIp}:${cfg.egressPort}`,
       `KESTREL_NODE=${cfg.nodeId}`,
+      ...(level === "warm" ? ["KESTREL_CHROME=deferred"] : []),
     ],
     Labels: {
       "kestrel.node": cfg.nodeId,
       "kestrel.role": role,
       ...(recordingVolume ? { "kestrel.volume": recordingVolume } : {}),
+      ...(level === "warm" ? { "kestrel.level": "warm" } : {}),
     },
     // No exposed or published ports: the agent and gateway reach the container by its address on the internal network.
     HostConfig: {
