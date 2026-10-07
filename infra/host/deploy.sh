@@ -124,6 +124,9 @@ if [ "$NO_BUILD" != 1 ]; then
   # Firecracker call answered 400). Untagged images no container uses go; a running or pooled
   # browser's image stays.
   docker image prune -f >/dev/null
+  # Most of it was BuildKit's cache: each platform build adds its npm install and compile layers
+  # (29 GB of cache, all reclaimable). Keep 5 GB so the next build stays quick.
+  docker builder prune -f --keep-storage 5gb >/dev/null
 fi
 if [ "$RUNTIME_A" = microvm ] && { [ "$NO_BUILD" != 1 ] || [ ! -f /data/kestrel-vm/template/mem ] || [ ! -f /data/kestrel-vm/template-warm/mem ]; }; then
   # Each template is a 2 GiB memory snapshot plus its state; say so plainly rather than let
