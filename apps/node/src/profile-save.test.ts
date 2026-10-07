@@ -387,6 +387,9 @@ describe("a writer's save", () => {
         "chrome_did_not_exit",
       ],
       ["500", { ok: false, status: 500, code: "" }, "invalid_archive"],
+      // a runtimed from before profiles: no save route, so nothing can be saved from it
+      ["404", { ok: false, status: 404, code: "not found" }, "browser_gone"],
+      ["405", { ok: false, status: 405, code: "" }, "browser_gone"],
       ["a stall", "hang", "timeout"],
       ["a reset", "fail", "browser_gone"],
     ];

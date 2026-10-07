@@ -1725,7 +1725,17 @@ export class NodeAgent {
       if (e instanceof ResponseTooLarge) return { failure: "too_large" };
       return { failure: signal.aborted ? "timeout" : "browser_gone" };
     }
-    if (!answer.ok)
+    if (!answer.ok) {
+      // A runtimed from before profiles has no save route (404, or 405/501 from something else):
+      // nothing of the profile can be read from this browser. No contract reason says "this browser
+      // cannot save"; `browser_gone` (nothing to save from) is the nearest, and the log says why.
+      if ([404, 405, 501].includes(answer.status)) {
+        this.d.log.warn(
+          { session: id, status: answer.status },
+          "the browser's runtime cannot save a profile (a browser from before profiles?)",
+        );
+        return { failure: "browser_gone" };
+      }
       return {
         failure:
           answer.status === 413
@@ -1736,6 +1746,7 @@ export class NodeAgent {
                 ? "browser_gone"
                 : "invalid_archive",
       };
+    }
     let archive: Buffer;
     try {
       archive = checkSaved(answer.body, s.maxBytes);
