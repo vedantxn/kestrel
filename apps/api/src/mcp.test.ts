@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Session } from "@kestrel/contracts";
+import { ListProfilesResponse, Profile, Session } from "@kestrel/contracts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -315,6 +315,138 @@ describe("session tools", () => {
       code: "quota_exceeded",
       retryable: true,
     });
+  });
+});
+
+describe("profile tools", () => {
+  const profile = (r: CallToolResult): Profile => {
+    expect(r.isError).toBeFalsy();
+    return Profile.parse(body(r));
+  };
+  const profiles = (r: CallToolResult) => {
+    expect(r.isError).toBeFalsy();
+    return ListProfilesResponse.parse(body(r));
+  };
+
+  it("has create_profile and list_profiles, and no tool that deletes a profile", async () => {
+    const { tools } = await (await connect()).listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toEqual(
+      expect.arrayContaining(["create_profile", "list_profiles"]),
+    );
+    expect(names.filter((n) => /delete|remove/.test(n))).toEqual([]);
+    const create = tools.find((t) => t.name === "create_session");
+    expect(Object.keys(create?.inputSchema.properties ?? {})).toContain(
+      "profile",
+    );
+  });
+
+  it("log in once, reuse it: a writer saves, a later session starts from the saved version", async () => {
+    await start({ profiles: true });
+    const c = await connect();
+    const p = profile(
+      await call(c, "create_profile", {
+        name: "work",
+        metadata: { from: "mcp" },
+      }),
+    );
+    expect(p).toMatchObject({
+      name: "work",
+      metadata: { from: "mcp" },
+      version: 0,
+      inUseBy: null,
+    });
+
+    const writer = session(
+      await call(c, "create_session", { profile: { id: p.id, persist: true } }),
+    );
+    expect(writer.options.profile).toEqual({ id: p.id, persist: true });
+    expect(
+      profiles(await call(c, "list_profiles")).data.find((x) => x.id === p.id)
+        ?.inUseBy,
+    ).toBe(writer.id);
+
+    // One writer at a time: a second is refused with a retryable conflict on profile.id.
+    expect(
+      errorOf(
+        await call(c, "create_session", {
+          profile: { id: p.id, persist: true },
+        }),
+      ),
+    ).toMatchObject({
+      code: "conflict",
+      retryable: true,
+      param: "profile.id",
+    });
+
+    session(await call(c, "stop_session", { sessionId: writer.id }));
+    await env.syncAll();
+    const saved = profiles(await call(c, "list_profiles", { limit: 1 }));
+    expect(saved.data[0]).toMatchObject({
+      id: p.id,
+      version: 1,
+      inUseBy: null,
+      savedBySessionId: writer.id,
+    });
+
+    const reader = session(
+      await call(c, "create_session", { profile: { id: p.id } }),
+    );
+    expect(reader.startPath).toBe("warm");
+    expect(reader.options.profile).toEqual({ id: p.id, persist: false });
+  });
+
+  it("list_profiles pages with a cursor", async () => {
+    await start({ profiles: true });
+    const c = await connect();
+    for (const name of ["a", "b", "c"])
+      profile(await call(c, "create_profile", { name }));
+    const first = profiles(await call(c, "list_profiles", { limit: 2 }));
+    expect(first.data.map((x) => x.name)).toEqual(["c", "b"]);
+    expect(first.nextCursor).not.toBeNull();
+    const second = profiles(
+      await call(c, "list_profiles", { limit: 2, cursor: first.nextCursor }),
+    );
+    expect(second.data.map((x) => x.name)).toEqual(["a"]);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it("is scoped to the key's project, and validates against the REST contract", async () => {
+    await start({ profiles: true });
+    const mine = profile(await call(await connect(), "create_profile", {}));
+    const other = await connect(env.project2.key);
+    expect(profiles(await call(other, "list_profiles")).data).toEqual([]);
+    expect(
+      errorOf(
+        await call(other, "create_session", { profile: { id: mine.id } }),
+      ),
+    ).toMatchObject({ code: "not_found", param: "profile.id" });
+    // Caught by the contract: names are plain text.
+    expect(
+      errorOf(await call(other, "create_profile", { name: "a\u0000b" })),
+    ).toMatchObject({ code: "invalid_request", param: "name" });
+    // A second profile with the same name is a conflict that retrying will not fix.
+    profile(await call(other, "create_profile", { name: "dup" }));
+    expect(
+      errorOf(await call(other, "create_profile", { name: "dup" })),
+    ).toMatchObject({ code: "conflict", retryable: false, param: "name" });
+  });
+
+  it("answers invalid_request on a deployment without profiles", async () => {
+    const c = await connect();
+    expect(errorOf(await call(c, "create_profile", {}))).toMatchObject({
+      code: "invalid_request",
+    });
+    expect(errorOf(await call(c, "list_profiles"))).toMatchObject({
+      code: "invalid_request",
+    });
+    expect(
+      errorOf(
+        await call(c, "create_session", {
+          profile: { id: "prf_01k6e4m9t8f2xq3w5y7z9a1b2c" },
+        }),
+      ),
+    ).toMatchObject({ code: "invalid_request", param: "profile" });
   });
 });
 
