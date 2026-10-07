@@ -100,6 +100,10 @@ export const CLONE_ALLOWED: { pattern: RegExp; why: string }[] = [
     why: "LevelDB's own text log and write-ahead log of databases Chrome made empty at template build: timestamps and bookkeeping, no page data (the case checks that storage and service workers are empty in a new session)",
   },
   {
+    pattern: /^file:component_crx_cache\/metadata\.json$/,
+    why: 'The component updater\'s cache index, {"hashes":{}} in every browser that has it: background networking is off, so no component is ever downloaded into it (seen on the AWS host, 2026-10-07)',
+  },
+  {
     pattern: /^Local State#uninstall_metrics\.installation_date2$/,
     why: "Chrome's install time, kept for uninstall metrics: not exposed to pages, and the template's age is no secret between sessions",
   },

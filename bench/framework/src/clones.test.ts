@@ -174,6 +174,7 @@ describe("what a snapshot copies into every clone (G-24)", () => {
       "file:Default/Service Worker/Database/000003.log",
       "file:Default/Sync Data/LevelDB/LOG",
       "Local State#user_experience_metrics.low_entropy_source3",
+      "file:component_crx_cache/metadata.json",
     ])
       expect(ok(item), item).toBe(true);
     for (const item of [
@@ -184,6 +185,7 @@ describe("what a snapshot copies into every clone (G-24)", () => {
       "file:Default/Cookies",
       "file:Default/Service Worker/Database/MANIFEST-000001",
       "file:Default/IndexedDB/https_example.com_0.indexeddb.leveldb/000003.log",
+      "file:component_crx_cache/abcdef.crx",
     ])
       expect(ok(item), item).toBe(false);
   });
