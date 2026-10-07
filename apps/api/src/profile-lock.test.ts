@@ -8,7 +8,7 @@ import {
   idToUuid,
   type Report,
 } from "@kestrel/contracts";
-import { profileBlobKey } from "@kestrel/shared";
+import { profileBlobKey, sealProfileBlob } from "@kestrel/shared";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { collectProfiles } from "./profile-sessions.js";
 import { makeEnv, type Env, type EnvOptions } from "./test/harness.js";
@@ -641,6 +641,61 @@ describe("releasing the lock (section 5)", () => {
     e.nodes.a!.reports.push(late);
     await e.syncAll();
     expect(await profileEvents(e, w.id)).toHaveLength(1);
+  });
+
+  it("never gives a version number twice, so a late save cannot replace a later writer's version", async () => {
+    const e = await setup();
+    const p = await newProfile(e);
+    const uuid = idToUuid(p.id);
+    const store = e.ctx.profiles!.store;
+    // The first writer's report is lost for good; its lock is released (no_report).
+    e.nodes.a!.profileSave = "lost";
+    const w1 = await start(e, { id: p.id, persist: true });
+    const late = lastStart(e).profile!.save!;
+    expect(late.version).toBe(1);
+    await stop(e, w1);
+    e.clock.advance(7_000);
+    await e.syncAll();
+    expect((await getProfile(e, p.id)).inUseBy).toBeNull();
+
+    // The next writer gets a new number, and commits.
+    e.nodes.a!.profileSave = "auto";
+    e.nodes.a!.profileArchive = Buffer.from("the second writer");
+    const w2 = await start(e, { id: p.id, persist: true });
+    expect(lastStart(e).profile!.save!.version).toBe(2);
+    await stop(e, w2);
+    expect((await getProfile(e, p.id)).version).toBe(2);
+
+    // The first writer's save finally lands, with its own key and number: it replaces nothing.
+    const ids = {
+      projectUuid: e.projectId,
+      profileUuid: uuid,
+      version: late.version,
+    };
+    const blob = await sealProfileBlob(
+      Buffer.from(late.key, "base64"),
+      ids,
+      Buffer.from("the first writer"),
+    );
+    await store.put(profileBlobKey(e.projectId, uuid, late.version), blob);
+    // ... and a put onto the committed version is refused
+    await expect(
+      store.put(profileBlobKey(e.projectId, uuid, 2), blob),
+    ).rejects.toMatchObject({ code: "exists" });
+    const r = await start(e, { id: p.id });
+    expect(e.nodes.a!.restored.get(r.id)?.toString()).toBe("the second writer");
+
+    // The late file has no row: the orphan collection removes it, and keeps version 2.
+    await collectProfiles(e.ctx, Date.now() + 2 * 60 * 60_000);
+    expect((await store.list("")).map((b) => b.key)).toEqual([
+      profileBlobKey(e.projectId, uuid, 2),
+    ]);
+    // The next writer after that gets 3.
+    await start(e, { id: p.id, persist: true });
+    expect(lastStart(e).profile).toMatchObject({
+      restore: { version: 2 },
+      save: { version: 3 },
+    });
   });
 
   it("applies a repeated saved report once", async () => {

@@ -210,6 +210,9 @@ model Profile {
   metadata        Json             @default("{}")
   /// 0: nothing saved yet.
   currentVersion  Int              @default(0) @map("current_version")
+  /// The highest version ever given to a writer. A version number is never given twice, so a
+  /// late save of a writer whose lock was released cannot land on a later writer's version.
+  lastVersion     Int              @default(0) @map("last_version")
   /// The one session that may write the next version (`persist: true`); the write lock.
   writerSessionId String?          @unique @map("writer_session_id") @db.Uuid
   writerSince     DateTime?        @map("writer_since") @db.Timestamptz(3)

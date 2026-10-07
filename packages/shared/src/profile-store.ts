@@ -4,10 +4,10 @@ import {
   chown,
   lstat,
   mkdir,
+  link,
   open,
   readdir,
   realpath,
-  rename,
   rmdir,
   unlink,
 } from "node:fs/promises";
@@ -23,7 +23,10 @@ import { join, sep } from "node:path";
  * anything a browser said, and every key is checked again here.
  */
 export interface ProfileStore {
-  /** Write a version atomically: a reader sees all of it or nothing. */
+  /**
+   * Write a version atomically: a reader sees all of it or nothing. A version is never replaced:
+   * if the key exists, the put is refused (`exists`) and what is there stays.
+   */
   put(key: string, data: Uint8Array): Promise<void>;
   /** Read a version, which must be a regular file of exactly `bytes`. */
   get(key: string, bytes: number): Promise<Buffer>;
@@ -42,7 +45,12 @@ export interface ProfileStoreEntry {
 }
 
 export type ProfileStoreErrorCode =
-  "storage_full" | "storage_error" | "missing" | "invalid";
+  | "storage_full"
+  | "storage_error"
+  | "missing"
+  | "invalid"
+  /** The version is already there: a version is never replaced. */
+  | "exists";
 
 export class ProfileStoreError extends Error {
   constructor(
@@ -152,11 +160,12 @@ export class FsProfileStore implements ProfileStore {
     try {
       const dir = await this.dir(dirs, true);
       const final = join(dir, file);
-      // A version is rewritten only by its own writer after a restart; never through a link.
+      // A version, once written, is never replaced: not by a late writer, not through a link.
       try {
         const st = await lstat(final);
-        if (!st.isFile())
-          throw new ProfileStoreError("invalid", "not a regular file");
+        throw st.isFile()
+          ? new ProfileStoreError("exists", "the version is already written")
+          : new ProfileStoreError("invalid", "not a regular file");
       } catch (e) {
         if (errnoOf(e) !== "ENOENT") throw e;
       }
@@ -177,7 +186,17 @@ export class FsProfileStore implements ProfileStore {
         } finally {
           await fh.close();
         }
-        await rename(tmp, final);
+        // link(2) fails if anything is at the final name, so two writers racing to one key
+        // cannot replace each other: the second is refused.
+        await link(tmp, final).catch((e: unknown) => {
+          if (errnoOf(e) === "EEXIST")
+            throw new ProfileStoreError(
+              "exists",
+              "the version is already written",
+            );
+          throw e;
+        });
+        await unlink(tmp);
       } catch (e) {
         await unlink(tmp).catch(() => {});
         throw e;

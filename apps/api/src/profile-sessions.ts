@@ -63,13 +63,19 @@ export async function admitProfile(
     new AppError("not_found", "No such profile.", { param: "profile.id" });
   if (!uuid) throw notFound();
 
+  let saveVersion = 0;
   if (opt.persist) {
-    // Take the lock; it also locks the row, so the read below cannot change under us.
-    const taken = await tx.$executeRaw`
-      UPDATE profiles SET writer_session_id = ${sessionUuid}::uuid, writer_since = ${now}
+    // Take the lock; it also locks the row, so the read below cannot change under us. The version
+    // this writer will save is a number no writer of this profile has had before, even one whose
+    // lock was released without a commit: a late save of an earlier writer can never land on it.
+    const taken = await tx.$queryRaw<{ last_version: number }[]>`
+      UPDATE profiles
+         SET writer_session_id = ${sessionUuid}::uuid, writer_since = ${now},
+             last_version = GREATEST(last_version, current_version) + 1
        WHERE id = ${uuid}::uuid AND project_id = ${auth.projectId}::uuid
-         AND deleted_at IS NULL AND writer_session_id IS NULL`;
-    if (taken === 0) {
+         AND deleted_at IS NULL AND writer_session_id IS NULL
+      RETURNING last_version`;
+    if (taken.length === 0) {
       const live = await tx.profile.count({
         where: { id: uuid, projectId: auth.projectId, deletedAt: null },
       });
@@ -80,6 +86,7 @@ export async function admitProfile(
         { retryable: true, param: "profile.id" },
       );
     }
+    saveVersion = taken[0]!.last_version;
   }
 
   // The current version and its row in one statement, so a reader never sees a profile whose
@@ -124,13 +131,9 @@ export async function admitProfile(
 
   let save: AdmittedProfile["save"];
   if (opt.persist) {
-    const version = current + 1;
+    const version = saveVersion;
     const dataKey = newDataKey();
     const kek = deriveProjectKey(cfg.master, auth.projectId);
-    // A pending row left at this number by a writer whose release was lost is stale: the lock is ours.
-    await tx.profileVersion.deleteMany({
-      where: { profileId: uuid, version, state: "pending" },
-    });
     await tx.profileVersion.create({
       data: {
         profileId: uuid,
@@ -357,7 +360,8 @@ export async function applyProfileReport(
   });
   if (
     profile.writer_session_id !== sessionUuid ||
-    profile.current_version !== r.version - 1 ||
+    // Versions are never reused, so the one being committed is above the current one.
+    profile.current_version >= r.version ||
     !pending ||
     pending.state !== "pending" ||
     pending.sessionId !== sessionUuid ||
@@ -405,7 +409,7 @@ export async function applyProfileReport(
       id: profileUuid,
       writerSessionId: sessionUuid,
       deletedAt: null,
-      currentVersion: r.version - 1,
+      currentVersion: profile.current_version,
     },
     data: {
       currentVersion: r.version,
@@ -420,7 +424,7 @@ export async function applyProfileReport(
   await tx.profileVersion.updateMany({
     where: {
       profileId: profileUuid,
-      version: r.version - 1,
+      version: profile.current_version,
       state: "committed",
     },
     data: { state: "superseded", supersededAt: at },

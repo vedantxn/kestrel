@@ -96,16 +96,29 @@ describe("FsProfileStore", () => {
   it("writes atomically: only a temporary file is left before the rename", async () => {
     await store.put(key(1), Buffer.from("old"));
     const dir = join(root, project, "profiles", profile);
-    // a crash between write and rename leaves a temporary file and the old version
+    // a crash between write and link leaves a temporary file and the old version
     writeFileSync(join(dir, ".0123456789abcdef.tmp"), "half");
     expect((await store.get(key(1), 3)).toString()).toBe("old");
     expect((await store.list("")).map((e) => e.key)).toEqual([key(1)]);
-    // and a rewrite of the same version replaces it whole
-    await store.put(key(1), Buffer.from("newer"));
-    expect((await store.get(key(1), 5)).toString()).toBe("newer");
     expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([
       ".0123456789abcdef.tmp",
     ]);
+  });
+
+  it("never replaces a version: a second put of the key is refused and the first stays", async () => {
+    await store.put(key(1), Buffer.from("committed"));
+    expect(await code(store.put(key(1), Buffer.from("late writer")))).toBe(
+      "exists",
+    );
+    expect((await store.get(key(1), 9)).toString()).toBe("committed");
+    // two writers racing to one key: exactly one wins, and no temporary file is left
+    const both = await Promise.all([
+      code(store.put(key(2), Buffer.from("aaaa"))),
+      code(store.put(key(2), Buffer.from("bbbb"))),
+    ]);
+    expect(both.sort()).toEqual(["exists", "ok"]);
+    const dir = join(root, project, "profiles", profile);
+    expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
   });
 
   it("sweeps old temporary files and keeps young ones and versions", async () => {
