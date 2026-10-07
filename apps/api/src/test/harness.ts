@@ -71,11 +71,12 @@ export interface EnvOptions {
   profiles?: boolean | { maxBytes?: number };
 }
 
+/** In the order the API's own transactions take them (sessions before profiles), to keep deadlocks rare. */
 const TABLES = [
-  "profile_versions",
-  "profiles",
   "session_events",
   "sessions",
+  "profile_versions",
+  "profiles",
   "idempotency_keys",
   "api_keys",
   "nodes",
@@ -83,10 +84,22 @@ const TABLES = [
   "orgs",
 ];
 
+/**
+ * Empty every table. A previous test's background work (a stop dispatched without waiting) may
+ * still hold row locks in another order, which Postgres resolves by aborting one side: retry.
+ */
 export async function resetDb(db: PrismaClient): Promise<void> {
-  await db.$executeRawUnsafe(
-    `TRUNCATE ${TABLES.join(", ")} RESTART IDENTITY CASCADE`,
-  );
+  for (let i = 1; ; i++) {
+    try {
+      await db.$executeRawUnsafe(
+        `TRUNCATE ${TABLES.join(", ")} RESTART IDENTITY CASCADE`,
+      );
+      return;
+    } catch (e) {
+      if (i >= 5 || !/40P01|deadlock/.test(String(e))) throw e;
+      await new Promise((r) => setTimeout(r, 50 * i));
+    }
+  }
 }
 
 export async function makeEnv(opts: EnvOptions = {}): Promise<Env> {
