@@ -12,6 +12,9 @@ export const CAPTCHA_LABEL: Record<CaptchaProvider, string> = {
   cloudflare_challenge: "Cloudflare challenge",
   arkose: "Arkose",
   datadome: "DataDome",
+  perimeterx: "HUMAN (PerimeterX)",
+  geetest: "GeeTest",
+  aws_waf: "AWS WAF",
 };
 
 export type EventTone = "default" | "good" | "warn" | "bad";
@@ -96,6 +99,24 @@ export function describeEvent(e: SessionEvent): {
         title: `CAPTCHA gone: ${CAPTCHA_LABEL[e.data.provider]}`,
         detail: "",
         tone: "good",
+      };
+    case "captcha.solving":
+      return {
+        title: `Solving CAPTCHA: ${CAPTCHA_LABEL[e.data.provider]}`,
+        detail: e.data.host ?? "",
+        tone: "default",
+      };
+    case "captcha.solved":
+      return {
+        title: `CAPTCHA solved: ${CAPTCHA_LABEL[e.data.provider]}`,
+        detail: `in ${Math.round(e.data.durationMs)} ms${e.data.callback ? "" : " · token set, no callback"}`,
+        tone: "good",
+      };
+    case "captcha.failed":
+      return {
+        title: `CAPTCHA not solved: ${CAPTCHA_LABEL[e.data.provider]}`,
+        detail: humanize(e.data.reason),
+        tone: "warn",
       };
   }
 }
