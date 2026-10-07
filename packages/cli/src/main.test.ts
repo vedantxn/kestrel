@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Session, SessionEvent } from "@kestrel/sdk";
+import type { Profile, Session, SessionEvent } from "@kestrel/sdk";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { USAGE, main, table } from "./main.js";
 
@@ -453,6 +453,211 @@ describe("recording, live view and screenshots", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("not recorded");
     expect(existsSync(out)).toBe(false);
+  });
+});
+
+const PRF = "prf_01k6e4m9t8f2xq3w5y7z9a1b2c";
+
+function profile(overrides: Partial<Profile> = {}): Profile {
+  return {
+    id: PRF,
+    name: "work",
+    metadata: {},
+    version: 0,
+    bytes: 0,
+    savedAt: null,
+    savedBySessionId: null,
+    chromeMajor: null,
+    inUseBy: null,
+    createdAt: "2026-10-07T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** The API's answer while another session is saving into the profile. */
+const busy = () => ({
+  status: 409,
+  body: {
+    error: {
+      code: "conflict",
+      message:
+        "Another session is saving into this profile; only one may at a time.",
+      retryable: true,
+      requestId: "req-7",
+      param: "profile.id",
+    },
+  },
+});
+
+describe("profiles", () => {
+  it("create sends the name and metadata and prints the profile", async () => {
+    const r = await cli(
+      [
+        "profiles",
+        "create",
+        "--name",
+        "work",
+        "--metadata",
+        "team=a",
+        "--metadata",
+        "url=https://x.test/?a=b",
+      ],
+      () => ({
+        status: 201,
+        body: profile({ metadata: { team: "a", url: "https://x.test/?a=b" } }),
+      }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]!.method).toBe("POST");
+    expect(r.calls[0]!.url.pathname).toBe("/v1/profiles");
+    expect(r.calls[0]!.body).toEqual({
+      name: "work",
+      metadata: { team: "a", url: "https://x.test/?a=b" },
+    });
+    expect(r.stdout).toMatch(new RegExp(`^id\\s+${PRF}$`, "m"));
+    expect(r.stdout).toMatch(/^version\s+0 \(nothing saved yet\)$/m);
+    expect(r.stdout).toMatch(
+      /^metadata\s+team=a url=https:\/\/x.test\/\?a=b$/m,
+    );
+    expect(r.stdout).toContain(
+      `kestrel sessions create --profile ${PRF} --persist`,
+    );
+  });
+
+  it("create with no flags sends an empty body", async () => {
+    const r = await cli(["profiles", "create", "--json"], () => ({
+      status: 201,
+      body: profile({ name: null }),
+    }));
+    expect(r.calls[0]!.body).toEqual({});
+    expect(JSON.parse(r.stdout)).toEqual(profile({ name: null }));
+  });
+
+  it("list prints a table and the next cursor", async () => {
+    const r = await cli(
+      ["profiles", "list", "--limit", "2", "--cursor", "c1"],
+      ok({
+        data: [
+          profile({
+            version: 3,
+            bytes: 4096,
+            savedAt: "2026-10-07T11:00:00.000Z",
+            inUseBy: ID,
+          }),
+          profile({ id: "prf_2", name: null }),
+        ],
+        nextCursor: "next",
+      }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]!.url.pathname).toBe("/v1/profiles");
+    expect(r.calls[0]!.url.search).toBe("?limit=2&cursor=c1");
+    expect(r.stdout).toBe(
+      [
+        "ID                              NAME  VERSION  BYTES  SAVED                     IN USE BY",
+        `${PRF}  work  3        4096   2026-10-07T11:00:00.000Z  ${ID}`,
+        "prf_2                                 0        0",
+        "",
+        "More: kestrel profiles list --cursor next",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("get and delete take an id", async () => {
+    const got = await cli(
+      ["profiles", "get", PRF],
+      ok(profile({ version: 2, chromeMajor: 154, savedBySessionId: ID })),
+    );
+    expect(got.calls[0]!.url.pathname).toBe(`/v1/profiles/${PRF}`);
+    expect(got.stdout).toMatch(/^version\s+2$/m);
+    expect(got.stdout).toMatch(/^chrome\s+154$/m);
+    expect(got.stdout).toMatch(new RegExp(`^saved by\\s+${ID}$`, "m"));
+
+    const deleted = await cli(["profiles", "delete", PRF], () => ({
+      status: 204,
+      body: undefined,
+    }));
+    expect(deleted.code).toBe(0);
+    expect(deleted.calls[0]!.method).toBe("DELETE");
+    expect(deleted.calls[0]!.url.pathname).toBe(`/v1/profiles/${PRF}`);
+    expect(deleted.stdout).toBe(`${PRF} deleted\n`);
+  });
+
+  it("sessions create --profile --persist starts from a profile and saves into it", async () => {
+    const withProfile = session({
+      startPath: "warm",
+      options: { ...session().options, profile: { id: PRF, persist: true } },
+    });
+    const r = await cli(
+      ["sessions", "create", "--profile", PRF, "--persist"],
+      () => ({ status: 201, body: withProfile }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]!.body).toMatchObject({
+      profile: { id: PRF, persist: true },
+    });
+    expect(r.stdout).toMatch(
+      new RegExp(`^profile\\s+${PRF} \\(saves at a clean end\\)$`, "m"),
+    );
+    expect(r.stdout).toMatch(/^start path\s+warm$/m);
+
+    const reader = await cli(["sessions", "create", "--profile", PRF], () => ({
+      status: 201,
+      body: session(),
+    }));
+    expect(reader.calls[0]!.body).toMatchObject({ profile: { id: PRF } });
+    expect(
+      (reader.calls[0]!.body as { profile: object }).profile,
+    ).not.toHaveProperty("persist");
+    expect(reader.stdout).toMatch(/^profile\s+-$/m);
+  });
+
+  it("a busy profile fails at once, or is waited for with --wait-for-profile", async () => {
+    const r = await cli(
+      ["sessions", "create", "--profile", PRF, "--persist"],
+      busy,
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("409 conflict: Another session is saving");
+    expect(r.calls).toHaveLength(1);
+
+    let n = 0;
+    const waited = await cli(
+      [
+        "sessions",
+        "create",
+        "--profile",
+        PRF,
+        "--persist",
+        "--wait-for-profile",
+        "30000",
+      ],
+      () => (++n < 3 ? busy() : { status: 201, body: session() }),
+    );
+    expect(waited.code).toBe(0);
+    expect(waited.calls).toHaveLength(3);
+  });
+
+  it("refuses --persist and --wait-for-profile without --profile, and bad metadata", async () => {
+    for (const [argv, message] of [
+      [["sessions", "create", "--persist"], "--persist needs --profile"],
+      [
+        ["sessions", "create", "--wait-for-profile", "1000"],
+        "--wait-for-profile needs --profile",
+      ],
+      [
+        ["profiles", "create", "--metadata", "team"],
+        "--metadata must look like key=value",
+      ],
+      [["profiles", "get"], "profiles get takes <id>"],
+      [["profiles", "frobnicate"], "unknown command: profiles frobnicate"],
+    ] as const) {
+      const r = await cli([...argv], ok({}));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(message);
+      expect(r.calls).toHaveLength(0);
+    }
   });
 });
 

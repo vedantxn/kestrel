@@ -5,6 +5,7 @@ import {
   Kestrel,
   KestrelError,
   type CreateSessionRequest,
+  type Profile,
   type Session,
   type SessionEvent,
   type SessionStatus,
@@ -40,9 +41,18 @@ Commands:
                                 send reCAPTCHA, hCaptcha and Turnstile to the
                                 deployment's solver service (its page URL and
                                 site key go to that third party)
+                  [--profile prf_id [--persist] [--wait-for-profile ms]]
+                                start from a saved profile; --persist saves
+                                the browser's state back into it when the
+                                session ends cleanly (one such session at a
+                                time; --wait-for-profile waits for the other)
   sessions list [--status s] [--limit n] [--cursor c]
   sessions get <id>
   sessions stop <id>
+  profiles create [--name n] [--metadata key=value]...
+  profiles list [--limit n] [--cursor c]
+  profiles get <id>
+  profiles delete <id>          delete a profile and every saved version
   logs <id> [--follow]          a session's events; --follow polls until it ends
   connect-url <id>              print the session's wss:// URL (it contains a token)
   live <id> [--control] [--ttl ms]
@@ -101,6 +111,9 @@ const COMMANDS: Record<string, Command> = {
       "proxy-sticky-minutes": { type: "string" },
       timezone: { type: "string" },
       "solve-captchas": { type: "boolean" },
+      profile: { type: "string" },
+      persist: { type: "boolean" },
+      "wait-for-profile": { type: "string" },
     },
     args: [],
     async run(k, _args, v, io) {
@@ -119,7 +132,19 @@ const COMMANDS: Record<string, Command> = {
       req.proxy = proxy(v, io);
       if (typeof v.timezone === "string") req.timezone = v.timezone;
       if (v["solve-captchas"] === true) req.captcha = { solve: true };
-      const s = await k.sessions.create(req, { signal: io.signal });
+      if (typeof v.profile === "string")
+        req.profile = {
+          id: v.profile,
+          ...(v.persist === true ? { persist: true } : {}),
+        };
+      else if (v.persist === true || v["wait-for-profile"] !== undefined)
+        throw new UsageError(
+          `--${v.persist === true ? "persist" : "wait-for-profile"} needs --profile prf_id`,
+        );
+      const s = await k.sessions.create(req, {
+        signal: io.signal,
+        waitForProfileMs: int(v, "wait-for-profile"),
+      });
       if (v.json) return json(io, s);
       io.stdout(details(s));
       io.stdout(`\nConnect with: kestrel connect-url ${s.id}\n`);
@@ -181,6 +206,84 @@ const COMMANDS: Record<string, Command> = {
       const s = await k.sessions.stop(id!, { signal: io.signal });
       if (v.json) return json(io, s);
       io.stdout(`${s.id} ${s.status}\n`);
+      return 0;
+    },
+  },
+
+  "profiles create": {
+    options: {
+      name: { type: "string" },
+      metadata: { type: "string", multiple: true },
+    },
+    args: [],
+    async run(k, _args, v, io) {
+      const p = await k.profiles.create(
+        {
+          name: v.name as string | undefined,
+          metadata: metadata(v.metadata as string[] | undefined),
+        },
+        { signal: io.signal },
+      );
+      if (v.json) return json(io, p);
+      io.stdout(profileDetails(p));
+      io.stdout(
+        `\nLog in once with: kestrel sessions create --profile ${p.id} --persist\n`,
+      );
+      return 0;
+    },
+  },
+
+  "profiles list": {
+    options: {
+      limit: { type: "string" },
+      cursor: { type: "string" },
+    },
+    args: [],
+    async run(k, _args, v, io) {
+      const page = await k.profiles.list(
+        { limit: int(v, "limit"), cursor: v.cursor as string | undefined },
+        { signal: io.signal },
+      );
+      if (v.json) return json(io, page);
+      io.stdout(
+        table([
+          ["ID", "NAME", "VERSION", "BYTES", "SAVED", "IN USE BY"],
+          ...page.data.map((p) => [
+            p.id,
+            p.name ?? "",
+            String(p.version),
+            String(p.bytes),
+            p.savedAt ?? "",
+            p.inUseBy ?? "",
+          ]),
+        ]),
+      );
+      if (page.nextCursor)
+        io.stdout(
+          `\nMore: kestrel profiles list --cursor ${page.nextCursor}\n`,
+        );
+      return 0;
+    },
+  },
+
+  "profiles get": {
+    options: {},
+    args: ["id"],
+    async run(k, [id], v, io) {
+      const p = await k.profiles.get(id!, { signal: io.signal });
+      if (v.json) return json(io, p);
+      io.stdout(profileDetails(p));
+      return 0;
+    },
+  },
+
+  "profiles delete": {
+    options: {},
+    args: ["id"],
+    async run(k, [id], v, io) {
+      await k.profiles.delete(id!, { signal: io.signal });
+      if (v.json) return json(io, { id, deleted: true });
+      io.stdout(`${id} deleted\n`);
       return 0;
     },
   },
@@ -293,7 +396,7 @@ async function run(argv: string[], io: Io): Promise<number> {
     io.stdout(USAGE);
     return 0;
   }
-  const words = argv[0] === "sessions" ? 2 : 1;
+  const words = argv[0] === "sessions" || argv[0] === "profiles" ? 2 : 1;
   const name = argv.slice(0, words).join(" ");
   const cmd = COMMANDS[name];
   if (!cmd) throw new UsageError(`unknown command: ${name}`);
@@ -336,6 +439,21 @@ function int(v: Values, flag: string): number | undefined {
       `--${flag} must be a whole number, got ${String(raw)}`,
     );
   return Number(raw);
+}
+
+/** `--metadata key=value`, repeated. The API checks the keys and values. */
+function metadata(
+  raw: string[] | undefined,
+): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const out: Record<string, string> = {};
+  for (const pair of raw) {
+    const eq = pair.indexOf("=");
+    if (eq < 1)
+      throw new UsageError(`--metadata must look like key=value, got ${pair}`);
+    out[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return out;
 }
 
 function viewport(raw: string): { width: number; height: number } {
@@ -460,6 +578,12 @@ function details(s: Session): string {
     ],
     ["timezone", s.options.timezone ?? "-"],
     ["solve captchas", s.options.captcha?.solve ? "yes" : "no"],
+    [
+      "profile",
+      s.options.profile
+        ? `${s.options.profile.id}${s.options.profile.persist ? " (saves at a clean end)" : ""}`
+        : "-",
+    ],
     ["browser seconds", String(s.usage.browserSeconds)],
     [
       "egress bytes",
@@ -477,6 +601,25 @@ function details(s: Session): string {
     ],
   ];
   const meta = Object.entries(s.options.metadata);
+  if (meta.length)
+    rows.push(["metadata", meta.map(([k, v]) => `${k}=${v}`).join(" ")]);
+  return table(rows);
+}
+
+/** One profile as `key  value` lines. */
+function profileDetails(p: Profile): string {
+  const rows: [string, string][] = [
+    ["id", p.id],
+    ["name", p.name ?? "-"],
+    ["version", p.version === 0 ? "0 (nothing saved yet)" : String(p.version)],
+    ["bytes", String(p.bytes)],
+    ["saved", p.savedAt ?? "-"],
+    ["saved by", p.savedBySessionId ?? "-"],
+    ["chrome", p.chromeMajor === null ? "-" : String(p.chromeMajor)],
+    ["in use by", p.inUseBy ?? "-"],
+    ["created", p.createdAt],
+  ];
+  const meta = Object.entries(p.metadata);
   if (meta.length)
     rows.push(["metadata", meta.map(([k, v]) => `${k}=${v}`).join(" ")]);
   return table(rows);
