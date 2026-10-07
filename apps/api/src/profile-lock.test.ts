@@ -6,6 +6,7 @@ import {
   Profile,
   Session,
   idToUuid,
+  newId,
   type Report,
 } from "@kestrel/contracts";
 import { profileBlobKey, sealProfileBlob } from "@kestrel/shared";
@@ -833,5 +834,77 @@ describe("releasing the lock (section 5)", () => {
     const r = await start(e, { id: p.id });
     await stop(e, r);
     expect(await types(e, r.id)).not.toContain("profile.save_failed");
+  });
+});
+
+describe("collection", () => {
+  /** The test's store, with `list` held until the test lets it go. */
+  function holdList(e: Env) {
+    const store = e.ctx.profiles!.store;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let lists = 0;
+    e.ctx.profiles = {
+      ...e.ctx.profiles!,
+      store: {
+        put: (k, d) => store.put(k, d),
+        get: (k, b) => store.get(k, b),
+        delete: (k) => store.delete(k),
+        sweep: (ms, now) => store.sweep(ms, now),
+        list: async (prefix) => {
+          lists++;
+          await held;
+          return store.list(prefix);
+        },
+      },
+    };
+    return { release, lists: () => lists };
+  }
+
+  it("never holds up the sweeper's tick", async () => {
+    const e = await setup();
+    const h = holdList(e);
+    const tick = e.sweeper.tick().then(() => "ticked");
+    const hung = new Promise((r) => setTimeout(() => r("hung"), 2_000));
+    expect(await Promise.race([tick, hung])).toBe("ticked");
+    h.release();
+  });
+
+  it("does not run two at once", async () => {
+    const e = await setup();
+    const h = holdList(e);
+    const one = e.sweeper.collect();
+    const two = e.sweeper.collect();
+    await new Promise((r) => setTimeout(r, 50));
+    h.release();
+    await Promise.all([one, two]);
+    expect(h.lists()).toBe(1);
+    // and a later one runs again
+    await e.sweeper.collect();
+    expect(h.lists()).toBe(2);
+  });
+
+  it("looks up orphaned blobs in batches, not one query per blob", async () => {
+    const e = await setup();
+    const store = e.ctx.profiles!.store;
+    for (let i = 0; i < 30; i++)
+      await store.put(
+        profileBlobKey(e.projectId, idToUuid(newId("prf")), 1),
+        Buffer.from("x"),
+      );
+    let queries = 0;
+    e.ctx.db = e.db.$extends({
+      query: {
+        profileVersion: {
+          async $allOperations({ args, query }) {
+            queries++;
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as Env["db"];
+    await collectProfiles(e.ctx, Date.now() + 2 * 60 * 60_000);
+    expect(await store.list("")).toEqual([]);
+    expect(queries).toBeLessThanOrEqual(2);
   });
 });

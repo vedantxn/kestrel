@@ -42,17 +42,29 @@ export class Sweeper {
   private lastTick: { wall: number; mono: number } | null = null;
   private timer: NodeJS.Timeout | undefined;
   private running = false;
-  private lastProfileCollect = -Infinity;
+  private collectTimer: NodeJS.Timeout | undefined;
+  /** The collection in progress, if any: a second never starts beside it. */
+  private collecting: Promise<void> | null = null;
 
   constructor(private readonly ctx: Ctx) {}
 
   start(): void {
     this.timer = setInterval(() => void this.tick(), TIMINGS.sweeperIntervalMs);
     this.timer.unref();
+    // P18: profile collection runs on its own timer, never inside a tick: a slow store or many
+    // blobs must not delay ending stuck starts or declaring a node lost.
+    if (this.ctx.profiles) {
+      this.collectTimer = setInterval(
+        () => void this.collect(),
+        PROFILE_COLLECT_MS,
+      );
+      this.collectTimer.unref();
+    }
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.collectTimer) clearInterval(this.collectTimer);
   }
 
   /** For tests and the internal health endpoint. */
@@ -63,15 +75,16 @@ export class Sweeper {
   }
 
   /** P18: profile collection, on its own; a store failure never fails the tick. */
-  async collect(nowMs: number): Promise<void> {
-    try {
-      await collectProfiles(this.ctx, nowMs);
-    } catch (e) {
-      this.ctx.log.warn(
-        { err: e instanceof Error ? e.message : String(e) },
-        "profile collection failed",
-      );
-    }
+  collect(nowMs: number = this.ctx.clock.now()): Promise<void> {
+    this.collecting ??= collectProfiles(this.ctx, nowMs)
+      .catch((e: unknown) => {
+        this.ctx.log.warn(
+          { err: e instanceof Error ? e.message : String(e) },
+          "profile collection failed",
+        );
+      })
+      .finally(() => (this.collecting = null));
+    return this.collecting;
   }
 
   async tick(): Promise<void> {
@@ -229,13 +242,6 @@ export class Sweeper {
         this.connectedSince ??= mono;
         for (const s of outcome.toStop)
           void dispatchStop(ctx, s.sessionId, s.nodeId, "start_timeout");
-        if (
-          ctx.profiles &&
-          mono - this.lastProfileCollect >= PROFILE_COLLECT_MS
-        ) {
-          this.lastProfileCollect = mono;
-          await this.collect(nowMs);
-        }
       }
     } catch (e) {
       // The database is unreachable, or a failpoint threw. Either way, restart the grace.

@@ -451,12 +451,15 @@ export async function applyProfileReport(
 
 /** How long an unreferenced blob is left alone: longer than any save takes to be reported. */
 export const ORPHAN_BLOB_AGE_MS = 60 * 60_000;
+/** Rows read, and blobs checked, per database query in a collection. */
+const COLLECT_BATCH = 500;
 
 /**
  * The sweeper's collection (section 5): superseded versions past their 10 minutes, with their
  * blobs; blobs with no version row (a stale or failed save, a deleted profile whose blobs did not
  * all go at once) after an hour; and temporary files left by a crash. Outside any transaction:
- * a store call is never made while a database transaction is open.
+ * a store call is never made while a database transaction is open. Run by the sweeper on its own
+ * timer, never inside its tick, one at a time.
  */
 export async function collectProfiles(ctx: Ctx, nowMs: number): Promise<void> {
   const cfg = ctx.profiles;
@@ -471,20 +474,15 @@ export async function collectProfiles(ctx: Ctx, nowMs: number): Promise<void> {
       version: true,
       profile: { select: { projectId: true } },
     },
-    take: 200,
+    take: COLLECT_BATCH,
   });
+  const gone: { profileId: string; version: number }[] = [];
   for (const v of old) {
     try {
       await cfg.store.delete(
         profileBlobKey(v.profile.projectId, v.profileId, v.version),
       );
-      await ctx.db.profileVersion.deleteMany({
-        where: {
-          profileId: v.profileId,
-          version: v.version,
-          state: "superseded",
-        },
-      });
+      gone.push({ profileId: v.profileId, version: v.version });
     } catch (e) {
       ctx.log.warn(
         { profileId: v.profileId, version: v.version, err: String(e) },
@@ -492,23 +490,44 @@ export async function collectProfiles(ctx: Ctx, nowMs: number): Promise<void> {
       );
     }
   }
+  if (gone.length > 0)
+    await ctx.db.profileVersion.deleteMany({
+      where: { state: "superseded", OR: gone },
+    });
 
+  // Blobs with no row, a batch of rows looked up at a time.
   const blobs = await cfg.store.list("");
   const stale = blobs.filter((b) => nowMs - b.mtimeMs >= ORPHAN_BLOB_AGE_MS);
-  for (const b of stale) {
-    const [project, , profile, file] = b.key.split("/");
-    const version = Number(file!.slice(0, -".kpf".length));
-    const row = await ctx.db.profileVersion.findFirst({
-      where: {
+  for (let i = 0; i < stale.length; i += COLLECT_BATCH) {
+    const batch = stale.slice(i, i + COLLECT_BATCH).map((b) => {
+      const [project, , profile, file] = b.key.split("/");
+      return {
+        key: b.key,
+        project: project!,
         profileId: profile!,
-        version,
-        profile: { projectId: project!, deletedAt: null },
-      },
-      select: { state: true },
+        version: Number(file!.slice(0, -".kpf".length)),
+      };
     });
-    if (row) continue;
-    await cfg.store.delete(b.key).catch(() => {});
-    ctx.metrics.sweeper.inc({ action: "profile_orphan" });
+    const rows = await ctx.db.profileVersion.findMany({
+      where: {
+        OR: batch.map((b) => ({ profileId: b.profileId, version: b.version })),
+      },
+      select: {
+        profileId: true,
+        version: true,
+        profile: { select: { projectId: true, deletedAt: true } },
+      },
+    });
+    const kept = new Set(
+      rows
+        .filter((r) => r.profile.deletedAt === null)
+        .map((r) => `${r.profile.projectId}/${r.profileId}/${r.version}`),
+    );
+    for (const b of batch) {
+      if (kept.has(`${b.project}/${b.profileId}/${b.version}`)) continue;
+      await cfg.store.delete(b.key).catch(() => {});
+      ctx.metrics.sweeper.inc({ action: "profile_orphan" });
+    }
   }
   await cfg.store.sweep(10 * 60_000, nowMs);
 }
