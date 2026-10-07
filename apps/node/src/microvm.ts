@@ -390,12 +390,51 @@ export const hostProcs: Procs = {
   },
 };
 
+/** The host's VM cgroups, as the driver sees them (replaceable in tests). Paths are absolute. */
+export interface Cgroups {
+  /** The directory a VM's cgroup lives in. */
+  path(parent: string, id: string): string;
+  /** The names under the parent cgroup. */
+  children(parent: string): Promise<string[]>;
+  /** Has no process in it or below it (`populated 0`). Unreadable counts as not empty. */
+  empty(path: string): Promise<boolean>;
+  /** rmdir: `removed` (also when already gone), `busy` (a process is still leaving), or the error code. */
+  remove(path: string): Promise<"removed" | "busy" | string>;
+}
+
+const CGROUP_ROOT = "/sys/fs/cgroup";
+
+export const hostCgroups: Cgroups = {
+  path: (parent, id) => join(CGROUP_ROOT, parent, id),
+  children: (parent) =>
+    readdir(join(CGROUP_ROOT, parent), { withFileTypes: true }).then(
+      (es) => es.filter((e) => e.isDirectory()).map((e) => e.name),
+      () => [],
+    ),
+  empty: (path) =>
+    readFile(join(path, "cgroup.events"), "utf8").then(
+      (t) => /^populated 0$/m.test(t),
+      () => false,
+    ),
+  remove: (path) =>
+    rmdir(path).then(
+      () => "removed",
+      (e: NodeJS.ErrnoException) =>
+        e.code === "ENOENT"
+          ? "removed"
+          : e.code === "EBUSY"
+            ? "busy"
+            : String(e.code),
+    ),
+};
+
 export interface MicroVmDeps {
   run: Exec;
   log: Logger;
   /** The runtime's control API, for the restore's health check and rekey (overridable in tests). */
   fetch?: typeof fetch;
   procs?: Procs;
+  cgroups?: Cgroups;
 }
 
 export class MicroVmDriver implements DockerDriver {
@@ -409,6 +448,7 @@ export class MicroVmDriver implements DockerDriver {
   private watch: NodeJS.Timeout | undefined;
   private readonly fetchFn: typeof fetch;
   private readonly procs: Procs;
+  private readonly cgroups: Cgroups;
 
   constructor(
     private readonly c: MicroVmConfig,
@@ -417,6 +457,7 @@ export class MicroVmDriver implements DockerDriver {
     this.netns = new NetnsPool(c, d.run, d.log);
     this.fetchFn = d.fetch ?? fetch;
     this.procs = d.procs ?? hostProcs;
+    this.cgroups = d.cgroups ?? hostCgroups;
   }
 
   private get jail(): string {
@@ -633,7 +674,7 @@ export class MicroVmDriver implements DockerDriver {
         [uds, join(root, "mem")],
         c.vmUid,
         c.vmGid,
-        join("/sys/fs/cgroup", c.cgroupParent, id),
+        this.cgroups.path(c.cgroupParent, id),
       );
       await this.writeMeta({ ...meta, handlerPid });
       for (let i = 0; i < 1000 && !(await exists(uds)); i++) await sleep(1);
@@ -769,19 +810,8 @@ export class MicroVmDriver implements DockerDriver {
       await rm(join(this.jail, id), { recursive: true, force: true });
       // A cgroup cannot go while a process is still leaving it (EBUSY), and a kill is not an exit:
       // without the retries a removed VM left its cgroup behind (found by the G-25 checker on AWS).
-      const cg = join("/sys/fs/cgroup", this.c.cgroupParent, id);
-      for (let i = 0; i < 50; i++) {
-        const err = await rmdir(cg).then(
-          () => null,
-          (e: NodeJS.ErrnoException) => e,
-        );
-        if (!err || err.code === "ENOENT") break;
-        if (err.code !== "EBUSY") {
-          this.d.log.warn({ vm: id, err: err.code }, "microvm: cgroup left");
-          break;
-        }
-        await sleep(20);
-      }
+      // Should every retry fail, the next list() sweeps it (sweepCgroups).
+      await this.removeCgroup(id, 50);
       if (m) await this.netns.release(m.octet);
       await rm(this.metaPath(id), { force: true });
     } finally {
@@ -799,7 +829,42 @@ export class MicroVmDriver implements DockerDriver {
     const out: ContainerInfo[] = [];
     for (const m of await this.metas())
       out.push(this.info(m, (await this.state(m)).running));
+    await this.sweepCgroups();
     return out;
+  }
+
+  private async removeCgroup(id: string, tries: number): Promise<boolean> {
+    const cg = this.cgroups.path(this.c.cgroupParent, id);
+    for (let i = 0; i < tries; i++) {
+      const r = await this.cgroups.remove(cg);
+      if (r === "removed") return true;
+      if (r !== "busy") {
+        this.d.log.warn({ vm: id, err: r }, "microvm: cgroup left");
+        return false;
+      }
+      await sleep(20);
+    }
+    this.d.log.warn({ vm: id, err: "EBUSY" }, "microvm: cgroup left");
+    return false;
+  }
+
+  /**
+   * Remove VM cgroups that no VM owns: left when a removal's retries ran out, or by an agent that
+   * died between killing a VM and removing its cgroup (found by the G-25 checker on AWS, m2 check 8,
+   * 2026-10-07). A VM's meta file is written before the jailer makes its cgroup and removed after
+   * the cgroup, so a `vm-` cgroup with no meta file, on any node, and no process is an orphan.
+   */
+  private async sweepCgroups(): Promise<void> {
+    for (const id of await this.cgroups.children(this.c.cgroupParent)) {
+      if (!/^vm-[0-9a-f]+$/.test(id) || this.removing.has(id)) continue;
+      if (await exists(this.metaPath(id))) continue;
+      if (
+        !(await this.cgroups.empty(this.cgroups.path(this.c.cgroupParent, id)))
+      )
+        continue;
+      if (await this.removeCgroup(id, 5))
+        this.d.log.info({ vm: id }, "microvm: removed a cgroup no VM owns");
+    }
   }
 
   onEvent(cb: (e: DockerEvent) => void): () => void {

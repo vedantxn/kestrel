@@ -14,6 +14,7 @@ import {
   MicroVmDriver,
   NetnsPool,
   RoutedDriver,
+  type Cgroups,
   type Exec,
   type MicroVmConfig,
   type Procs,
@@ -50,6 +51,8 @@ function fakeHost(dir: string) {
   const servers: Server[] = [];
   const pids = new Map<number, string>(); // pid -> vm id
   const killed: number[] = [];
+  /** VM cgroups by name: whether a process is in one, and how many removals answer EBUSY first. */
+  const cg = new Map<string, { populated: boolean; busy: number }>();
   let nextPid = 5000;
   const run: Exec = async (cmd, args, input) => {
     calls.push({ cmd, args, ...(input !== undefined ? { input } : {}) });
@@ -59,6 +62,7 @@ function fakeHost(dir: string) {
       mkdirSync(join(root, "run"), { recursive: true });
       const pid = nextPid++;
       pids.set(pid, id);
+      cg.set(id, { populated: true, busy: 0 });
       writeFileSync(join(root, "firecracker.pid"), String(pid));
       const srv = createServer((req, res) => {
         let body = "";
@@ -87,7 +91,10 @@ function fakeHost(dir: string) {
     alive: (pid) => pids.has(pid),
     kill: (pid) => {
       killed.push(pid);
+      const id = pids.get(pid);
       pids.delete(pid);
+      const c = id ? cg.get(id) : undefined;
+      if (c) c.populated = false;
     },
     start: async (cmd, args, uid, _gid, cgroup) => {
       calls.push({ cmd, args: [...args, `uid=${uid}`, `cgroup=${cgroup}`] });
@@ -97,7 +104,24 @@ function fakeHost(dir: string) {
       return pid;
     },
   };
-  return { run, calls, servers, procs, pids, killed };
+  const name = (path: string) => path.split("/").pop()!;
+  const cgroups: Cgroups = {
+    path: (parent, id) => `/sys/fs/cgroup/${parent}/${id}`,
+    children: async () => [...cg.keys()],
+    empty: async (path) => cg.get(name(path))?.populated === false,
+    remove: async (path) => {
+      const c = cg.get(name(path));
+      if (!c) return "removed";
+      if (c.populated) return "busy";
+      if (c.busy > 0) {
+        c.busy--;
+        return "busy";
+      }
+      cg.delete(name(path));
+      return "removed";
+    },
+  };
+  return { run, calls, servers, procs, pids, killed, cg, cgroups };
 }
 
 /** The restored browser's control API: ready, then a rekey with the template's token. */
@@ -143,6 +167,7 @@ async function rig(over: Partial<MicroVmConfig> = {}) {
     log,
     fetch: rt.f,
     procs: host.procs,
+    cgroups: host.cgroups,
   });
   await vm.start();
   cleanup.push(() => {
@@ -279,6 +304,29 @@ describe("the microVM driver", () => {
     expect(await vm.inspect(info.id)).toBeNull();
     expect(await vm.list()).toEqual([]);
     await vm.remove(info.id); // idempotent
+  });
+
+  it("removes a VM's cgroup once its last process has left (EBUSY until then)", async () => {
+    const { host, vm } = await rig();
+    const info = await vm.run(spec());
+    host.cg.get(info.id)!.busy = 3; // the VMM is still leaving after the kill
+    await vm.remove(info.id);
+    expect(host.cg.has(info.id)).toBe(false);
+  });
+
+  it("sweeps a VM cgroup that no VM owns, and nothing else (G-25)", async () => {
+    const { host, vm } = await rig();
+    const live = await vm.run(spec());
+    // Left by an agent that died between the kill and the rmdir: empty, and no record names it.
+    host.cg.set("vm-0123456789abcdef01234567", { populated: false, busy: 0 });
+    // A process is still in it: never touched, whatever the records say.
+    host.cg.set("vm-89abcdef0123456789abcdef", { populated: true, busy: 0 });
+    // Not a VM's name.
+    host.cg.set("other", { populated: false, busy: 0 });
+    expect((await vm.list()).map((c) => c.id)).toEqual([live.id]);
+    expect([...host.cg.keys()].sort()).toEqual(
+      [live.id, "other", "vm-89abcdef0123456789abcdef"].sort(),
+    );
   });
 
   it("is never frozen: the agent removes a stopped VM at once", async () => {
