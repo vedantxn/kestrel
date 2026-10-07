@@ -595,6 +595,27 @@ describe("releasing the lock (section 5)", () => {
     expect((await getProfile(e, p.id)).version).toBe(1);
   });
 
+  it("gives a running writer its outcome when its profile is deleted, even if its report never comes", async () => {
+    const e = await setup();
+    const p = await newProfile(e);
+    e.nodes.a!.profileSave = "lost";
+    const w = await start(e, { id: p.id, persist: true });
+    expect((await e.call("DELETE", `/v1/profiles/${p.id}`)).statusCode).toBe(
+      204,
+    );
+    // Written with the deletion, while the writer still runs.
+    expect(await profileEvents(e, w.id)).toMatchObject([
+      {
+        type: "profile.save_failed",
+        data: { profileId: p.id, reason: "deleted" },
+      },
+    ]);
+    await stop(e, w);
+    e.clock.advance(10_000);
+    await e.syncAll();
+    expect(await profileEvents(e, w.id)).toHaveLength(1);
+  });
+
   it("does not commit into a deleted profile, and collects the orphaned blob", async () => {
     const e = await setup();
     const p = await newProfile(e);

@@ -20,6 +20,7 @@ import type { Auth, Ctx } from "./context.js";
 import { AppError } from "./errors.js";
 import { newUuid, publicSessionId } from "./ids.js";
 import { runTx } from "./lifecycle.js";
+import { profileSaveFailed } from "./profile-sessions.js";
 
 /**
  * P18 (docs/lld/p18-profiles.md section 6.1): `/v1/profiles`. Every query is scoped by the
@@ -213,6 +214,13 @@ export async function deleteProfile(
   if (!uuid) throw new AppError("not_found", "No such profile.");
   const now = new Date(ctx.clock.now());
   const deleted = await runTx(ctx, async (tx) => {
+    // Lock the row and learn its writer, if one is running: it gets its one outcome event here.
+    const [live] = await tx.$queryRaw<{ writer_session_id: string | null }[]>`
+      SELECT writer_session_id FROM profiles
+       WHERE id = ${uuid}::uuid AND project_id = ${auth.projectId}::uuid
+         AND deleted_at IS NULL
+         FOR UPDATE`;
+    if (!live) return false;
     const { count } = await tx.profile.updateMany({
       where: { id: uuid, projectId: auth.projectId, deletedAt: null },
       data: {
@@ -224,6 +232,8 @@ export async function deleteProfile(
     });
     if (count === 0) return false;
     await tx.profileVersion.deleteMany({ where: { profileId: uuid } });
+    if (live.writer_session_id)
+      await profileSaveFailed(tx, live.writer_session_id, uuid, "deleted", now);
     return true;
   });
   if (!deleted) throw new AppError("not_found", "No such profile.");

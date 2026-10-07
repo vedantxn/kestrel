@@ -186,6 +186,19 @@ async function hasOutcome(tx: Tx, sessionUuid: string): Promise<boolean> {
   );
 }
 
+/** `profile.save_failed` for a writer, unless it already has its outcome. */
+export async function profileSaveFailed(
+  tx: Tx,
+  sessionUuid: string,
+  profileUuid: string,
+  reason: ProfileSaveFailure,
+  at: Date,
+): Promise<void> {
+  // A writer always has its session row; one that does not has nowhere to record it.
+  if (!(await tx.session.count({ where: { id: sessionUuid } }))) return;
+  await failedEvent(tx, sessionUuid, profileUuid, reason, at);
+}
+
 async function failedEvent(
   tx: Tx,
   sessionUuid: string,
