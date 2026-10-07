@@ -58,6 +58,15 @@ chmod 0640 "$SECRETS/node-a.secret" "$SECRETS/node-b.secret"; chmod 0400 "$SECRE
 if [ -f "$SECRETS/captcha-solver.key" ]; then chown 1001:1001 "$SECRETS/captcha-solver.key"; chmod 0400 "$SECRETS/captcha-solver.key"; fi
 # The dashboard (P17) runs as 1002 and reads only the key that seals its sign-in cookies.
 chown 1002:1002 "$SECRETS/web-session.secret" 2>/dev/null || true; chmod 0400 "$SECRETS/web-session.secret"
+# Profiles (P18, docs/lld/p18-profiles.md 4.5): the master key is made once and never again; losing
+# it makes every profile unreadable. Only the API reads it. The store sits on the data volume under
+# its own xfs project quota (an id far above the small ones Docker gives recording volumes).
+if [ ! -f "$SECRETS/profile-master.key" ]; then head -c 32 /dev/urandom > "$SECRETS/profile-master.key"; fi
+chown 1001:1001 "$SECRETS/profile-master.key"; chmod 0400 "$SECRETS/profile-master.key"
+install -d -m 0700 -o 1001 -g 0 /var/lib/kestrel/profiles
+PROFILE_QUOTA_ID=1000000001
+xfs_quota -x -c "project -s -p $(realpath /var/lib/kestrel/profiles) $PROFILE_QUOTA_ID" /data >/dev/null
+xfs_quota -x -c "limit -p bhard=${PROFILE_STORE_BYTES:-20g} $PROFILE_QUOTA_ID" /data
 chmod 0711 "$SECRETS"; install -d -m 0755 /run/kestrel /var/lib/kestrel/a /var/lib/kestrel/b /var/lib/kestrel/postgres /run/kestrel/a /run/kestrel/b
 # /run is emptied by a reboot: have systemd make the runtime directories again at every boot, before
 # Docker starts the platform, or the node agent cannot open its sockets and restarts forever.

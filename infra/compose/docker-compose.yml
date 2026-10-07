@@ -47,8 +47,13 @@ services:
       CAPTCHA_SOLVER: ${CAPTCHA_SOLVER:-}
       CAPTCHA_SOLVER_URL: ${CAPTCHA_SOLVER_URL:-}
       CAPTCHA_SOLVER_KEY_FILE: /secrets/captcha-solver.key
+      # Profiles (docs/lld/p18-profiles.md): the encrypted store and the master key, which only the API reads.
+      PROFILE_STORE_DIR: /profiles
+      PROFILE_MASTER_KEY_FILE: /secrets/profile-master.key
+      PROFILE_MAX_BYTES: ${PROFILE_MAX_BYTES:-}
     volumes:
       - /var/lib/kestrel/secrets:/secrets:ro
+      - /var/lib/kestrel/profiles:/profiles
 
   # P17: the dashboard. Its own uid, so it reads its session secret and nothing else; it holds no
   # signing key and reaches the API only through the public listener, like any client.
