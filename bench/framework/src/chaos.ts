@@ -191,7 +191,7 @@ async function containerOf(
   return null;
 }
 
-async function inContainer(id: string, script: string): Promise<string> {
+export async function inContainer(id: string, script: string): Promise<string> {
   return new Promise((resolve) => {
     const child = execFile(
       "docker",
@@ -251,7 +251,7 @@ async function vmOf(
   };
 }
 
-const KILL_BY = (pattern: string) =>
+export const KILL_BY = (pattern: string) =>
   `for p in /proc/[0-9]*; do c=$(tr '\\0' ' ' < $p/cmdline 2>/dev/null); case "$c" in *${pattern}*) kill -9 \${p#/proc/} 2>/dev/null;; esac; done`;
 
 /** SIGKILL a container's main process from the host, as a crash would: the restart policy applies (it does not for `docker kill`). */
