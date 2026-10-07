@@ -48,12 +48,12 @@ services:
       CAPTCHA_SOLVER_URL: ${CAPTCHA_SOLVER_URL:-}
       CAPTCHA_SOLVER_KEY_FILE: /secrets/captcha-solver.key
       # Profiles (docs/lld/p18-profiles.md): the encrypted store and the master key, which only the API reads.
-      PROFILE_STORE_DIR: /profiles
+      PROFILE_STORE_DIR: /var/lib/kestrel/profiles
       PROFILE_MASTER_KEY_FILE: /secrets/profile-master.key
       PROFILE_MAX_BYTES: ${PROFILE_MAX_BYTES:-}
     volumes:
       - /var/lib/kestrel/secrets:/secrets:ro
-      - /var/lib/kestrel/profiles:/profiles
+      - /var/lib/kestrel/profiles:/var/lib/kestrel/profiles
 
   # P17: the dashboard. Its own uid, so it reads its session secret and nothing else; it holds no
   # signing key and reaches the API only through the public listener, like any client.
@@ -129,6 +129,12 @@ services:
       KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS_NODE:-}
       # The harness's probe controls (docs/harness.md): on only while infra/host/bench.sh runs m1 or m2.
       KESTREL_HARNESS: ${KESTREL_HARNESS:-off}
+      # Profiles (docs/lld/p18-profiles.md): the encrypted store, written as the API's uid, and the
+      # pinned runtime's Chrome, whose major the API matches against a profile's.
+      PROFILE_STORE_DIR: /var/lib/kestrel/profiles
+      PROFILE_STORE_UID: "1001"
+      PROFILE_STORE_GID: "0"
+      CHROME_VERSION: ${CHROME_VERSION:-}
     volumes:
       - /run/kestrel:/run/kestrel
       - /var/lib/kestrel:/var/lib/kestrel
@@ -211,6 +217,12 @@ services:
       KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS_NODE_B:-}
       # The harness's probe controls (docs/harness.md): on only while infra/host/bench.sh runs m1 or m2.
       KESTREL_HARNESS: ${KESTREL_HARNESS:-off}
+      # Profiles (docs/lld/p18-profiles.md): the encrypted store, written as the API's uid, and the
+      # pinned runtime's Chrome, whose major the API matches against a profile's.
+      PROFILE_STORE_DIR: /var/lib/kestrel/profiles
+      PROFILE_STORE_UID: "1001"
+      PROFILE_STORE_GID: "0"
+      CHROME_VERSION: ${CHROME_VERSION:-}
     volumes:
       - /run/kestrel:/run/kestrel
       - /var/lib/kestrel:/var/lib/kestrel

@@ -106,7 +106,9 @@ KESTREL_NODES=$NODES
 CAPTCHA_SOLVER=$CAPTCHA_SOLVER
 CAPTCHA_SOLVER_URL=$CAPTCHA_SOLVER_URL
 ENV
-printf "$SIZES\nRUNTIME_A=$RUNTIME_A\nMICROVM_NETNS_READY=${MICROVM_NETNS_READY:-8}\nMICROVM_RECORDING=${MICROVM_RECORDING:-vm}\n" >> /var/lib/kestrel/compose.env
+printf "$SIZES\nRUNTIME_A=$RUNTIME_A\nMICROVM_NETNS_READY=${MICROVM_NETNS_READY:-8}\nMICROVM_RECORDING=${MICROVM_RECORDING:-vm}\nMICROVM_PROFILES=${MICROVM_PROFILES:-vm}\n" >> /var/lib/kestrel/compose.env
+# Profiles: the node agents tell the API the pinned runtime's Chrome (its major gates which profiles they open).
+printf "CHROME_VERSION=%s\n" "$(tr -d '[:space:]' < runtime/CHROME_VERSION)" >> /var/lib/kestrel/compose.env
 chmod 0600 /var/lib/kestrel/compose.env
 
 if [ "$NO_BUILD" != 1 ]; then
@@ -116,10 +118,11 @@ if [ "$NO_BUILD" != 1 ]; then
     echo "kestrel-runtime:dev is missing; build it with runtime/build.sh" >&2; exit 1
   fi
 fi
-if [ "$RUNTIME_A" = microvm ] && { [ "$NO_BUILD" != 1 ] || [ ! -f /data/kestrel-vm/template/mem ]; }; then
-  log "microVM template (the runtime image, booted once and snapshotted)"
+if [ "$RUNTIME_A" = microvm ] && { [ "$NO_BUILD" != 1 ] || [ ! -f /data/kestrel-vm/template/mem ] || [ ! -f /data/kestrel-vm/template-warm/mem ]; }; then
+  log "microVM templates (the runtime image, booted once and snapshotted; warm: before Chrome starts, for profiles)"
   runtime/microvm/build-rootfs.sh
   runtime/microvm/build-template.sh
+  TEMPLATE=warm runtime/microvm/build-template.sh
 fi
 
 if [ ! -f "$SECRETS/token-private.pem" ]; then

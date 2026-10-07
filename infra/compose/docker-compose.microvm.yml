@@ -14,6 +14,8 @@ services:
       RUNTIME: microvm
       MICROVM_NETNS_READY: ${MICROVM_NETNS_READY:-8}
       MICROVM_RECORDING: ${MICROVM_RECORDING:-vm}
+      # Profile sessions: warm clones of a second template (vm), or Docker containers (docker).
+      MICROVM_PROFILES: ${MICROVM_PROFILES:-vm}
     volumes:
       - /data/docker/volumes:/data/docker/volumes
       - /data/kestrel-vm:/data/kestrel-vm
