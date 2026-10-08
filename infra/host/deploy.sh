@@ -19,13 +19,15 @@ for a in "$@"; do case "$a" in --no-build) NO_BUILD=1;; --two-nodes) TWO=1;; *) 
 cd "$(dirname "$0")/../.."
 SECRETS=/var/lib/kestrel/secrets
 COMPOSE=(docker compose --env-file /var/lib/kestrel/compose.env -f infra/compose/docker-compose.yml)
-RUNTIME_A=${RUNTIME_A:-docker}
 log() { printf '\n== %s\n' "$*"; }
 # A setting from the last deploy, or nothing on the first (no file: pipefail must not end the script).
 prev() { [ -f /var/lib/kestrel/compose.env ] || return 0; sed -n "s/^$1=//p" /var/lib/kestrel/compose.env | tail -n 1; }
 # shellcheck disable=SC1091
 [ -f /etc/kestrel/host.env ] && . /etc/kestrel/host.env
 KESTREL_QUOTA=${KESTREL_QUOTA:-on}
+# Node a's runtime: as given, else as last deployed, else Docker.
+RUNTIME_A=${RUNTIME_A:-$(prev RUNTIME_A)}
+RUNTIME_A=${RUNTIME_A:-docker}
 
 log "host prerequisites"
 /usr/local/bin/kestrel-host-check
@@ -125,9 +127,13 @@ cat > /etc/tmpfiles.d/kestrel.conf <<'TMPFILES'
 d /run/kestrel 0755 root root -
 d /run/kestrel/a 0755 root root -
 d /run/kestrel/b 0755 root root -
+f /run/xtables.lock 0600 root root -
 TMPFILES
+# The node agents share iptables' lock with the host by mounting /run/xtables.lock. It must exist
+# before they start, every boot (the tmpfiles line above): missing, Docker makes a directory in its
+# place and the agent cannot start. Amazon Linux makes it at boot anyway; Ubuntu does not.
+if [ -d /run/xtables.lock ]; then rmdir /run/xtables.lock; fi
 systemd-tmpfiles --create /etc/tmpfiles.d/kestrel.conf
-touch /run/xtables.lock
 mkdir -p /var/lib/kestrel/postgres && chown 999:999 /var/lib/kestrel/postgres 2>/dev/null || true
 
 # The harness's public test page (bench only): Terraform's S3 bucket on AWS, else none unless given.
