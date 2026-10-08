@@ -36,9 +36,9 @@ For comparable numbers, run from a machine in the deployment's region (us-east-1
 
 ## Verified (2026-10-03)
 
-Both harnesses type-check with the adapter (0 errors). Each ran against a Kestrel deployment on one m7i-flex.xlarge in us-east-1, from a laptop in India. The timings therefore include about 250 ms of round-trip time per network exchange and are **not** benchmark results; they only show the adapters work end to end.
+Both harnesses type-check with the adapter (0 errors). Each ran against a Kestrel deployment on one m7i-flex.xlarge in us-east-1, from a laptop far from us-east-1. The timings therefore include about 250 ms of round-trip time per network exchange and are **not** benchmark results; they only show the adapters work end to end.
 
-| Run                                  | Result                 | Medians from India (not comparable)                                  |
+| Run                                  | Result                 | Medians from far away (not comparable)                               |
 | ------------------------------------ | ---------------------- | -------------------------------------------------------------------- |
 | Browser Arena hello-browser, 10 runs | 10/10 success          | create 315, connect 1,556, navigate 431, release 230 ms              |
 | ComputeSDK lifecycle, 10 iterations  | 10/10 success          | create 315, connect 1,559, navigate 431, release 226, total 2,908 ms |
