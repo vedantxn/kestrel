@@ -1,0 +1,43 @@
+{
+  "name": "snapshot-entropy-check",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "Check that cloud browsers do not share randomness: Math.random, crypto, WebCrypto keys and TLS ClientHellos across sessions",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vedantxn/kestrel.git",
+    "directory": "bench/entropy"
+  },
+  "homepage": "https://github.com/vedantxn/kestrel/tree/main/bench/entropy#readme",
+  "keywords": [
+    "firecracker",
+    "snapshot",
+    "entropy",
+    "chrome",
+    "cdp",
+    "browser",
+    "security"
+  ],
+  "type": "module",
+  "bin": {
+    "snapshot-entropy-check": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "prepublishOnly": "tsc -b"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "playwright-core": "^1.63.0"
+  }
+}

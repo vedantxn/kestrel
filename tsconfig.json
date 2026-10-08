@@ -33,6 +33,9 @@
     },
     {
       "path": "bench/framework"
+    },
+    {
+      "path": "bench/entropy"
     }
   ]
 }
