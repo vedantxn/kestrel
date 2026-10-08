@@ -22,6 +22,8 @@ import { newUuid } from "./ids.js";
  *                                         --admin lets it call /v1/admin/* (threat model T-69)
  *   admin revoke-key KEY_ID_OR_PREFIX     stop a key authenticating at once (threat model G-02)
  *   admin list-keys
+ *   admin set-quota [--project NAME] [--creates-per-minute N] [--max-concurrent N]
+ *                                         change a project's limits (benchmarks raise the create rate)
  *   admin keygen --dir DIR                make the token signing keypair
  */
 const { positionals, values } = parseArgs({
@@ -31,6 +33,8 @@ const { positionals, values } = parseArgs({
     name: { type: "string" },
     dir: { type: "string" },
     admin: { type: "boolean" },
+    "creates-per-minute": { type: "string" },
+    "max-concurrent": { type: "string" },
   },
 });
 const [command, arg] = positionals;
@@ -111,9 +115,45 @@ try {
         `${k.id}  ${k.prefix}...  ${k.name}  ${k.revokedAt ? "REVOKED" : "active"}${k.admin ? "  ADMIN" : ""}  last used ${k.lastUsedAt?.toISOString() ?? "never"}`,
       );
     }
+  } else if (command === "set-quota") {
+    const limit = (flag: string, v: string | undefined): number | undefined => {
+      if (v === undefined) return undefined;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 100_000)
+        throw new Error(`--${flag} must be a whole number from 1 to 100000`);
+      return n;
+    };
+    const createsPerMinute = limit(
+      "creates-per-minute",
+      values["creates-per-minute"],
+    );
+    const maxConcurrentSessions = limit(
+      "max-concurrent",
+      values["max-concurrent"],
+    );
+    if (createsPerMinute === undefined && maxConcurrentSessions === undefined)
+      throw new Error(
+        "set-quota needs --creates-per-minute or --max-concurrent",
+      );
+    const project = await db.project.findFirst({
+      where: { name: projectName },
+    });
+    if (!project) throw new Error(`no project "${projectName}"`);
+    const updated = await db.project.update({
+      where: { id: project.id },
+      data: {
+        ...(createsPerMinute !== undefined ? { createsPerMinute } : {}),
+        ...(maxConcurrentSessions !== undefined
+          ? { maxConcurrentSessions }
+          : {}),
+      },
+    });
+    console.log(
+      `project "${updated.name}": ${updated.createsPerMinute} creates a minute, ${updated.maxConcurrentSessions} sessions at once`,
+    );
   } else {
     console.error(
-      "usage: admin <bootstrap|create-key|revoke-key|list-keys|keygen> [options]",
+      "usage: admin <bootstrap|create-key|revoke-key|list-keys|set-quota|keygen> [options]",
     );
     process.exitCode = 2;
   }
