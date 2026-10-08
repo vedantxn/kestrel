@@ -402,7 +402,7 @@ class AsyncKestrel:
             from playwright.async_api import async_playwright
         except ImportError as e:
             raise KestrelError(
-                "connect() needs Playwright: pip install 'kestrel-sdk[playwright]'"
+                "connect() needs Playwright: pip install 'kestrel-browser[playwright]'"
             ) from e
         session = await self.sessions.create(**create)
         playwright = None

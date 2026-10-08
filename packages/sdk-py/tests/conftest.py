@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 import respx
 
-from kestrel_sdk import _async, _sync
+from kestrel_browser import _async, _sync
 
 BASE = "http://api.test"
 SESSION_ID = "ses_01k6e4m9t8f2xq3w5y7z9a1b2c"

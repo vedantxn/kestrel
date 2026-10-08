@@ -16,7 +16,7 @@ from typing import Any, get_args
 
 import pytest
 
-from kestrel_sdk import (
+from kestrel_browser import (
     ApiError,
     AsyncProfiles,
     AsyncSessions,
@@ -40,7 +40,7 @@ from kestrel_sdk import (
     Usage,
     Viewport,
 )
-from kestrel_sdk._types import (
+from kestrel_browser._types import (
     SESSION_STATUSES,
     TERMINAL_STATUSES,
     CaptchaProvider,

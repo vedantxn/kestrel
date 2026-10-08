@@ -7,7 +7,7 @@ import httpx
 import pytest
 import respx
 
-from kestrel_sdk import (
+from kestrel_browser import (
     ApiError,
     CaptchaOptions,
     Kestrel,

@@ -1,6 +1,6 @@
 """Python client for Kestrel, open-source cloud browsers for AI agents.
 
->>> from kestrel_sdk import Kestrel
+>>> from kestrel_browser import Kestrel
 >>> kestrel = Kestrel()  # KESTREL_API_KEY, KESTREL_URL
 >>> session = kestrel.sessions.create(timeout=60_000)
 >>> session.connect_url  # give this to Playwright or Puppeteer

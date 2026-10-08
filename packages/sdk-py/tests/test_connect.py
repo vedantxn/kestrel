@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from kestrel_sdk import AsyncKestrel, Kestrel, KestrelError
+from kestrel_browser import AsyncKestrel, Kestrel, KestrelError
 
 from .conftest import CONNECT_URL, SESSION_ID, session_json
 
@@ -110,7 +110,7 @@ def test_without_playwright_no_session_is_created(api, monkeypatch):
     monkeypatch.setitem(sys.modules, "playwright", None)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
     route = api.post("/v1/sessions")
-    with pytest.raises(KestrelError, match=r"kestrel-sdk\[playwright\]"):
+    with pytest.raises(KestrelError, match=r"kestrel-browser\[playwright\]"):
         Kestrel().connect()
     assert route.call_count == 0
 

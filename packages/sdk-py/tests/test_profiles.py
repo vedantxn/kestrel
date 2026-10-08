@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from kestrel_sdk import (
+from kestrel_browser import (
     ApiError,
     AsyncKestrel,
     Kestrel,

@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-from kestrel_sdk import ApiError, AsyncKestrel, KestrelConnectionError, SessionEndedError
+from kestrel_browser import ApiError, AsyncKestrel, KestrelConnectionError, SessionEndedError
 
 from .conftest import SESSION_ID, api_error, event_json, session_json
 

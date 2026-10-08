@@ -3,6 +3,23 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "Command line for Kestrel, open-source cloud browsers for AI agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vedantxn/kestrel.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/vedantxn/kestrel#readme",
+  "bugs": "https://github.com/vedantxn/kestrel/issues",
+  "keywords": [
+    "browser",
+    "chrome",
+    "cdp",
+    "playwright",
+    "puppeteer",
+    "ai-agents",
+    "headless",
+    "self-hosted"
+  ],
   "type": "module",
   "bin": {
     "kestrel": "./dist/bin.js"
@@ -16,9 +33,14 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "tsc -b"
   },
   "dependencies": {
     "@kestrel/sdk": "^0.1.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

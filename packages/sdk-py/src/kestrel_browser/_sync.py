@@ -438,7 +438,7 @@ class Kestrel:
 
     def connect(self, *, connect_timeout: float = 30.0, **create: Any) -> KestrelBrowser:
         """Create a session (``create`` takes the same arguments as ``sessions.create``) and
-        attach Playwright to it. Needs ``pip install 'kestrel-sdk[playwright]'``.
+        attach Playwright to it. Needs ``pip install 'kestrel-browser[playwright]'``.
 
         If attaching fails the session is stopped before the error is raised, so a failed
         connect never leaves a browser running until its idle timeout."""
@@ -446,7 +446,7 @@ class Kestrel:
             from playwright.sync_api import sync_playwright
         except ImportError as e:
             raise KestrelError(
-                "connect() needs Playwright: pip install 'kestrel-sdk[playwright]'"
+                "connect() needs Playwright: pip install 'kestrel-browser[playwright]'"
             ) from e
         session = self.sessions.create(**create)
         playwright = None
