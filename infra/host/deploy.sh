@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Deploy the platform on this host from the tree in /srv/kestrel (v1 plan I15, I16). Idempotent.
-# Run as root (bin/host deploy and bin/host run do):
+# Deploy the platform on this host from the tree it sits in (v1 plan I15, I16). Idempotent.
+# Run as root, after infra/host/prepare-host.sh (install.sh runs both):
 #   sudo infra/host/deploy.sh [--no-build] [--two-nodes]
+#   PUBLIC_URL=https://<host> | http://<address>[:port]   where clients reach it; http:// is local
+#     mode (no TLS, trusted networks only: threat model T-79). Kept from the last deploy when unset;
+#     on AWS it defaults to https://<public ip with dashes>.sslip.io.
+#   KESTREL_IMAGE_TAG=<tag>: pull <KESTREL_IMAGE_REPO>/kestrel-{platform,runtime}:<tag> (default
+#     repository ghcr.io/vedantxn) instead of building the images here.
 #   RUNTIME_A=microvm: node a's browsers are Firecracker microVMs (ADR 0017); node b stays Docker.
 #   MICROVM_RECORDING=docker: node a's recording sessions are Docker containers (the escape hatch);
 #   by default they are VMs too, their recordings pulled out (docs/lld/microvm-recording.md).
 #
-# Builds the images, makes the secrets the first time, starts Postgres, applies migrations,
-# creates the first project and API key, then starts the platform services.
+# Builds or pulls the images, makes the secrets the first time, starts Postgres, applies migrations,
+# creates the first project and API keys, starts the platform services and makes one session.
 set -euo pipefail
 NO_BUILD=0; TWO=0
 for a in "$@"; do case "$a" in --no-build) NO_BUILD=1;; --two-nodes) TWO=1;; *) echo "unknown option $a" >&2; exit 2;; esac; done
@@ -16,6 +21,10 @@ SECRETS=/var/lib/kestrel/secrets
 COMPOSE=(docker compose --env-file /var/lib/kestrel/compose.env -f infra/compose/docker-compose.yml)
 RUNTIME_A=${RUNTIME_A:-docker}
 log() { printf '\n== %s\n' "$*"; }
+prev() { sed -n "s/^$1=//p" /var/lib/kestrel/compose.env 2>/dev/null | tail -n 1; }
+# shellcheck disable=SC1091
+[ -f /etc/kestrel/host.env ] && . /etc/kestrel/host.env
+KESTREL_QUOTA=${KESTREL_QUOTA:-on}
 
 log "host prerequisites"
 /usr/local/bin/kestrel-host-check
@@ -36,10 +45,45 @@ UNIT
   COMPOSE+=(-f infra/compose/docker-compose.microvm.yml)
 fi
 
-# The hostname and public address come from the instance's own metadata (token required).
-TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
-HOSTNAME_PUBLIC="${PUBLIC_IP//./-}.sslip.io"
+# Where clients reach the platform. On AWS the instance's metadata gives the public address
+# (a token is required); elsewhere PUBLIC_URL must be given once, and is kept after that.
+imds() {
+  local tok
+  tok=$(curl -s -m 2 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' || true)
+  if [ -n "$tok" ]; then curl -s -m 2 -f -H "X-aws-ec2-metadata-token: $tok" "http://169.254.169.254/latest/$1" || true; fi
+}
+AWS_PUBLIC_IP=$(imds meta-data/public-ipv4)
+PUBLIC_URL=${PUBLIC_URL:-${PUBLIC_HOSTNAME:+https://$PUBLIC_HOSTNAME}}
+PUBLIC_URL=${PUBLIC_URL:-$(prev PUBLIC_URL)}
+if [ -z "$PUBLIC_URL" ] && [ -n "$(prev PUBLIC_HOSTNAME)" ]; then PUBLIC_URL="https://$(prev PUBLIC_HOSTNAME)"; fi
+if [ -z "$PUBLIC_URL" ] && [ -n "$AWS_PUBLIC_IP" ]; then PUBLIC_URL="https://${AWS_PUBLIC_IP//./-}.sslip.io"; fi
+[ -n "$PUBLIC_URL" ] || { echo "set PUBLIC_URL, e.g. https://kestrel.example.com, or http://192.168.1.10 for local mode" >&2; exit 2; }
+PUBLIC_URL=${PUBLIC_URL%/}
+case "$PUBLIC_URL" in
+  https://*) KESTREL_MODE=public;;
+  http://*) KESTREL_MODE=local;;
+  *) echo "PUBLIC_URL must start with https:// or http://: $PUBLIC_URL" >&2; exit 2;;
+esac
+hostport=${PUBLIC_URL#*://}
+case "$hostport" in */*|*@*) echo "PUBLIC_URL must have no path or user info: $PUBLIC_URL" >&2; exit 2;; esac
+case "$hostport" in
+  \[*) HOSTNAME_PUBLIC="${hostport%%]*}]";;
+  *) HOSTNAME_PUBLIC=${hostport%%:*};;
+esac
+port=${hostport#"$HOSTNAME_PUBLIC"}; port=${port#:}
+if [ "$KESTREL_MODE" = public ]; then
+  [ -z "$port" ] || { echo "a public (https://) URL is served on port 443; drop :$port" >&2; exit 2; }
+  CADDY_SITE=$HOSTNAME_PUBLIC
+else
+  CADDY_SITE="http://:${port:-80}"
+  COMPOSE+=(-f infra/compose/docker-compose.local.yml)
+fi
+# The host's own addresses, which no session may reach (the egress gateway's BLOCKED_ADDRESSES):
+# the public one, the one the URL resolves to, and the one on the default route (the LAN's).
+ROUTE_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+RESOLVED_IP=$(getent ahostsv4 "$HOSTNAME_PUBLIC" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+PUBLIC_IP=${AWS_PUBLIC_IP:-${RESOLVED_IP:-$ROUTE_IP}}
+BLOCKED=$(printf '%s\n' "$AWS_PUBLIC_IP" "$RESOLVED_IP" "$ROUTE_IP" | grep -v '^$' | grep -v '^127\.' | sort -u | paste -sd, - || true)
 
 log "secrets"
 install -d -m 0700 "$SECRETS"
@@ -64,9 +108,15 @@ chown 1002:1002 "$SECRETS/web-session.secret" 2>/dev/null || true; chmod 0400 "$
 if [ ! -f "$SECRETS/profile-master.key" ]; then head -c 32 /dev/urandom > "$SECRETS/profile-master.key"; fi
 chown 1001:1001 "$SECRETS/profile-master.key"; chmod 0400 "$SECRETS/profile-master.key"
 install -d -m 0700 -o 1001 -g 0 /var/lib/kestrel/profiles
-PROFILE_QUOTA_ID=1000000001
-xfs_quota -x -c "project -s -p $(realpath /var/lib/kestrel/profiles) $PROFILE_QUOTA_ID" /data >/dev/null
-xfs_quota -x -c "limit -p bhard=${PROFILE_STORE_BYTES:-20g} $PROFILE_QUOTA_ID" /data
+if [ "$KESTREL_QUOTA" = on ]; then
+  PROFILE_QUOTA_ID=1000000001
+  xfs_quota -x -c "project -s -p $(realpath /var/lib/kestrel/profiles) $PROFILE_QUOTA_ID" /data >/dev/null
+  xfs_quota -x -c "limit -p bhard=${PROFILE_STORE_BYTES:-20g} $PROFILE_QUOTA_ID" /data
+else
+  # Without project quotas a recording volume has no size limit, so recording is off (v1 plan section 8).
+  echo "KESTREL_QUOTA=off: recording is off, and the profile store has no size limit"
+  RECORDING=off
+fi
 chmod 0711 "$SECRETS"; install -d -m 0755 /run/kestrel /var/lib/kestrel/a /var/lib/kestrel/b /var/lib/kestrel/postgres /run/kestrel/a /run/kestrel/b
 # /run is emptied by a reboot: have systemd make the runtime directories again at every boot, before
 # Docker starts the platform, or the node agent cannot open its sockets and restarts forever.
@@ -79,8 +129,13 @@ systemd-tmpfiles --create /etc/tmpfiles.d/kestrel.conf
 touch /run/xtables.lock
 mkdir -p /var/lib/kestrel/postgres && chown 999:999 /var/lib/kestrel/postgres 2>/dev/null || true
 
-ACCOUNT=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | sed -n 's/.*"accountId" *: *"\([0-9]*\)".*/\1/p')
-TEST_PAGE_URL="https://kestrel-testpage-$ACCOUNT.s3.us-east-1.amazonaws.com/test/index.html"
+# The harness's public test page (bench only): Terraform's S3 bucket on AWS, else none unless given.
+TEST_PAGE_URL=${TEST_PAGE_URL:-$(prev TEST_PAGE_URL)}
+if [ -z "$TEST_PAGE_URL" ]; then
+  ACCOUNT=$(imds dynamic/instance-identity/document | sed -n 's/.*"accountId" *: *"\([0-9]*\)".*/\1/p')
+  REGION=$(imds meta-data/placement/region)
+  if [ -n "$ACCOUNT" ]; then TEST_PAGE_URL="https://kestrel-testpage-$ACCOUNT.s3.${REGION:-us-east-1}.amazonaws.com/test/index.html"; fi
+fi
 NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443}]'
 SIZES="SLOTS_A=${SLOTS_A:-5}\nPOOL_A=${POOL_A:-2}"
 if [ "$TWO" = 1 ]; then
@@ -91,7 +146,6 @@ fi
 # Pool tuning (optional): warm browsers beyond the slots, and how many to start at once.
 SIZES="$SIZES\nPOOL_HEADROOM=${POOL_HEADROOM:-0}\nREFILL_AT_ONCE=${REFILL_AT_ONCE:-}\nRECORDING=${RECORDING:-on}\nREAP_MAX_QUEUE=${REAP_MAX_QUEUE:-4}\nRECORDING_POOL=${RECORDING_POOL:-1}"
 # The solver service and URL persist across deploys unless given again (CAPTCHA_SOLVER=none turns it off).
-prev() { sed -n "s/^$1=//p" /var/lib/kestrel/compose.env 2>/dev/null | tail -n 1; }
 CAPTCHA_SOLVER=${CAPTCHA_SOLVER-$(prev CAPTCHA_SOLVER)}
 CAPTCHA_SOLVER_URL=${CAPTCHA_SOLVER_URL-$(prev CAPTCHA_SOLVER_URL)}
 if [ "$CAPTCHA_SOLVER" = none ]; then CAPTCHA_SOLVER=; CAPTCHA_SOLVER_URL=; fi
@@ -99,8 +153,12 @@ if [ -n "$CAPTCHA_SOLVER" ] && [ ! -s "$SECRETS/captcha-solver.key" ]; then
   echo "CAPTCHA_SOLVER is $CAPTCHA_SOLVER but $SECRETS/captcha-solver.key is missing or empty" >&2; exit 1
 fi
 cat > /var/lib/kestrel/compose.env <<ENV
+PUBLIC_URL=$PUBLIC_URL
+KESTREL_MODE=$KESTREL_MODE
+CADDY_SITE=$CADDY_SITE
 PUBLIC_HOSTNAME=$HOSTNAME_PUBLIC
 PUBLIC_IP=$PUBLIC_IP
+BLOCKED_ADDRESSES=$BLOCKED
 TEST_PAGE_URL=$TEST_PAGE_URL
 KESTREL_NODES=$NODES
 CAPTCHA_SOLVER=$CAPTCHA_SOLVER
@@ -111,11 +169,32 @@ printf "$SIZES\nRUNTIME_A=$RUNTIME_A\nMICROVM_NETNS_READY=${MICROVM_NETNS_READY:
 printf "CHROME_VERSION=%s\n" "$(tr -d '[:space:]' < runtime/CHROME_VERSION)" >> /var/lib/kestrel/compose.env
 chmod 0600 /var/lib/kestrel/compose.env
 
-if [ "$NO_BUILD" != 1 ]; then
+PULLED=0
+if [ -n "${KESTREL_IMAGE_TAG:-}" ]; then
+  # Published images (.github/workflows/images.yml), tagged :dev so everything else is unchanged.
+  # KESTREL_BUILD_FALLBACK=1 builds them here when they cannot be pulled.
+  repo=${KESTREL_IMAGE_REPO:-ghcr.io/vedantxn}
+  log "pull the images ($repo, $KESTREL_IMAGE_TAG)"
+  if docker pull -q "$repo/kestrel-platform:$KESTREL_IMAGE_TAG" >/dev/null \
+    && docker pull -q "$repo/kestrel-runtime:$KESTREL_IMAGE_TAG" >/dev/null; then
+    docker tag "$repo/kestrel-platform:$KESTREL_IMAGE_TAG" kestrel-platform:dev
+    docker tag "$repo/kestrel-runtime:$KESTREL_IMAGE_TAG" kestrel-runtime:dev
+    PULLED=1
+  elif [ "${KESTREL_BUILD_FALLBACK:-0}" = 1 ]; then
+    echo "could not pull them; building here instead (about ten minutes)"
+    docker image rm kestrel-runtime:dev >/dev/null 2>&1 || true
+  else
+    echo "could not pull $repo/kestrel-{platform,runtime}:$KESTREL_IMAGE_TAG" >&2; exit 1
+  fi
+fi
+if [ "$PULLED" = 1 ]; then
+  :
+elif [ "$NO_BUILD" != 1 ]; then
   log "build the platform image"
   docker build -q -f infra/compose/Dockerfile -t kestrel-platform:dev . >/dev/null
   if ! docker image inspect kestrel-runtime:dev >/dev/null 2>&1; then
-    echo "kestrel-runtime:dev is missing; build it with runtime/build.sh" >&2; exit 1
+    log "build the runtime image"
+    runtime/build.sh
   fi
 fi
 if [ "$NO_BUILD" != 1 ]; then
@@ -183,9 +262,23 @@ if [ ! -f "$SECRETS/harness-api-key" ]; then
   chmod 0600 "$SECRETS/harness-api-key"
   echo "created the harness API key at $SECRETS/harness-api-key"
 fi
+# The operator's key: an admin key (it also sees nodes and can make projects), shown once below.
+NEW_OWNER_KEY=""
+if [ ! -f "$SECRETS/owner-api-key" ]; then
+  "${ADMIN[@]}" create-key --name owner --admin | tail -1 > "$SECRETS/owner-api-key"
+  chmod 0600 "$SECRETS/owner-api-key"
+  NEW_OWNER_KEY=$(cat "$SECRETS/owner-api-key")
+fi
+
+# Caddy used to run as its own compose project, made by the AWS first-boot script; it is part of
+# this one now. Its certificates stay in /data/caddy, so none is issued again.
+if [ -f /srv/kestrel-boot/compose.yml ]; then
+  docker compose -f /srv/kestrel-boot/compose.yml down >/dev/null 2>&1 || true
+  rm -rf /srv/kestrel-boot
+fi
 
 log "start the platform"
-SERVICES=(api egress-a node-a gateway-a web)
+SERVICES=(caddy api egress-a node-a gateway-a web)
 if [ "$TWO" = 1 ]; then SERVICES+=(egress-b node-b gateway-b); COMPOSE=("${COMPOSE[@]}" --profile b); fi
 "${COMPOSE[@]}" up -d --remove-orphans "${SERVICES[@]}"
 if [ "$TWO" = 0 ]; then
@@ -195,15 +288,38 @@ if [ "$TWO" = 0 ]; then
   docker ps -aq --filter label=kestrel.node=b | xargs -r docker rm -f >/dev/null
   docker volume ls -q --filter label=kestrel.node=b | xargs -r docker volume rm -f >/dev/null
 fi
-# P17: a host made before the dashboard answers everything outside the API with a placeholder
-# (Terraform does not re-run the startup script); send it to the dashboard, as a fresh host does.
-caddy=/srv/kestrel-boot/Caddyfile
-if [ -f "$caddy" ] && grep -q 'respond "kestrel placeholder"' "$caddy"; then
-  log "route the dashboard through Caddy"
-  sed -i 's#respond "kestrel placeholder" 200#reverse_proxy 127.0.0.1:3000#' "$caddy"
-  docker restart kestrel-boot-caddy-1 >/dev/null
+
+log "smoke test: one session"
+for _ in $(seq 1 60); do curl -sf -m 2 http://127.0.0.1:8080/healthz >/dev/null && break; sleep 2; done
+KEY=$(cat "$SECRETS/harness-api-key")
+created=$(curl -s -m 180 -X POST http://127.0.0.1:8080/v1/sessions -H "Authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -d '{"waitForCapacityMs":60000}' || true)
+sid=$(printf '%s' "$created" | jq -r '.id // empty' 2>/dev/null || true)
+connect=$(printf '%s' "$created" | jq -r '.connectUrl // empty' 2>/dev/null || true)
+if [ -z "$sid" ] || [ -z "$connect" ]; then
+  echo "the smoke test could not make a session: $created" >&2
+  "${COMPOSE[@]}" ps
+  exit 1
 fi
-sleep 8
-"${COMPOSE[@]}" ps
-curl -s -m 5 http://127.0.0.1:8080/healthz && echo
-echo "deployed https://$HOSTNAME_PUBLIC"
+curl -s -m 30 -X POST "http://127.0.0.1:8080/v1/sessions/$sid/stop" -H "Authorization: Bearer $KEY" >/dev/null || true
+echo "made and stopped $sid"
+
+cat <<DONE
+
+Kestrel is running.
+  Dashboard and API:  $PUBLIC_URL
+  Browsers (CDP):     ${connect%%/v1/*}
+  Runtime:            node a: $RUNTIME_A
+DONE
+if [ -n "$NEW_OWNER_KEY" ]; then
+  printf '  Admin API key:      %s\n                      (shown once; kept in %s)\n' "$NEW_OWNER_KEY" "$SECRETS/owner-api-key"
+else
+  printf '  Admin API key:      in %s\n' "$SECRETS/owner-api-key"
+fi
+if [ "$KESTREL_MODE" = local ]; then
+  cat <<'WARN'
+
+  LOCAL MODE: no TLS. API keys, tokens and browser traffic cross the network in cleartext.
+  Use it only on a network where every device is trusted (threat model T-79).
+WARN
+fi

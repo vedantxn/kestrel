@@ -29,6 +29,8 @@ export AWS_PROFILE=${KESTREL_PROFILE:-kestrel-dev}
 export AWS_REGION=${AWS_REGION:-us-east-1}
 export AWS_PAGER=""
 REMOTE_DIR=/srv/kestrel
+# The GitHub repository `deploy` clones: this checkout's origin unless KESTREL_REPO_SLUG says otherwise.
+REPO_SLUG=${KESTREL_REPO_SLUG:-$(git -C "$ROOT" remote get-url origin 2>/dev/null | sed -E 's#.*github\.com[:/]##; s#\.git$##')}
 SCHEDULE=kestrel-nightly-stop
 
 die() { echo "bin/host: $*" >&2; exit 1; }
@@ -223,12 +225,12 @@ cmd_deploy() {
     remote 'sudo install -d -m 0700 /var/lib/kestrel/secrets && sudo ssh-keygen -q -t ed25519 -N "" -C kestrel-host -f /var/lib/kestrel/secrets/deploy_key'
     local pub
     pub=$(remote 'sudo cat /var/lib/kestrel/secrets/deploy_key.pub')
-    gh repo deploy-key add - --repo vedantxn/kestrel --title "kestrel-host $(date +%F)" <<<"$pub"
+    gh repo deploy-key add - --repo "$REPO_SLUG" --title "kestrel-host $(date +%F)" <<<"$pub"
   fi
   remote "set -e; export GIT_SSH_COMMAND='ssh -i /var/lib/kestrel/secrets/deploy_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/kestrel/secrets/known_hosts'
     sudo -E bash -c '
       set -e
-      [ -d /srv/kestrel-git/.git ] || git clone git@github.com:vedantxn/kestrel.git /srv/kestrel-git
+      [ -d /srv/kestrel-git/.git ] || git clone git@github.com:$REPO_SLUG.git /srv/kestrel-git
       cd /srv/kestrel-git && git fetch --all --prune && git checkout --force $ref
       /usr/local/bin/kestrel-host-check
       if [ -x infra/host/deploy.sh ]; then infra/host/deploy.sh; else echo \"no infra/host/deploy.sh at this ref yet (arrives with the platform containers)\"; fi

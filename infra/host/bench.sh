@@ -16,8 +16,10 @@ cd "$(dirname "$0")/../.."
 # shellcheck disable=SC1091
 set -a; . /var/lib/kestrel/compose.env; set +a
 mkdir -p /var/lib/kestrel/reports /run/netns /data/kestrel-vm
-TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-INSTANCE_TYPE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type)
+# The machine's type, for the report: from AWS's metadata when there is any.
+TOKEN=$(curl -s -m 2 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' || true)
+INSTANCE_TYPE=$([ -n "$TOKEN" ] && curl -s -m 2 -f -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type || true)
+INSTANCE_TYPE=${INSTANCE_TYPE:-$(nproc) vCPU, $(awk '/MemTotal/ {printf "%d GiB", $2/1048576}' /proc/meminfo)}
 TWO_NODES=0; [ -n "${SLOTS_B:-}" ] && TWO_NODES=1
 extra=(-e "SLOTS=$(( ${SLOTS_A:-0} + ${SLOTS_B:-0} ))" -e "POOL=$(( ${POOL_A:-0} + ${POOL_B:-0} ))"
   -e "TWO_NODES=$TWO_NODES" -e "RUNTIME_A=${RUNTIME_A:-docker}" -e "MICROVM_RECORDING=${MICROVM_RECORDING:-vm}"
@@ -27,6 +29,7 @@ for kv in "$@"; do extra+=(-e "$kv"); done
 # The node agents' probe controls, as deploy.sh composes them.
 COMPOSE=(docker compose --env-file /var/lib/kestrel/compose.env -f infra/compose/docker-compose.yml)
 [ "${RUNTIME_A:-docker}" = microvm ] && COMPOSE+=(-f infra/compose/docker-compose.microvm.yml)
+[ "${KESTREL_MODE:-public}" = local ] && COMPOSE+=(-f infra/compose/docker-compose.local.yml)
 AGENTS=(node-a); SOCKETS=(/run/kestrel/a/harness.sock)
 if [ "$TWO_NODES" = 1 ]; then COMPOSE+=(--profile b); AGENTS+=(node-b); SOCKETS+=(/run/kestrel/b/harness.sock); fi
 harness() { # on|off
