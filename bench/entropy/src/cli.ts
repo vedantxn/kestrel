@@ -98,17 +98,18 @@ async function kestrelSession(i: number): Promise<Target> {
   };
 }
 
-async function targets(): Promise<Target[]> {
+/** The browsers to observe, each made only when it is its turn (a deployment may have few slots). */
+function targets(): (() => Promise<Target>)[] {
   if (a.cdp?.length) {
     if (a.cdp.length < 2) usage("give at least two --cdp URLs");
-    return a.cdp.map((u, i) => ({
+    return a.cdp.map((u, i) => async () => ({
       label: `cdp${i + 1}`,
       cdpUrl: u,
       release: async () => {},
     }));
   }
   if (a["cdp-cmd"]) {
-    return Array.from({ length: n }, (_, i) => {
+    return Array.from({ length: n }, (_, i) => async () => {
       const out = execSync(a["cdp-cmd"]!, { encoding: "utf8" })
         .trim()
         .split("\n");
@@ -119,12 +120,9 @@ async function targets(): Promise<Target[]> {
       };
     });
   }
-  if (kestrelUrl && kestrelKey) {
-    // One at a time, so each comes the way a customer's would: from the pool or a fresh restore.
-    const list: Target[] = [];
-    for (let i = 0; i < n; i++) list.push(await kestrelSession(i + 1));
-    return list;
-  }
+  // One at a time, so each comes the way a customer's would: from the pool or a fresh restore.
+  if (kestrelUrl && kestrelKey)
+    return Array.from({ length: n }, (_, i) => () => kestrelSession(i + 1));
   return usage("say which browsers: --cdp, --cdp-cmd, or --kestrel with --key");
 }
 
@@ -146,10 +144,17 @@ function print(r: Report, obs: SessionObservation[]): void {
     console.log(
       `\nlargest clock difference from this machine: ${Math.round(r.maxAbsSkewMs)} ms`,
     );
+  const failedCount = obs.filter((o) => o.error).length;
+  const shared = r.items.some((i) => i.collisions.length > 0);
+  const why = [
+    shared ? "values shared between browsers (above)" : "",
+    failedCount ? `${failedCount} browser(s) could not be observed` : "",
+    r.sessions < 2 ? "fewer than two browsers observed" : "",
+  ].filter(Boolean);
   console.log(
     r.pass
       ? `\nPASS: ${r.sessions} browsers, nothing shared.`
-      : `\nFAIL: ${r.sessions < 2 ? "fewer than two browsers observed" : "values shared between browsers (above)"}.`,
+      : `\nFAIL: ${why.join("; ")}.`,
   );
 }
 
@@ -160,10 +165,26 @@ const domain =
   a["tls-domain"] ??
   (a["tls-ip"] ? `${a["tls-ip"].replace(/\./g, "-")}.sslip.io` : "");
 
-const list = await targets();
+const list = targets();
 const obs: SessionObservation[] = [];
+const failed = (label: string, e: unknown): SessionObservation => ({
+  label,
+  first: { math: [], grv: "", uuid: null, ecdh: null },
+  page: null,
+  skewMs: 0,
+  hellos: [],
+  error: (e as Error).message.split("\n")[0]!,
+});
 try {
-  for (const [i, t] of list.entries()) {
+  for (const [i, make] of list.entries()) {
+    let t: Target;
+    try {
+      t = await make();
+    } catch (e) {
+      obs.push(failed(`browser ${i + 1}`, e));
+      console.log(`browser ${i + 1}: failed: ${obs[obs.length - 1]!.error}`);
+      continue;
+    }
     process.stdout.write(`observing ${t.label} ... `);
     try {
       obs.push(
@@ -177,20 +198,13 @@ try {
         `ok${recorder ? ` (${obs[obs.length - 1]!.hellos.length} hellos)` : ""}`,
       );
     } catch (e) {
-      const error = (e as Error).message.split("\n")[0]!;
-      obs.push({
-        label: t.label,
-        first: { math: [], grv: "", uuid: null, ecdh: null },
-        page: null,
-        skewMs: 0,
-        hellos: [],
-        error,
-      });
-      console.log(`failed: ${error}`);
+      obs.push(failed(t.label, e));
+      console.log(`failed: ${obs[obs.length - 1]!.error}`);
+    } finally {
+      await t.release();
     }
   }
 } finally {
-  await Promise.all(list.map((t) => t.release()));
   await recorder?.close();
 }
 const report = compare(obs);
