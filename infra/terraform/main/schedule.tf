@@ -1,4 +1,4 @@
-# I17: stop the host every night at 02:00 India time, so a forgotten host costs about $10 a month
+# I17: stop the host every night at 02:00 (var.autostop_timezone), so a forgotten host costs about $10 a month
 # rather than $140. `bin/host autostop off` flips the state for a long run.
 data "aws_iam_policy_document" "scheduler_assume" {
   statement {
@@ -36,7 +36,7 @@ resource "aws_iam_role_policy" "scheduler_stop" {
 resource "aws_scheduler_schedule" "nightly_stop" {
   name                         = "kestrel-nightly-stop"
   schedule_expression          = "cron(0 2 * * ? *)"
-  schedule_expression_timezone = "Asia/Kolkata"
+  schedule_expression_timezone = var.autostop_timezone
   state                        = var.autostop_enabled ? "ENABLED" : "DISABLED"
 
   flexible_time_window {

@@ -16,7 +16,7 @@
 #   bin/host check                   check the host prerequisites (C15)
 #
 # KESTREL_TARGET=runner points every command at the benchmark runner (runner.tf) instead.
-#   bin/host autostop on|off|status  the nightly 02:00 India time stop
+#   bin/host autostop on|off|status  the nightly 02:00 stop (Terraform's autostop_* variables)
 #
 # There is no SSH port. Shell, file sync and port forwarding all travel over AWS Systems Manager,
 # with a throwaway SSH key pushed through EC2 Instance Connect for each connection (about 60 s of

@@ -30,3 +30,4 @@ infra/terraform/**/tfplan
 .claude/
 .next/
 next-env.d.ts
+infra/terraform/**/terraform.tfvars

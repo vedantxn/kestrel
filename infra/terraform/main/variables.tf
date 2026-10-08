@@ -31,9 +31,15 @@ variable "open_node_b_port" {
 }
 
 variable "autostop_enabled" {
-  description = "Stop the host every night at 02:00 India time (I17). `bin/host autostop off` disables it for long runs."
+  description = "Stop the host every night at 02:00 in autostop_timezone (I17). `bin/host autostop on|off` flips it for a run."
   type        = bool
-  default     = true
+  default     = false
+}
+
+variable "autostop_timezone" {
+  description = "IANA time zone for the nightly stop, e.g. \"Europe/Berlin\"."
+  type        = string
+  default     = "UTC"
 }
 
 variable "budget_email" {
