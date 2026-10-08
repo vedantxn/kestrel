@@ -19,7 +19,7 @@ resource "aws_security_group" "fresh" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "fresh" {
-  for_each          = var.enable_fresh_vm ? toset(["80", "443", "8443"]) : toset([])
+  for_each          = var.enable_fresh_vm ? toset(["80", "443", "8443", "8444"]) : toset([])
   security_group_id = aws_security_group.fresh[0].id
   ip_protocol       = "tcp"
   from_port         = tonumber(each.value)
