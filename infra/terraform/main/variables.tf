@@ -82,3 +82,15 @@ variable "nested_virtualization" {
   type        = bool
   default     = true
 }
+
+variable "enable_fresh_vm" {
+  description = "Create the plain Ubuntu machine for the install test (fresh.tf). Destroy it after by applying without it."
+  type        = bool
+  default     = false
+}
+
+variable "fresh_instance_type" {
+  description = "The install test machine: 16 GiB so the installer picks the microVM runtime."
+  type        = string
+  default     = "m7i.xlarge"
+}
