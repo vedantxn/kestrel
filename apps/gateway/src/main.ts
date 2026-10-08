@@ -18,7 +18,11 @@ const verifier = await TokenVerifier.fromPem(
 // W2: terminate our own TLS from the certificate copy, waiting until there is one.
 let tlsWatcher: TlsWatcher | undefined;
 let tls = null;
-if (!env.TLS_OFF) {
+if (env.TLS_OFF)
+  log.warn(
+    "LOCAL MODE: no TLS. Tokens and CDP traffic cross the network in cleartext; use this only on a network where every device is trusted",
+  );
+else {
   if (!env.TLS_DIR) throw new Error("TLS_DIR is required unless TLS_OFF=1");
   tlsWatcher = new TlsWatcher(env.TLS_DIR, log);
   tls = await tlsWatcher.waitForFirst();
@@ -29,6 +33,7 @@ const gateway = new Gateway({
   nodeId: env.NODE_ID,
   publicHostname: env.PUBLIC_HOSTNAME,
   publicPort: env.PUBLIC_PORT ?? env.LISTEN_PORT,
+  publicSecure: !env.TLS_OFF,
   verifier,
   table,
   log,

@@ -19,6 +19,7 @@ import {
   redactToken,
   type Attachment,
   type GatewayRoute,
+  cdpBaseUrl,
 } from "@kestrel/contracts";
 import {
   SpentTokens,
@@ -39,6 +40,8 @@ export interface GatewayOptions {
   /** What clients are told to connect to when discovery rewrites addresses. */
   publicHostname: string;
   publicPort: number;
+  /** False in local mode: discovery then hands out `ws://` addresses. Defaults to true. */
+  publicSecure?: boolean;
   verifier: TokenVerifier;
   table: RouteTable;
   log: Logger;
@@ -396,7 +399,12 @@ export class Gateway {
     const upstreamPath =
       a.route.kind === "json-version" ? "/json/version" : "/json/list";
     const data = await this.upstreamJson(a.entry, upstreamPath);
-    const base = `wss://${this.o.publicHostname}:${this.o.publicPort}/v1/sessions/${a.route.sessionId}/cdp`;
+    const base = cdpBaseUrl(
+      this.o.publicSecure ?? true,
+      this.o.publicHostname,
+      this.o.publicPort,
+      a.route.sessionId,
+    );
     const tok = `?${TOKEN_QUERY_PARAM}=${encodeURIComponent(a.token)}`;
     const rewrite = (ws: unknown): string | undefined => {
       if (typeof ws !== "string") return undefined;

@@ -11,7 +11,7 @@ export const Env = z.object({
   PUBLIC_PORT: z.coerce.number().int().optional(),
   /** Directory holding cert.pem and key.pem (a copy of Caddy's, maintained by the node agent). */
   TLS_DIR: z.string().optional(),
-  /** Serve plain HTTP. Never in production. */
+  /** Serve plain HTTP and WebSocket: local mode only (a trusted network), or tests. */
   TLS_OFF: z.enum(["1", "true"]).optional(),
   TOKEN_PUBLIC_KEY_FILE: z.string().min(1),
   /** The node agent's Unix socket (C6). */

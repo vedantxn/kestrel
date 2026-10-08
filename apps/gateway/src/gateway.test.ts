@@ -289,6 +289,22 @@ describe("discovery (C2)", () => {
     expect(s.container.requests.every((x) => x.proof === s.proof)).toBe(true);
   });
 
+  it("hands out ws:// addresses in local mode", async () => {
+    rig = await makeRig({
+      publicHostname: "192.168.1.10",
+      publicSecure: false,
+    });
+    const s = await rig.addSession();
+    const token = await rig.token(s);
+    const r = await rig.http(
+      `/v1/sessions/${s.id}/cdp/json/version?token=${encodeURIComponent(token)}`,
+    );
+    expect(r.status).toBe(200);
+    const u = new URL(JSON.parse(r.body).webSocketDebuggerUrl);
+    expect(u.protocol).toBe("ws:");
+    expect(u.host).toBe("192.168.1.10:8443");
+  });
+
   it("rewrites the target list and drops the frontend url", async () => {
     rig = await makeRig();
     const s = await rig.addSession();
