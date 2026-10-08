@@ -1,0 +1,91 @@
+name: Images
+
+# The platform and runtime images, pushed to GHCR so a host can pull them (infra/host/deploy.sh with
+# KESTREL_IMAGE_TAG) instead of building them. main is published after CI passes on it, as
+# :main and :sha-<commit>; a release tag v* as :<tag> and :latest.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Bundle runtimed (as runtime/build.sh does)
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build -w @kestrel/contracts
+          npm run bundle -w @kestrel/runtimed
+          cp runtime/runtimed/dist/runtimed.mjs runtime/runtimed.mjs
+      - name: Tags
+        id: tags
+        run: |
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          sha=$(git rev-parse --short=12 HEAD)
+          if [ "$GITHUB_EVENT_NAME" = push ]; then names=("$GITHUB_REF_NAME" latest); else names=(main "sha-$sha"); fi
+          for image in platform runtime; do
+            list=""
+            for n in "${names[@]}"; do list+="ghcr.io/$owner/kestrel-$image:$n,"; done
+            echo "$image=${list%,}" >> "$GITHUB_OUTPUT"
+          done
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "chrome=$(tr -d '[:space:]' < runtime/CHROME_VERSION)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/compose/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.platform }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.tags.outputs.revision }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=Kestrel's services (API, gateway, egress, node agent, dashboard)
+          cache-from: type=gha,scope=platform
+          cache-to: type=gha,scope=platform,mode=max
+      - name: Runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: runtime
+          file: runtime/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: CHROME_VERSION=${{ steps.tags.outputs.chrome }}
+          tags: ${{ steps.tags.outputs.runtime }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.tags.outputs.revision }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=Kestrel's browser runtime (Chrome for Testing and runtimed)
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,scope=runtime,mode=max
