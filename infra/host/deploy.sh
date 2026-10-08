@@ -21,7 +21,8 @@ SECRETS=/var/lib/kestrel/secrets
 COMPOSE=(docker compose --env-file /var/lib/kestrel/compose.env -f infra/compose/docker-compose.yml)
 RUNTIME_A=${RUNTIME_A:-docker}
 log() { printf '\n== %s\n' "$*"; }
-prev() { sed -n "s/^$1=//p" /var/lib/kestrel/compose.env 2>/dev/null | tail -n 1; }
+# A setting from the last deploy, or nothing on the first (no file: pipefail must not end the script).
+prev() { [ -f /var/lib/kestrel/compose.env ] || return 0; sed -n "s/^$1=//p" /var/lib/kestrel/compose.env | tail -n 1; }
 # shellcheck disable=SC1091
 [ -f /etc/kestrel/host.env ] && . /etc/kestrel/host.env
 KESTREL_QUOTA=${KESTREL_QUOTA:-on}
