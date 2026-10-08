@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { SESSION_TTL_S, openSession, sealSession, sessionKey } from "./session";
+import {
+  SESSION_TTL_S,
+  openSession,
+  sealSession,
+  sessionKey,
+  cookieSecure,
+} from "./session";
 
 const key = sessionKey("a".repeat(48));
 const session = {
@@ -38,5 +44,17 @@ describe("the session cookie (T-66)", () => {
 
   it("needs a long secret", () => {
     expect(() => sessionKey("short")).toThrow(/32 characters/);
+  });
+});
+
+describe("cookieSecure", () => {
+  it("is Secure in production over https, and not over http (local mode) or in development", () => {
+    expect(cookieSecure("production", "https://kestrel.example.com")).toBe(
+      true,
+    );
+    expect(cookieSecure("production", "http://192.168.1.10")).toBe(false);
+    expect(cookieSecure("development", "https://kestrel.example.com")).toBe(
+      false,
+    );
   });
 });

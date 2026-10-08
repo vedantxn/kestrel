@@ -10,6 +10,7 @@ import {
 import {
   SESSION_COOKIE,
   SESSION_TTL_S,
+  cookieSecure,
   openSession,
   sealSession,
   sessionKey,
@@ -55,7 +56,7 @@ export async function writeSession(s: WebSession): Promise<void> {
   jar.set(SESSION_COOKIE, await sealSession(s, secretKey()), {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: cookieSecure(process.env.NODE_ENV, PUBLIC_API_URL),
     path: "/",
     maxAge: SESSION_TTL_S,
   });

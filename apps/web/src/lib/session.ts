@@ -62,3 +62,14 @@ export async function openSession(
     return null;
   }
 }
+
+/**
+ * Whether the sign-in cookie is marked Secure. Browsers drop a Secure cookie on a plain http://
+ * page (other than localhost), so a local-mode deployment, served over http://, must not set it.
+ */
+export function cookieSecure(
+  nodeEnv: string | undefined,
+  publicApiUrl: string,
+): boolean {
+  return nodeEnv === "production" && publicApiUrl.startsWith("https:");
+}
