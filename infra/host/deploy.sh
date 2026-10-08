@@ -300,10 +300,18 @@ fi
 log "smoke test: one session"
 for _ in $(seq 1 60); do curl -sf -m 2 http://127.0.0.1:8080/healthz >/dev/null && break; sleep 2; done
 KEY=$(cat "$SECRETS/harness-api-key")
-created=$(curl -s -m 180 -X POST http://127.0.0.1:8080/v1/sessions -H "Authorization: Bearer $KEY" \
-  -H 'content-type: application/json' -d '{"waitForCapacityMs":60000}' || true)
-sid=$(printf '%s' "$created" | jq -r '.id // empty' 2>/dev/null || true)
-connect=$(printf '%s' "$created" | jq -r '.connectUrl // empty' 2>/dev/null || true)
+# A node agent the deploy just recreated takes a few seconds to answer: retry what the API calls
+# retryable, for up to three minutes.
+sid=""; connect=""; created=""
+for _ in $(seq 1 36); do
+  created=$(curl -s -m 120 -X POST http://127.0.0.1:8080/v1/sessions -H "Authorization: Bearer $KEY" \
+    -H 'content-type: application/json' -d '{"waitForCapacityMs":60000}' || true)
+  sid=$(printf '%s' "$created" | jq -r '.id // empty' 2>/dev/null || true)
+  connect=$(printf '%s' "$created" | jq -r '.connectUrl // empty' 2>/dev/null || true)
+  [ -n "$sid" ] && break
+  [ "$(printf '%s' "$created" | jq -r '.error.retryable // true' 2>/dev/null)" = true ] || break
+  sleep 5
+done
 if [ -z "$sid" ] || [ -z "$connect" ]; then
   echo "the smoke test could not make a session: $created" >&2
   "${COMPOSE[@]}" ps
