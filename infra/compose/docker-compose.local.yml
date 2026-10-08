@@ -1,0 +1,16 @@
+# Local mode (no TLS, a trusted network only: threat model T-79), added to docker-compose.yml by
+# infra/host/deploy.sh when PUBLIC_URL is http://. Caddy serves plain HTTP on the URL's port, the
+# gateways serve plain WebSocket on theirs, and the node agents copy no certificate.
+services:
+  node-a:
+    environment:
+      CADDY_DATA: ""
+  gateway-a:
+    environment:
+      TLS_OFF: "1"
+  node-b:
+    environment:
+      CADDY_DATA: ""
+  gateway-b:
+    environment:
+      TLS_OFF: "1"

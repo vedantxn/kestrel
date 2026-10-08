@@ -2,7 +2,8 @@
 # namespace except Postgres. `restart: always` plus services that retry their dependencies means
 # start order does not matter and a reboot is routine (I13).
 #
-# Variables come from /var/lib/kestrel/compose.env, written by infra/host/deploy.sh.
+# Variables come from /var/lib/kestrel/compose.env, written by infra/host/deploy.sh. Local mode
+# (no TLS) adds docker-compose.local.yml; microVM nodes add docker-compose.microvm.yml.
 name: kestrel
 
 x-platform: &platform
@@ -14,6 +15,20 @@ x-platform: &platform
     options: { mode: non-blocking, max-buffer-size: 4m }
 
 services:
+  # The public front (TLS in public mode): see infra/compose/Caddyfile.
+  caddy:
+    image: caddy:2.11.4
+    network_mode: host
+    restart: always
+    environment:
+      CADDY_SITE: ${CADDY_SITE}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /data/caddy:/data
+    logging:
+      driver: journald
+      options: { mode: non-blocking, max-buffer-size: 4m }
+
   postgres:
     image: postgres:18
     restart: always
@@ -39,7 +54,7 @@ services:
     command: ["node", "apps/api/dist/server.js"]
     environment:
       DATABASE_URL_FILE: /secrets/database-url
-      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+      PUBLIC_URL: ${PUBLIC_URL}
       TOKEN_PRIVATE_KEY_FILE: /secrets/token-private.pem
       KESTREL_NODES: ${KESTREL_NODES}
       KESTREL_FAILPOINTS: ${KESTREL_FAILPOINTS:-}
@@ -74,7 +89,7 @@ services:
       ]
     environment:
       KESTREL_API_URL: http://127.0.0.1:8080
-      KESTREL_PUBLIC_API_URL: https://${PUBLIC_HOSTNAME}
+      KESTREL_PUBLIC_API_URL: ${PUBLIC_URL}
       WEB_SESSION_SECRET_FILE: /secrets/web-session.secret
     volumes:
       - /var/lib/kestrel/secrets/web-session.secret:/secrets/web-session.secret:ro
@@ -87,7 +102,7 @@ services:
       PROXY_HOST: 172.30.1.1
       PROXY_PORT: "3128"
       CONTROL_SOCKET: /run/kestrel/a/egress.sock
-      BLOCKED_ADDRESSES: ${PUBLIC_IP}
+      BLOCKED_ADDRESSES: ${BLOCKED_ADDRESSES:-${PUBLIC_IP}}
       # Extra CAs trusted for https:// upstream proxies (a file under /run/kestrel); empty: none.
       PROXY_CA_FILE: ${PROXY_CA_FILE:-}
       METRICS_PORT: "7301"
@@ -120,7 +135,7 @@ services:
       BRIDGE_IP: 172.30.1.1
       EGRESS_SOCKET: /run/kestrel/a/egress.sock
       AGENT_SOCKET: /run/kestrel/a/agent.sock
-      SECCOMP_FILE: /srv/kestrel/runtime/seccomp/seccomp-chrome.json
+      SECCOMP_FILE: /app/runtime/seccomp/seccomp-chrome.json
       CADDY_DATA: /data/caddy
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
       TLS_DIR: /run/kestrel/a/tls
@@ -141,7 +156,6 @@ services:
       - /var/lib/kestrel/secrets:/secrets:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /run/xtables.lock:/run/xtables.lock
-      - /srv/kestrel:/srv/kestrel:ro
       - /data/caddy:/data/caddy:ro
       # W3: read recordings back from their volumes (opened without following links).
       - /data/docker/volumes:/data/docker/volumes:ro
@@ -175,7 +189,7 @@ services:
       PROXY_HOST: 172.30.2.1
       PROXY_PORT: "3128"
       CONTROL_SOCKET: /run/kestrel/b/egress.sock
-      BLOCKED_ADDRESSES: ${PUBLIC_IP}
+      BLOCKED_ADDRESSES: ${BLOCKED_ADDRESSES:-${PUBLIC_IP}}
       # Extra CAs trusted for https:// upstream proxies (a file under /run/kestrel); empty: none.
       PROXY_CA_FILE: ${PROXY_CA_FILE:-}
       METRICS_PORT: "7302"
@@ -208,7 +222,7 @@ services:
       BRIDGE_IP: 172.30.2.1
       EGRESS_SOCKET: /run/kestrel/b/egress.sock
       AGENT_SOCKET: /run/kestrel/b/agent.sock
-      SECCOMP_FILE: /srv/kestrel/runtime/seccomp/seccomp-chrome.json
+      SECCOMP_FILE: /app/runtime/seccomp/seccomp-chrome.json
       CADDY_DATA: /data/caddy
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
       TLS_DIR: /run/kestrel/b/tls
@@ -229,7 +243,6 @@ services:
       - /var/lib/kestrel/secrets:/secrets:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /run/xtables.lock:/run/xtables.lock
-      - /srv/kestrel:/srv/kestrel:ro
       - /data/caddy:/data/caddy:ro
       # W3: read recordings back from their volumes (opened without following links).
       - /data/docker/volumes:/data/docker/volumes:ro

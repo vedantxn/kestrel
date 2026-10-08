@@ -1,0 +1,29 @@
+# The public front: TLS for the API, the viewer and the dashboard (P17). CADDY_SITE is the hostname
+# in public mode (Caddy gets a certificate for it, which the node agents copy to the gateways), or
+# http://:<port> in local mode (no TLS). Written by infra/host/deploy.sh into compose.env.
+{$CADDY_SITE} {
+	log {
+		output stdout
+		format filter {
+			wrap json
+			# Threat model G-01: credentials never reach a log.
+			fields {
+				request>headers>Authorization delete
+				request>headers>X-Api-Key delete
+				request>headers>Cookie delete
+				request>uri query {
+					delete token
+				}
+			}
+		}
+	}
+
+	@public path /v1/* /mcp /live/* /healthz /openapi.json
+	handle @public {
+		reverse_proxy 127.0.0.1:8080
+	}
+	# P17: everything else is the dashboard.
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}
