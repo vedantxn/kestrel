@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Check any Kestrel deployment from outside it, with what a client has: its URL and an API key.
+#
+#   bin/verify <url> <api key> [--n N] [--tls-ip IP] [--json FILE]
+#
+# 1. Real Playwright (wss:// connect and discovery) and Puppeteer runs through its gateway: create,
+#    connect, load a page, check the title, stop (the v1 exit check 10).
+# 2. snapshot-entropy-check on N sessions (default 10): no two browsers share Math.random,
+#    getRandomValues, randomUUID or WebCrypto keys; with --tls-ip (this machine's public IPv4, root
+#    for port 443) their TLS ClientHellos too.
+# What needs the host itself (isolation probes, chaos, m1 and m2) runs there:
+#   sudo infra/host/bench.sh m1
+# Needs Node 24. Exits non-zero if anything fails.
+set -euo pipefail
+url=${1:?usage: bin/verify <url> <api key> [--n N] [--tls-ip IP] [--json FILE]}
+key=${2:?usage: bin/verify <url> <api key> [--n N] [--tls-ip IP] [--json FILE]}
+shift 2
+n=10; tls=(); json=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --n) n=$2; shift 2;;
+    --tls-ip) tls=(--tls-ip "$2"); shift 2;;
+    --json) json=$2; shift 2;;
+    *) echo "unknown option $1" >&2; exit 2;;
+  esac
+done
+cd "$(dirname "$0")/.."
+node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' \
+  || { echo "bin/verify needs Node 24 (nvm use)" >&2; exit 2; }
+if [ ! -d node_modules ]; then npm ci --no-audit --no-fund >/dev/null; fi
+npx tsc -b bench/framework bench/entropy
+
+fail=0
+echo "== Playwright and Puppeteer through the gateway"
+KESTREL_URL=${url%/} KESTREL_API_KEY=$key node bench/framework/dist/outside.js || fail=1
+
+echo
+echo "== snapshot-entropy-check, $n sessions"
+node bench/entropy/dist/cli.js --kestrel "${url%/}" --key "$key" --n "$n" ${tls[@]+"${tls[@]}"} \
+  ${json:+--json "$json"} || fail=1
+
+echo
+if [ "$fail" = 0 ]; then echo "verify: PASS"; else echo "verify: FAIL"; fi
+exit "$fail"

@@ -67,7 +67,7 @@ jobs:
       - name: Shell scripts
         run: |
           sudo apt-get install -y shellcheck >/dev/null
-          scripts="bin/host bin/tf bin/exit-check bin/exit-from-scratch bin/chrome-check install.sh infra/host/*.sh"
+          scripts="bin/host bin/tf bin/exit-check bin/exit-from-scratch bin/chrome-check bin/verify install.sh infra/host/*.sh"
           for f in $scripts; do bash -n "$f"; done
           shellcheck -S warning $scripts
           bin/exit-from-scratch --dry-run >/dev/null
