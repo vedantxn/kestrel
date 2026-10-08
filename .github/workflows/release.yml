@@ -1,0 +1,78 @@
+name: Release
+
+# A tag v<version> publishes @kestrel/sdk and @kestrel/cli to npm, kestrel-browser to PyPI, and the
+# GitHub release. The images are published by images.yml from the same tag. Each package's version
+# must equal the tag's.
+#
+# Needs: the repository secret NPM_TOKEN (an npm automation token that can publish @kestrel/*), and
+# PyPI trusted publishing for kestrel-browser from this repository's release.yml, environment pypi.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every package's version is the tag's
+        run: |
+          want=${GITHUB_REF_NAME#v}
+          for f in packages/sdk-ts/package.json packages/cli/package.json; do
+            got=$(jq -r .version "$f"); [ "$got" = "$want" ] || { echo "$f is $got, the tag is $want"; exit 1; }
+          done
+          got=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/sdk-py/pyproject.toml)
+          [ "$got" = "$want" ] || { echo "pyproject.toml is $got, the tag is $want"; exit 1; }
+
+  npm:
+    needs: versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build -w @kestrel/contracts -w @kestrel/sdk -w @kestrel/cli
+      - run: npm publish -w @kestrel/sdk && npm publish -w @kestrel/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  pypi:
+    needs: versions
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+        working-directory: packages/sdk-py
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/sdk-py/dist
+
+  github:
+    needs: [npm, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=docs/results/${GITHUB_REF_NAME}.md
+          if [ -f "$notes" ]; then gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$notes"
+          else gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes; fi
