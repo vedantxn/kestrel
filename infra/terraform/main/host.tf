@@ -65,11 +65,8 @@ resource "aws_instance" "host" {
 
   user_data = templatefile("${path.module}/userdata.sh.tpl", {
     data_volume_id = replace(aws_ebs_volume.data.id, "-", "")
-    hostname       = local.hostname
-    compose_sha256 = "40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a"
-    compose_ver    = "v5.6.0"
-    caddy_image    = "caddy:2.11.4"
     host_check     = file("${path.module}/../../host/host-check.sh")
+    prepare_host   = file("${path.module}/../../host/prepare-host.sh")
   })
 
   tags = { Name = "kestrel-host" }
