@@ -4,7 +4,10 @@ import {
   Session,
   SessionToken,
 } from "@kestrel/contracts";
+import { parsePublicUrl } from "@kestrel/contracts";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { publicEndpointOf } from "./config.js";
+import { LIVE_PAGE } from "./live-page.js";
 import { makeEnv, type Env } from "./test/harness.js";
 
 let env: Env;
@@ -195,6 +198,63 @@ describe("the live-view page (W2)", () => {
       "frame-ancestors 'none'",
     );
     expect(res.body).toContain("Kestrel live view");
+    expect(String(res.headers["content-security-policy"])).toContain(
+      "connect-src wss:;",
+    );
+  });
+
+  it("checks the socket is on the page's own host, and allows ws:// only on an http:// page", () => {
+    expect(LIVE_PAGE).toContain("sock.hostname !== location.hostname");
+    expect(LIVE_PAGE).toContain(
+      'sock.protocol === "ws:" && location.protocol === "http:"',
+    );
+  });
+});
+
+describe("local mode (PUBLIC_URL=http://...)", () => {
+  it("mints ws:// connect URLs and an http:// viewer, and lets the viewer's CSP reach ws:", async () => {
+    await env.close();
+    env = await makeEnv({
+      publicEndpoint: parsePublicUrl("http://192.168.1.10"),
+    });
+    const s = await running();
+    expect(s.connectUrl).toMatch(
+      new RegExp(
+        `^ws://192\\.168\\.1\\.10:\\d+/v1/sessions/${s.id}/cdp\\?token=`,
+      ),
+    );
+    const view = SessionToken.parse(
+      (await post(`/v1/sessions/${s.id}/tokens`, { scope: "view" })).json(),
+    );
+    const url = new URL(view.url);
+    expect(url.origin).toBe("http://192.168.1.10");
+    expect(new URLSearchParams(url.hash.slice(1)).get("ws")).toMatch(
+      new RegExp(`^ws://192\\.168\\.1\\.10:\\d+/v1/sessions/${s.id}/live$`),
+    );
+    const page = await env.api.inject({ method: "GET", url: `/live/${s.id}` });
+    expect(String(page.headers["content-security-policy"])).toContain(
+      "connect-src ws: wss:;",
+    );
+  });
+
+  it("reads PUBLIC_URL first, and treats PUBLIC_HOSTNAME alone as TLS", () => {
+    expect(
+      publicEndpointOf({
+        PUBLIC_URL: "http://10.0.0.5:8088",
+        PUBLIC_HOSTNAME: "x",
+      }),
+    ).toEqual({
+      secure: false,
+      host: "10.0.0.5",
+      webOrigin: "http://10.0.0.5:8088",
+    });
+    expect(publicEndpointOf({ PUBLIC_HOSTNAME: "1-2-3-4.sslip.io" })).toEqual({
+      secure: true,
+      host: "1-2-3-4.sslip.io",
+      webOrigin: "https://1-2-3-4.sslip.io",
+    });
+    expect(() => publicEndpointOf({})).toThrow(/PUBLIC_URL/);
+    expect(() => publicEndpointOf({ PUBLIC_URL: "http://h/path" })).toThrow();
   });
 });
 

@@ -5,14 +5,15 @@ import type { CaptchaProvider } from "@kestrel/contracts";
  * socket address and the token) is in the URL fragment, which the browser never sends to a
  * server, so the token reaches no log and no referrer. A `control` token also sends input.
  */
-export const LIVE_PAGE_HEADERS = {
-  "content-type": "text/html; charset=utf-8",
-  "referrer-policy": "no-referrer",
-  "cache-control": "no-store",
-  "x-frame-options": "DENY",
-  "content-security-policy":
-    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; connect-src wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-} as const;
+export function livePageHeaders(secure: boolean): Record<string, string> {
+  return {
+    "content-type": "text/html; charset=utf-8",
+    "referrer-policy": "no-referrer",
+    "cache-control": "no-store",
+    "x-frame-options": "DENY",
+    "content-security-policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; connect-src ${secure ? "wss:" : "ws: wss:"}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+  };
+}
 
 /** What the viewer calls each CAPTCHA provider. Every provider has one (checked by a test). */
 export const CAPTCHA_LABELS: Record<CaptchaProvider, string> = {
@@ -51,7 +52,10 @@ canvas{max-width:100%;height:auto;border:1px solid var(--line);outline:none}
   var token = f.get("token"), wsUrl = f.get("ws");
   var status = document.getElementById("status"), modeEl = document.getElementById("mode");
   var canvas = document.getElementById("screen"), ctx = canvas.getContext("2d"), tabs = document.getElementById("tabs");
-  if (!token || !wsUrl || !/^wss:\\/\\//.test(wsUrl)) { status.textContent = "This link is incomplete."; return; }
+  // The socket is the gateway on this page's own host; ws:// only when the page itself came over http:// (local mode).
+  var sock = null; try { sock = new URL(wsUrl); } catch (e) {}
+  var schemeOk = sock && (sock.protocol === "wss:" || (sock.protocol === "ws:" && location.protocol === "http:"));
+  if (!token || !sock || !schemeOk || sock.hostname !== location.hostname) { status.textContent = "This link is incomplete."; return; }
   var scope = "view";
   try { scope = JSON.parse(atob(token.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))).scope; } catch (e) {}
   var control = scope === "control";

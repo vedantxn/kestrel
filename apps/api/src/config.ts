@@ -3,6 +3,9 @@ import {
   CaptchaSolverConfig,
   CaptchaSolverService,
   PROFILE_LIMITS,
+  type PublicEndpoint,
+  parsePublicUrl,
+  securePublicEndpoint,
 } from "@kestrel/contracts";
 import { FsProfileStore } from "@kestrel/shared";
 import { z } from "zod";
@@ -29,8 +32,13 @@ export const Env = z.object({
   API_PUBLIC_PORT: z.coerce.number().int().default(8080),
   API_INTERNAL_HOST: z.string().default("127.0.0.1"),
   API_INTERNAL_PORT: z.coerce.number().int().default(8081),
-  /** The hostname clients connect to: `<ip>.sslip.io`. */
-  PUBLIC_HOSTNAME: z.string().min(1),
+  /**
+   * Where clients reach the deployment: `https://<host>`, or `http://<host>[:port]` in local mode
+   * (no TLS, trusted networks only). When unset, `PUBLIC_HOSTNAME` names a TLS deployment.
+   */
+  PUBLIC_URL: unsetIfEmpty(z.string().optional()),
+  /** The hostname clients connect to, e.g. `<ip>.sslip.io`, for a TLS deployment. */
+  PUBLIC_HOSTNAME: unsetIfEmpty(z.string().min(1).optional()),
   TOKEN_PRIVATE_KEY_FILE: z.string().min(1),
   /** JSON array of node configs. */
   KESTREL_NODES: z.string().min(2),
@@ -63,6 +71,15 @@ export const Env = z.object({
   ),
 });
 export type Env = z.infer<typeof Env>;
+
+/** The deployment's public endpoint, from `PUBLIC_URL` or else `PUBLIC_HOSTNAME`. */
+export function publicEndpointOf(
+  env: Pick<Env, "PUBLIC_URL" | "PUBLIC_HOSTNAME">,
+): PublicEndpoint {
+  if (env.PUBLIC_URL) return parsePublicUrl(env.PUBLIC_URL);
+  if (env.PUBLIC_HOSTNAME) return securePublicEndpoint(env.PUBLIC_HOSTNAME);
+  throw new Error("set PUBLIC_URL (or PUBLIC_HOSTNAME for a TLS deployment)");
+}
 
 /**
  * The solver from the environment, or undefined when none is configured. A misconfiguration fails

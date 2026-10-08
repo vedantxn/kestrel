@@ -2,7 +2,11 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROFILE_LIMITS } from "@kestrel/contracts";
+import {
+  PROFILE_LIMITS,
+  type PublicEndpoint,
+  securePublicEndpoint,
+} from "@kestrel/contracts";
 import { createPrisma, type PrismaClient } from "@kestrel/db";
 import {
   FakeClock,
@@ -67,6 +71,8 @@ export interface EnvOptions {
   failpoints?: string;
   log?: Logger;
   captchaSolver?: Ctx["captchaSolver"];
+  /** Defaults to a TLS deployment at 1-2-3-4.sslip.io. */
+  publicEndpoint?: PublicEndpoint;
   /** P18: give the deployment profiles, with a store in a fresh temporary directory. */
   profiles?: boolean | { maxBytes?: number };
 }
@@ -166,7 +172,8 @@ export async function makeEnv(opts: EnvOptions = {}): Promise<Env> {
     signer,
     nodeClient,
     nodes: nodeConfigs,
-    publicHostname: "1-2-3-4.sslip.io",
+    publicEndpoint:
+      opts.publicEndpoint ?? securePublicEndpoint("1-2-3-4.sslip.io"),
     metrics: createMetrics(),
     rateLimiter: new RateLimiter(clock),
     nodeCallTimeoutMs: opts.nodeCallTimeoutMs ?? 200,

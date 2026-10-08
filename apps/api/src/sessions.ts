@@ -80,7 +80,7 @@ export async function toApiSession(
       nowMs: ctx.clock.now(),
     });
     connectUrl = buildConnectUrl(
-      ctx.publicHostname,
+      ctx.publicEndpoint,
       node.connectPort,
       id,
       token,
@@ -640,8 +640,8 @@ export async function mintSessionToken(
     scope: req.scope,
     token,
     url: live
-      ? buildLiveViewUrl(ctx.publicHostname, node.connectPort, publicId, token)
-      : buildConnectUrl(ctx.publicHostname, node.connectPort, publicId, token),
+      ? buildLiveViewUrl(ctx.publicEndpoint, node.connectPort, publicId, token)
+      : buildConnectUrl(ctx.publicEndpoint, node.connectPort, publicId, token),
     expiresAt: new Date(expMs).toISOString(),
   };
 }

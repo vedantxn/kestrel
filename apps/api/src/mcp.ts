@@ -464,7 +464,7 @@ function buildServer(
     {
       instructions:
         "Kestrel runs cloud Chrome sessions. create_session returns a session with a connectUrl " +
-        "(wss://, a secret: do not share or log it) for Playwright or Puppeteer. navigate, " +
+        "(wss://, or ws:// on a local-mode deployment; a secret: do not share or log it) for Playwright or Puppeteer. navigate, " +
         "get_page_text, screenshot and computer (click, type, scroll, keys by coordinates) drive " +
         "the session's page directly. get_live_view_url gives a link a person can open to watch " +
         "or take over. If a session's `captcha` is set (get_session), a CAPTCHA is showing. A session " +
@@ -504,7 +504,7 @@ function buildServer(
       title: "Create a browser session",
       description:
         "Start a fresh, isolated cloud Chrome. Returns the session; when status is `ready`, " +
-        "`connectUrl` is a wss:// URL for Playwright connectOverCDP or Puppeteer connect, and the " +
+        "`connectUrl` is a wss:// URL (ws:// in local mode) for Playwright connectOverCDP or Puppeteer connect, and the " +
         "browser tools here can drive it. All durations are milliseconds.",
       inputSchema: createInput,
     },

@@ -1,4 +1,4 @@
-import type { CaptchaSolverConfig } from "@kestrel/contracts";
+import type { CaptchaSolverConfig, PublicEndpoint } from "@kestrel/contracts";
 import type { PrismaClient } from "@kestrel/db";
 import type { Clock, Failpoints, Logger, TokenSigner } from "@kestrel/shared";
 import type { NodeConfig } from "./config.js";
@@ -16,7 +16,8 @@ export interface Ctx {
   signer: TokenSigner;
   nodeClient: NodeClient;
   nodes: Map<string, NodeConfig>;
-  publicHostname: string;
+  /** Where clients reach this deployment; `secure` is false only in local mode. */
+  publicEndpoint: PublicEndpoint;
   metrics: Metrics;
   rateLimiter: RateLimiter;
   /** The API's call to a node (K5). Injectable so tests need not wait 30 seconds. */

@@ -14,7 +14,13 @@ import {
   parseEnv,
   systemClock,
 } from "@kestrel/shared";
-import { Env, loadNodes, loadProfiles, loadSolver } from "./config.js";
+import {
+  Env,
+  loadNodes,
+  loadProfiles,
+  loadSolver,
+  publicEndpointOf,
+} from "./config.js";
 import type { Ctx } from "./context.js";
 import { buildInternalApp, buildPublicApp } from "./http.js";
 import { createMetrics } from "./metrics.js";
@@ -43,7 +49,7 @@ const ctx: Ctx = {
   ),
   nodeClient: new HttpNodeClient(nodes),
   nodes,
-  publicHostname: env.PUBLIC_HOSTNAME,
+  publicEndpoint: publicEndpointOf(env),
   metrics: createMetrics(),
   rateLimiter: new RateLimiter(systemClock),
   nodeCallTimeoutMs: 30_000,
@@ -52,6 +58,11 @@ const ctx: Ctx = {
   captchaSolver: loadSolver(env),
   profiles: loadProfiles(env),
 };
+if (!ctx.publicEndpoint.secure)
+  log.warn(
+    { publicUrl: ctx.publicEndpoint.webOrigin },
+    "LOCAL MODE: no TLS. API keys, tokens and CDP traffic cross the network in cleartext; use this only on a network where every device is trusted",
+  );
 if (ctx.captchaSolver)
   log.info(
     {

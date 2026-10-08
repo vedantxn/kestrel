@@ -30,7 +30,7 @@ import { authenticate, safeEqual } from "./auth.js";
 import type { Auth, Ctx } from "./context.js";
 import { AppError } from "./errors.js";
 import { newRequestId } from "./ids.js";
-import { LIVE_PAGE, LIVE_PAGE_HEADERS } from "./live-page.js";
+import { LIVE_PAGE, livePageHeaders } from "./live-page.js";
 import { registerMcp, type McpOptions } from "./mcp.js";
 import { heartbeat, ingestReports, registerNode } from "./nodes.js";
 import {
@@ -289,7 +289,7 @@ export function buildPublicApp(
 
   // W2. The viewer page; it carries no secret, so it needs no key (the token is in the fragment).
   app.get("/live/:id", async (_req, reply) =>
-    reply.headers(LIVE_PAGE_HEADERS).send(LIVE_PAGE),
+    reply.headers(livePageHeaders(ctx.publicEndpoint.secure)).send(LIVE_PAGE),
   );
 
   app.get(
