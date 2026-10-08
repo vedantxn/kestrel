@@ -231,7 +231,8 @@ chown 1001:1001 "$SECRETS/token-private.pem"; chmod 0400 "$SECRETS/token-private
 # Docker allocates containers' addresses from the lower half; microVMs use the upper (ADR 0017).
 session_net() { # NAME OCTET
   local range
-  range=$(docker network inspect -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}' "$1" 2>/dev/null || echo missing)
+  # By the exit status alone: Docker 29 prints an empty line for a network that does not exist.
+  if ! range=$(docker network inspect -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}' "$1" 2>/dev/null); then range=missing; fi
   if [ "$range" != "172.30.$2.0/25" ] && [ "$range" != missing ]; then
     if [ -z "$(docker network inspect -f '{{range .Containers}}x{{end}}' "$1")" ]; then
       docker network rm "$1" >/dev/null; range=missing
