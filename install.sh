@@ -169,7 +169,8 @@ env "${deploy_env[@]}" "$DIR/infra/host/deploy.sh"
 cat <<NEXT
 
 Next:
-  - Open $PUBLIC_URL and sign in with the admin API key above.
+  - Open $PUBLIC_URL and sign in with the admin API key (above on a first install; kept in
+    /var/lib/kestrel/secrets/owner-api-key).
   - Make a key for your code on the dashboard's API keys page, then follow
     https://github.com/vedantxn/kestrel/blob/main/docs/agents/quickstart.md
   - Check it yourself: $DIR/bin/verify $PUBLIC_URL <api key>
