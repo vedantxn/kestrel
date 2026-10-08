@@ -8,6 +8,9 @@ import { SessionId } from "./ids.js";
  * public one and the token kept. A header `Authorization: Bearer <token>` is accepted in
  * place of the query parameter. Every released Puppeteer drops the path and query when it
  * discovers over `https://`, so `wss://` is the documented form for both clients.
+ *
+ * A deployment in local mode (no TLS, for a trusted network only) uses `ws://` and `http://`
+ * in the same places.
  */
 
 /** Close codes the gateway uses (C7 in the v1 plan). 1012 is the standard "service restart". */
@@ -66,25 +69,88 @@ export const LIVE_MODE_HEADER = "x-kestrel-live-mode";
 export const LiveMode = ["view", "control"] as const;
 export type LiveMode = (typeof LiveMode)[number];
 
+/**
+ * Where clients reach a deployment. `secure` is false only in local mode, which serves plain
+ * HTTP and WebSocket and is meant for a trusted network. `host` is a hostname or an IP address
+ * (IPv6 in brackets); `webOrigin` is the origin of the API and the dashboard, with its port when
+ * that is not the scheme's default.
+ */
+export interface PublicEndpoint {
+  secure: boolean;
+  host: string;
+  webOrigin: string;
+}
+
+/**
+ * Parse a deployment's public base URL, e.g. `https://kestrel.example.com` or
+ * `http://192.168.1.10`. Only `http:` and `https:` with no path, query, fragment or user info.
+ */
+export function parsePublicUrl(url: string): PublicEndpoint {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    throw new Error(`not a URL: ${url}`);
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:")
+    throw new Error(`the public URL must be http:// or https://: ${url}`);
+  if (u.username || u.password)
+    throw new Error(`the public URL must not carry user info: ${url}`);
+  if ((u.pathname !== "/" && u.pathname !== "") || u.search || u.hash)
+    throw new Error(
+      `the public URL must not have a path, query or fragment: ${url}`,
+    );
+  if (!u.hostname) throw new Error(`the public URL has no host: ${url}`);
+  return {
+    secure: u.protocol === "https:",
+    host: u.hostname,
+    webOrigin: u.origin,
+  };
+}
+
+/** The public endpoint of a TLS deployment known by its hostname alone. */
+export function securePublicEndpoint(hostname: string): PublicEndpoint {
+  return parsePublicUrl(`https://${hostname}`);
+}
+
+/** A bare hostname names a TLS deployment, as it did before local mode. */
+function endpointOf(endpoint: PublicEndpoint | string): PublicEndpoint {
+  return typeof endpoint === "string"
+    ? securePublicEndpoint(endpoint)
+    : endpoint;
+}
+
+/** The gateway's base URL for a session's CDP endpoint, without the token. */
+export function cdpBaseUrl(
+  secure: boolean,
+  host: string,
+  port: number,
+  sessionId: string,
+): string {
+  return `${secure ? "wss" : "ws"}://${host}:${port}${cdpBasePath(sessionId)}`;
+}
+
 /** W1. The viewer page's URL; the token and the socket address travel in the fragment, which never leaves the browser. */
 export function buildLiveViewUrl(
-  host: string,
+  endpointOrHost: PublicEndpoint | string,
   gatewayPort: number,
   sessionId: string,
   token: string,
 ): string {
-  const ws = `wss://${host}:${gatewayPort}${livePath(sessionId)}`;
-  return `https://${host}/live/${sessionId}#ws=${encodeURIComponent(ws)}&token=${encodeURIComponent(token)}`;
+  const endpoint = endpointOf(endpointOrHost);
+  const ws = `${endpoint.secure ? "wss" : "ws"}://${endpoint.host}:${gatewayPort}${livePath(sessionId)}`;
+  return `${endpoint.webOrigin}/live/${sessionId}#ws=${encodeURIComponent(ws)}&token=${encodeURIComponent(token)}`;
 }
 
 /** The URL placed in `Session.connectUrl`. */
 export function buildConnectUrl(
-  host: string,
+  endpointOrHost: PublicEndpoint | string,
   port: number,
   sessionId: string,
   token: string,
 ): string {
-  return `wss://${host}:${port}${cdpBasePath(sessionId)}?${TOKEN_QUERY_PARAM}=${encodeURIComponent(token)}`;
+  const endpoint = endpointOf(endpointOrHost);
+  return `${cdpBaseUrl(endpoint.secure, endpoint.host, port, sessionId)}?${TOKEN_QUERY_PARAM}=${encodeURIComponent(token)}`;
 }
 
 export type GatewayRoute =

@@ -262,7 +262,7 @@ export const Session = z
       .string()
       .nullable()
       .describe(
-        "A wss:// URL for Playwright, Puppeteer or any CDP client. Null unless the session can be connected to.",
+        "A wss:// URL (ws:// on a deployment in local mode) for Playwright, Puppeteer or any CDP client. Null unless the session can be connected to.",
       ),
     viewport: Viewport,
     deviceScaleFactor: z.number().positive(),

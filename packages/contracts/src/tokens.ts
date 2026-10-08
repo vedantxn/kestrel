@@ -83,7 +83,7 @@ export const SessionToken = z
   .object({
     scope: TokenScope,
     token: z.string(),
-    /** `cdp`: the `wss://` connect URL. `view`/`control`: the viewer page, with the token in the fragment. */
+    /** `cdp`: the `wss://` connect URL (`ws://` in local mode). `view`/`control`: the viewer page, with the token in the fragment. */
     url: z.string(),
     expiresAt: z.string(),
   })
