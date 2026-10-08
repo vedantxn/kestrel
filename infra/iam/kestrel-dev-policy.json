@@ -75,13 +75,13 @@
       "Sid": "ToggleTheNightlyStopOnly",
       "Effect": "Allow",
       "Action": ["scheduler:GetSchedule", "scheduler:UpdateSchedule"],
-      "Resource": "arn:aws:scheduler:us-east-1:792472359030:schedule/default/kestrel-nightly-stop"
+      "Resource": "arn:aws:scheduler:us-east-1:ACCOUNT_ID:schedule/default/kestrel-nightly-stop"
     },
     {
       "Sid": "PassTheSchedulerRoleToTheScheduler",
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::792472359030:role/kestrel-scheduler-stop",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/kestrel-scheduler-stop",
       "Condition": {
         "StringEquals": {
           "iam:PassedToService": "scheduler.amazonaws.com"
