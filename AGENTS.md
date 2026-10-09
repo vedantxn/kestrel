@@ -1,6 +1,6 @@
 # Kestrel: notes for agents
 
-Kestrel is an open-source cloud browser platform for AI agents. Read `docs/HLD.md` (architecture) and `docs/v1-plan.md` (what is being built now, and in what order) before changing anything. Decisions are in `docs/adr/`; the threat model is `docs/threat-model.md`.
+Kestrel is an open-source cloud browser platform for AI agents. It is finished (v1.0.0) and in maintenance: bug fixes, documentation and benchmark corrections only, no new features. Read `docs/HLD.md` (architecture), `docs/STATUS.md` (what exists) and `docs/v1-plan.md` (how it was built, and section 8's differences from the HLD) before changing anything. Decisions are in `docs/adr/`; the threat model is `docs/threat-model.md`.
 
 ## Rules
 
