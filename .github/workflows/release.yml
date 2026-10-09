@@ -1,8 +1,8 @@
 name: Release
 
-# A tag v<version> publishes @kestrel/sdk and @kestrel/cli to npm, kestrel-browser to PyPI, and the
-# GitHub release. The images are published by images.yml from the same tag. Each package's version
-# must equal the tag's.
+# A tag v<version> publishes @kestrel/sdk, @kestrel/cli and snapshot-entropy-check to npm,
+# kestrel-browser to PyPI, and the GitHub release (notes: docs/results/v<version>.md). The images
+# are published by images.yml from the same tag. Every package's version must equal the tag's.
 #
 # Needs: the repository secret NPM_TOKEN (an npm automation token that can publish @kestrel/*), and
 # PyPI trusted publishing for kestrel-browser from this repository's release.yml, environment pypi.
@@ -26,6 +26,9 @@ jobs:
           done
           got=$(sed -n 's/^version = "\(.*\)"/\1/p' packages/sdk-py/pyproject.toml)
           [ "$got" = "$want" ] || { echo "pyproject.toml is $got, the tag is $want"; exit 1; }
+          for f in packages/sdk-ts/src/http.ts packages/sdk-py/src/kestrel_browser/_base.py bench/entropy/package.json; do
+            grep -q "$want" "$f" || { echo "$f does not carry $want"; exit 1; }
+          done
 
   npm:
     needs: versions
@@ -41,8 +44,8 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - run: npm run build -w @kestrel/contracts -w @kestrel/sdk -w @kestrel/cli
-      - run: npm publish -w @kestrel/sdk && npm publish -w @kestrel/cli
+      - run: npm run build -w @kestrel/contracts -w @kestrel/sdk -w @kestrel/cli -w snapshot-entropy-check
+      - run: npm publish -w @kestrel/sdk && npm publish -w @kestrel/cli && npm publish -w snapshot-entropy-check
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
