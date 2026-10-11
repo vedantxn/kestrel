@@ -9,7 +9,7 @@ import "./profile.js"; // Profile, CreateProfileRequest, ListProfiles* (P18)
 
 /**
  * The public API's OpenAPI document, generated from the same Zod schemas the API validates
- * with. It is the public contract (C1): the committed copy at `docs/api/openapi.json` is
+ * with. It is the public contract (C1): the committed copy at `packages/contracts/openapi.json` is
  * checked against this function in CI, so a schema change that is not reflected there fails.
  */
 export const API_VERSION = "0.1.0";

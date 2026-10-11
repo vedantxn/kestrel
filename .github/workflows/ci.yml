@@ -46,7 +46,7 @@ jobs:
       - name: Generated OpenAPI is committed
         run: |
           npm run openapi
-          git diff --exit-code docs/api/openapi.json
+          git diff --exit-code packages/contracts/openapi.json
 
   infra:
     runs-on: ubuntu-latest

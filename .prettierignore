@@ -4,7 +4,7 @@ coverage
 package-lock.json
 docs/HLD.md
 docs/v1-plan.md
-docs/api/openapi.json
+packages/contracts/openapi.json
 # Raw benchmark output and its reports, kept as produced.
 docs/results
 .next

@@ -1,0 +1,4317 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Kestrel API",
+    "version": "0.1.0",
+    "description": "Cloud browsers for AI agents. Create a session, then connect any CDP client (Playwright, Puppeteer) to its `connectUrl`. Durations are milliseconds. Errors have one shape; branch on `code` and `retryable`."
+  },
+  "security": [
+    {
+      "bearer": []
+    },
+    {
+      "apiKey": []
+    }
+  ],
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "unauthorized",
+              "not_found",
+              "invalid_request",
+              "quota_exceeded",
+              "capacity_exhausted",
+              "conflict",
+              "internal"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "param": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "requestId"
+        ],
+        "additionalProperties": false
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "CaptchaProvider": {
+        "type": "string",
+        "enum": [
+          "recaptcha",
+          "hcaptcha",
+          "turnstile",
+          "cloudflare_challenge",
+          "arkose",
+          "datadome",
+          "perimeterx",
+          "geetest",
+          "aws_waf"
+        ]
+      },
+      "CaptchaSolveFailure": {
+        "type": "string",
+        "enum": [
+          "unsupported",
+          "no_details",
+          "solver_error",
+          "solver_unreachable",
+          "timeout",
+          "inject_failed",
+          "budget",
+          "no_solver",
+          "runtime_unsupported"
+        ]
+      },
+      "CaptchaSolveState": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/CaptchaProvider"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "solving",
+              "solved",
+              "failed"
+            ]
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CaptchaSolveFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "status",
+          "at",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "description": "`solved` means a token was put into the page (and its callback called, when one was found); the site may still refuse it. `failed`: hand the CAPTCHA to a person."
+      },
+      "SessionCaptcha": {
+        "type": "object",
+        "properties": {
+          "providers": {
+            "minItems": 1,
+            "maxItems": 9,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CaptchaProvider"
+            }
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the current, unbroken presence began."
+          },
+          "solve": {
+            "default": null,
+            "description": "Sessions created with `captcha.solve`: the latest solve of a CAPTCHA still present.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CaptchaSolveState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "providers",
+          "since",
+          "solve"
+        ],
+        "additionalProperties": false,
+        "description": "A CAPTCHA from a known provider is showing on a page. It may already be solved: a solved checkbox stays until the page moves on."
+      },
+      "CaptchaOptions": {
+        "type": "object",
+        "properties": {
+          "solve": {
+            "default": false,
+            "description": "Send reCAPTCHA, hCaptcha and Turnstile widgets that show to the deployment's CAPTCHA solver service and put the token into the page. Refused when the deployment has no solver. The page's URL (without query or fragment) and the widget's site key go to that third party, and the page can tell its callback was called by something other than the widget.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "solve"
+        ],
+        "additionalProperties": false
+      },
+      "SessionProxy": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "The proxy, as `http://host:port`, `https://host:port` (TLS to the proxy) or `socks5://host:port`."
+          },
+          "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "generic",
+              "brightdata",
+              "oxylabs",
+              "decodo",
+              "iproyal"
+            ],
+            "description": "How to ask the proxy for `country`, `region`, `city` and `sticky`. `generic` (the default) sends the username unchanged."
+          },
+          "country": {
+            "description": "Exit country (ISO 3166-1 alpha-2). With a provider adapter, the proxy is asked for it; with `generic`, it only says where your proxy exits, and sets the default `timezone`.",
+            "type": "string"
+          },
+          "region": {
+            "description": "Exit region or state, in the provider's spelling (e.g. `california`). Needs `country` and a provider adapter that supports it.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "city": {
+            "description": "Exit city, in the provider's spelling (e.g. `new york`). Needs `country` and a provider adapter.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "sticky": {
+            "description": "Keep the same exit address for requests carrying this id (a sticky session). Needs a provider adapter.",
+            "type": "string",
+            "pattern": "^[A-Za-z0-9]{1,32}$"
+          },
+          "stickyMinutes": {
+            "description": "How long a sticky exit is kept, where the provider lets you choose. Needs `sticky`.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1440
+          }
+        },
+        "required": [
+          "server"
+        ],
+        "additionalProperties": false,
+        "description": "The session's upstream proxy. The username is the one given, before any provider adapter; the password is never returned."
+      },
+      "ProxyConfig": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "The proxy, as `http://host:port`, `https://host:port` (TLS to the proxy) or `socks5://host:port`."
+          },
+          "username": {
+            "description": "For authentication to the proxy (HTTP Basic, or SOCKS5 username and password).",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "password": {
+            "writeOnly": true,
+            "description": "Write-only: never stored by the API or returned.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "generic",
+              "brightdata",
+              "oxylabs",
+              "decodo",
+              "iproyal"
+            ],
+            "description": "How to ask the proxy for `country`, `region`, `city` and `sticky`. `generic` (the default) sends the username unchanged."
+          },
+          "country": {
+            "description": "Exit country (ISO 3166-1 alpha-2). With a provider adapter, the proxy is asked for it; with `generic`, it only says where your proxy exits, and sets the default `timezone`.",
+            "type": "string"
+          },
+          "region": {
+            "description": "Exit region or state, in the provider's spelling (e.g. `california`). Needs `country` and a provider adapter that supports it.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "city": {
+            "description": "Exit city, in the provider's spelling (e.g. `new york`). Needs `country` and a provider adapter.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "sticky": {
+            "description": "Keep the same exit address for requests carrying this id (a sticky session). Needs a provider adapter.",
+            "type": "string",
+            "pattern": "^[A-Za-z0-9]{1,32}$"
+          },
+          "stickyMinutes": {
+            "description": "How long a sticky exit is kept, where the provider lets you choose. Needs `sticky`.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1440
+          }
+        },
+        "required": [
+          "server"
+        ],
+        "additionalProperties": false,
+        "description": "Send this session's traffic through your own proxy. The proxy resolves hostnames."
+      },
+      "Viewport": {
+        "type": "object",
+        "properties": {
+          "width": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 1920
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 1000
+          }
+        },
+        "required": [
+          "width",
+          "height"
+        ],
+        "additionalProperties": false,
+        "description": "The page's inner size in CSS pixels."
+      },
+      "NetworkPolicy": {
+        "type": "object",
+        "properties": {
+          "allow": {
+            "description": "If present, only these hostnames may be reached.",
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^(\\*\\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+            }
+          },
+          "deny": {
+            "description": "These hostnames are refused.",
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^(\\*\\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionProfile": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^prf_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "persist": {
+            "default": false,
+            "description": "Save the browser's state back into the profile when the session ends cleanly. Only one session at a time may persist a profile.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "persist"
+        ],
+        "additionalProperties": false
+      },
+      "Metadata": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "additionalProperties": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 512
+        }
+      },
+      "SessionOptions": {
+        "type": "object",
+        "properties": {
+          "timeout": {
+            "default": 900000,
+            "description": "Maximum lifetime in milliseconds.",
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 21600000
+          },
+          "idleTimeout": {
+            "default": 300000,
+            "description": "End the session after this long with no client attached, in milliseconds.",
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 21600000
+          },
+          "stopOnDisconnect": {
+            "default": false,
+            "description": "End the session when its last client disconnects.",
+            "type": "boolean"
+          },
+          "viewport": {
+            "default": {
+              "width": 1280,
+              "height": 720
+            },
+            "$ref": "#/components/schemas/Viewport"
+          },
+          "network": {
+            "default": {},
+            "$ref": "#/components/schemas/NetworkPolicy"
+          },
+          "recording": {
+            "default": false,
+            "description": "Record the browser's display to video, retrievable from `/recording` after the session.",
+            "type": "boolean"
+          },
+          "metadata": {
+            "default": {},
+            "$ref": "#/components/schemas/Metadata"
+          },
+          "proxy": {
+            "$ref": "#/components/schemas/SessionProxy"
+          },
+          "timezone": {
+            "description": "The browser's time zone, as pages see it in `Date` and `Intl`. Defaults to the zone of the proxy's exit `country` where that country has one clear zone; otherwise the host's (UTC).",
+            "type": "string",
+            "maxLength": 64
+          },
+          "captcha": {
+            "default": {
+              "solve": false
+            },
+            "$ref": "#/components/schemas/CaptchaOptions"
+          },
+          "profile": {
+            "description": "Start with a saved profile (`/v1/profiles`). Use the browser's default context: other contexts are not saved.",
+            "$ref": "#/components/schemas/SessionProfile"
+          }
+        },
+        "required": [
+          "timeout",
+          "idleTimeout",
+          "stopOnDisconnect",
+          "viewport",
+          "network",
+          "recording",
+          "metadata",
+          "captcha"
+        ],
+        "additionalProperties": false
+      },
+      "CreateSessionRequest": {
+        "type": "object",
+        "properties": {
+          "timeout": {
+            "default": 900000,
+            "description": "Maximum lifetime in milliseconds.",
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 21600000
+          },
+          "idleTimeout": {
+            "default": 300000,
+            "description": "End the session after this long with no client attached, in milliseconds.",
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 21600000
+          },
+          "stopOnDisconnect": {
+            "default": false,
+            "description": "End the session when its last client disconnects.",
+            "type": "boolean"
+          },
+          "viewport": {
+            "default": {
+              "width": 1280,
+              "height": 720
+            },
+            "$ref": "#/components/schemas/Viewport"
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkPolicy"
+          },
+          "recording": {
+            "default": false,
+            "description": "Record the browser's display to video, retrievable from `/recording` after the session.",
+            "type": "boolean"
+          },
+          "metadata": {
+            "default": {},
+            "$ref": "#/components/schemas/Metadata"
+          },
+          "proxy": {
+            "$ref": "#/components/schemas/ProxyConfig"
+          },
+          "timezone": {
+            "description": "The browser's time zone, as pages see it in `Date` and `Intl`. Defaults to the zone of the proxy's exit `country` where that country has one clear zone; otherwise the host's (UTC).",
+            "type": "string",
+            "maxLength": 64
+          },
+          "captcha": {
+            "default": {
+              "solve": false
+            },
+            "$ref": "#/components/schemas/CaptchaOptions"
+          },
+          "profile": {
+            "description": "Start with a saved profile (`/v1/profiles`). Use the browser's default context: other contexts are not saved.",
+            "$ref": "#/components/schemas/SessionProfile"
+          },
+          "idempotencyKey": {
+            "description": "Repeating a request with the same key returns the original session.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "waitForCapacityMs": {
+            "description": "If the platform is full, retry admission for up to this long before answering 503.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 60000
+          }
+        },
+        "additionalProperties": false
+      },
+      "SessionUsage": {
+        "type": "object",
+        "properties": {
+          "browserSeconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "egressBytesUp": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Bytes the browser sent out through the egress gateway (request bodies and tunnelled TLS), counted outside the browser."
+          },
+          "egressBytesDown": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Bytes the browser received through the egress gateway."
+          }
+        },
+        "required": [
+          "browserSeconds",
+          "egressBytesUp",
+          "egressBytesDown"
+        ],
+        "additionalProperties": false
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "scheduling",
+              "starting",
+              "ready",
+              "active",
+              "stopping",
+              "stopped",
+              "failed",
+              "timed_out"
+            ]
+          },
+          "endReason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "client_stop",
+                  "client_disconnect",
+                  "idle_timeout",
+                  "max_lifetime",
+                  "browser_crash",
+                  "oom",
+                  "runtime_crash",
+                  "node_lost",
+                  "start_timeout",
+                  "disk_limit",
+                  "node_refused",
+                  "profile_unavailable"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "readyAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "endedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "connectUrl": {
+            "description": "A wss:// URL (ws:// on a deployment in local mode) for Playwright, Puppeteer or any CDP client. Null unless the session can be connected to.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "viewport": {
+            "$ref": "#/components/schemas/Viewport"
+          },
+          "deviceScaleFactor": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "options": {
+            "$ref": "#/components/schemas/SessionOptions"
+          },
+          "nodeId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9]{0,15}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startPath": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "hot",
+                  "warm",
+                  "cold"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "usage": {
+            "$ref": "#/components/schemas/SessionUsage"
+          },
+          "captcha": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionCaptcha"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "endReason",
+          "createdAt",
+          "readyAt",
+          "endedAt",
+          "connectUrl",
+          "viewport",
+          "deviceScaleFactor",
+          "options",
+          "nodeId",
+          "startPath",
+          "usage",
+          "captcha"
+        ],
+        "additionalProperties": false
+      },
+      "ListSessionsQuery": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "scheduling",
+              "starting",
+              "ready",
+              "active",
+              "stopping",
+              "stopped",
+              "failed",
+              "timed_out"
+            ]
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      },
+      "ListSessionsResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "Profile": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^prf_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "The current version. 0 until a session has saved one."
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "The current version's stored size; 0 if none."
+          },
+          "savedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "savedBySessionId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "chromeMajor": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The Chrome major version that saved the current version. Only the same or a newer Chrome opens it."
+          },
+          "inUseBy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The session that will save the next version (`persist: true`), if one is running."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "metadata",
+          "version",
+          "bytes",
+          "savedAt",
+          "savedBySessionId",
+          "chromeMajor",
+          "inUseBy",
+          "createdAt"
+        ],
+        "additionalProperties": false
+      },
+      "CreateProfileRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "Unique among the project's profiles.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ListProfilesQuery": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      },
+      "ListProfilesResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Profile"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "SessionEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "session.requested"
+              },
+              "data": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "session.scheduled"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "nodeId": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9]{0,15}$"
+                  }
+                },
+                "required": [
+                  "nodeId"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "session.starting"
+              },
+              "data": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "session.ready"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "startPath": {
+                    "type": "string",
+                    "enum": [
+                      "hot",
+                      "warm",
+                      "cold"
+                    ]
+                  },
+                  "readyMs": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "startPath",
+                  "readyMs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "session.attached"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "connections": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "connections"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "session.detached"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "connections": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "connections"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "session.stopping"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "endReason": {
+                    "type": "string",
+                    "enum": [
+                      "client_stop",
+                      "client_disconnect",
+                      "idle_timeout",
+                      "max_lifetime",
+                      "browser_crash",
+                      "oom",
+                      "runtime_crash",
+                      "node_lost",
+                      "start_timeout",
+                      "disk_limit",
+                      "node_refused",
+                      "profile_unavailable"
+                    ]
+                  }
+                },
+                "required": [
+                  "endReason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "session.ended"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "endReason": {
+                    "type": "string",
+                    "enum": [
+                      "client_stop",
+                      "client_disconnect",
+                      "idle_timeout",
+                      "max_lifetime",
+                      "browser_crash",
+                      "oom",
+                      "runtime_crash",
+                      "node_lost",
+                      "start_timeout",
+                      "disk_limit",
+                      "node_refused",
+                      "profile_unavailable"
+                    ]
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "requested",
+                      "scheduling",
+                      "starting",
+                      "ready",
+                      "active",
+                      "stopping",
+                      "stopped",
+                      "failed",
+                      "timed_out"
+                    ]
+                  }
+                },
+                "required": [
+                  "endReason",
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "egress.denied"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "host": {
+                    "type": "string",
+                    "maxLength": 253
+                  },
+                  "port": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "blocked_address",
+                      "port_not_allowed",
+                      "not_in_allow_list",
+                      "in_deny_list",
+                      "resolve_failed",
+                      "connection_cap",
+                      "no_policy",
+                      "upstream_blocked",
+                      "upstream_unreachable",
+                      "upstream_auth_failed",
+                      "upstream_refused",
+                      "upstream_tls_failed"
+                    ]
+                  },
+                  "count": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "host",
+                  "port",
+                  "reason",
+                  "count"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "runtime.crashed"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "process": {
+                    "type": "string",
+                    "enum": [
+                      "chrome",
+                      "runtimed",
+                      "xvfb",
+                      "container"
+                    ]
+                  },
+                  "exitCode": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "signal": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "process",
+                  "exitCode",
+                  "signal"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "node.lost"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "nodeId": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9]{0,15}$"
+                  }
+                },
+                "required": [
+                  "nodeId"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "captcha.detected"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "$ref": "#/components/schemas/CaptchaProvider"
+                  },
+                  "host": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253,
+                        "pattern": "^[a-z0-9.-]+$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "present": {
+                    "minItems": 1,
+                    "maxItems": 9,
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/CaptchaProvider"
+                    }
+                  }
+                },
+                "required": [
+                  "provider",
+                  "host",
+                  "present"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "captcha.cleared"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "$ref": "#/components/schemas/CaptchaProvider"
+                  },
+                  "present": {
+                    "maxItems": 9,
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/CaptchaProvider"
+                    }
+                  }
+                },
+                "required": [
+                  "provider",
+                  "present"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "captcha.solving"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "recaptcha",
+                      "hcaptcha",
+                      "turnstile"
+                    ]
+                  },
+                  "host": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253,
+                        "pattern": "^[a-z0-9.-]+$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "provider",
+                  "host"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "captcha.solved"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "recaptcha",
+                      "hcaptcha",
+                      "turnstile"
+                    ]
+                  },
+                  "host": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253,
+                        "pattern": "^[a-z0-9.-]+$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "durationMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "callback": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "host",
+                  "durationMs",
+                  "callback"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "captcha.failed"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "$ref": "#/components/schemas/CaptchaProvider"
+                  },
+                  "host": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253,
+                        "pattern": "^[a-z0-9.-]+$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason": {
+                    "$ref": "#/components/schemas/CaptchaSolveFailure"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "host",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "profile.restored"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "profileId": {
+                    "type": "string",
+                    "pattern": "^prf_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+                  },
+                  "version": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "ms": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "profileId",
+                  "version",
+                  "bytes",
+                  "ms"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "profile.saved"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "profileId": {
+                    "type": "string",
+                    "pattern": "^prf_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+                  },
+                  "version": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "profileId",
+                  "version",
+                  "bytes"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^evt_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "sessionId": {
+                "type": "string",
+                "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "type": {
+                "type": "string",
+                "const": "profile.save_failed"
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "profileId": {
+                    "type": "string",
+                    "pattern": "^prf_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "unclean_end",
+                      "not_started",
+                      "browser_gone",
+                      "chrome_did_not_exit",
+                      "timeout",
+                      "too_large",
+                      "invalid_archive",
+                      "storage_full",
+                      "storage_error",
+                      "project_quota",
+                      "deleted",
+                      "stale",
+                      "node_lost",
+                      "no_report"
+                    ]
+                  }
+                },
+                "required": [
+                  "profileId",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "sessionId",
+              "at",
+              "type",
+              "data"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "ListEventsQuery": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "default": 100,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      },
+      "ListEventsResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionEvent"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "TokenClaims": {
+        "type": "object",
+        "properties": {
+          "iss": {
+            "type": "string",
+            "const": "kestrel"
+          },
+          "sub": {
+            "type": "string",
+            "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "prj": {
+            "type": "string",
+            "pattern": "^prj_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "nod": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]{0,15}$"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "cdp",
+              "view",
+              "control"
+            ]
+          },
+          "iat": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "exp": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "jti": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 64
+          },
+          "once": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "iss",
+          "sub",
+          "prj",
+          "nod",
+          "scope",
+          "iat",
+          "exp"
+        ],
+        "additionalProperties": false
+      },
+      "MintTokenRequest": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "cdp",
+              "view",
+              "control"
+            ]
+          },
+          "ttlMs": {
+            "type": "integer",
+            "minimum": 10000,
+            "maximum": 3600000
+          },
+          "singleUse": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "additionalProperties": false
+      },
+      "SessionToken": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "cdp",
+              "view",
+              "control"
+            ]
+          },
+          "token": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "token",
+          "url",
+          "expiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "ComputerRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "screenshot"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "click"
+              },
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "button": {
+                "default": "left",
+                "type": "string",
+                "enum": [
+                  "left",
+                  "middle",
+                  "right"
+                ]
+              },
+              "clicks": {
+                "default": 1,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3
+              },
+              "screenshot": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "x",
+              "y"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "move"
+              },
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "screenshot": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "x",
+              "y"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "scroll"
+              },
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "dx": {
+                "default": 0,
+                "type": "integer",
+                "minimum": -10000,
+                "maximum": 10000
+              },
+              "dy": {
+                "type": "integer",
+                "minimum": -10000,
+                "maximum": 10000
+              },
+              "screenshot": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "x",
+              "y",
+              "dy"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "type"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 10000
+              },
+              "screenshot": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "key"
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              },
+              "screenshot": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "key"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "ComputerResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          },
+          "screenshot": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "height": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "width",
+          "height",
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "ProjectQuotas": {
+        "type": "object",
+        "properties": {
+          "maxConcurrentSessions": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "createsPerMinute": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
+          }
+        },
+        "required": [
+          "maxConcurrentSessions",
+          "createsPerMinute"
+        ],
+        "additionalProperties": false
+      },
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^prj_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^org_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          "quotas": {
+            "$ref": "#/components/schemas/ProjectQuotas"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "admin": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "org",
+          "quotas",
+          "createdAt",
+          "admin"
+        ],
+        "additionalProperties": false
+      },
+      "ApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^key_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "admin": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastUsedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revokedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "admin",
+          "createdAt",
+          "lastUsedAt",
+          "revokedAt"
+        ],
+        "additionalProperties": false
+      },
+      "ListApiKeysResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKey"
+            }
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "additionalProperties": false
+      },
+      "CreateApiKeyRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "CreatedApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^key_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "admin": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastUsedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revokedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "admin",
+          "createdAt",
+          "lastUsedAt",
+          "revokedAt",
+          "key"
+        ],
+        "additionalProperties": false
+      },
+      "UsageQuery": {
+        "type": "object",
+        "properties": {
+          "days": {
+            "default": 30,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 90
+          }
+        }
+      },
+      "UsageDay": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "sessions": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "browserSeconds": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "date",
+          "sessions",
+          "failed",
+          "browserSeconds"
+        ],
+        "additionalProperties": false
+      },
+      "UsageReport": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "sessions": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "browserSeconds": {
+                "type": "number",
+                "minimum": 0
+              },
+              "captchaSessions": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "sessions",
+              "failed",
+              "browserSeconds",
+              "captchaSessions"
+            ],
+            "additionalProperties": false
+          },
+          "live": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageDay"
+            }
+          },
+          "byEndReason": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "endReason": {
+                  "type": "string",
+                  "enum": [
+                    "client_stop",
+                    "client_disconnect",
+                    "idle_timeout",
+                    "max_lifetime",
+                    "browser_crash",
+                    "oom",
+                    "runtime_crash",
+                    "node_lost",
+                    "start_timeout",
+                    "disk_limit",
+                    "node_refused",
+                    "profile_unavailable"
+                  ]
+                },
+                "sessions": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "endReason",
+                "sessions"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "totals",
+          "live",
+          "days",
+          "byEndReason"
+        ],
+        "additionalProperties": false
+      },
+      "AdminNode": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]{0,15}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "lost"
+            ]
+          },
+          "fenced": {
+            "type": "boolean"
+          },
+          "slotsTotal": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "hotCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "liveSessions": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "runtimeVersion": {
+            "type": "string"
+          },
+          "registeredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastHeartbeatAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lostAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "fenced",
+          "slotsTotal",
+          "hotCount",
+          "liveSessions",
+          "runtimeVersion",
+          "registeredAt",
+          "lastHeartbeatAt",
+          "lostAt"
+        ],
+        "additionalProperties": false
+      },
+      "ListAdminNodesResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminNode"
+            }
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "additionalProperties": false
+      },
+      "AdminCreateOrgRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "AdminOrg": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^org_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "createdAt"
+        ],
+        "additionalProperties": false
+      },
+      "AdminCreateProjectRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "pattern": "^org_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "quotas": {
+            "type": "object",
+            "properties": {
+              "maxConcurrentSessions": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000
+              },
+              "createsPerMinute": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100000
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "orgId",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "`Authorization: Bearer ksl_...`"
+      },
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key"
+      }
+    }
+  },
+  "paths": {
+    "/v1/sessions": {
+      "post": {
+        "operationId": "createSession",
+        "summary": "Create a session",
+        "description": "Returns when the browser is ready to connect to. `capacity_exhausted` (503) means the platform is full; `quota_exceeded` (429) means the project is over its limit. With `waitForCapacityMs` a full platform is retried before answering.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An earlier request with the same idempotencyKey: the original session, in its current state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The session, ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "quota_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "capacity_exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listSessions",
+        "summary": "List sessions, newest first",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "requested",
+                "scheduling",
+                "starting",
+                "ready",
+                "active",
+                "stopping",
+                "stopped",
+                "failed",
+                "timed_out"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of sessions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSessionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Get a session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}/stop": {
+      "post": {
+        "operationId": "stopSession",
+        "summary": "Stop a session",
+        "description": "Idempotent. Returns at once with the session in `stopping` (or already ended); teardown continues in the background.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}/tokens": {
+      "post": {
+        "operationId": "mintSessionToken",
+        "summary": "Mint a token for a running session",
+        "description": "`cdp` re-issues the connect URL. `view` opens live view (frames only) and `control` opens it with mouse and keyboard; both default to 10 minutes and may be up to 1 hour, never past the session's own deadline plus one minute. `singleUse` tokens open one connection and live at most 5 minutes. For `view` and `control`, `url` is a viewer page with the token in the URL fragment; open it in a browser or an iframe-free tab.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MintTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}/recording": {
+      "get": {
+        "operationId": "getSessionRecording",
+        "summary": "A session's video",
+        "description": "Fragmented MP4 of the browser window, for a session created with `recording: true`. Available while the session runs (up to its latest fragment) and for 24 hours after it ends, from the node it ran on. 404 if the session was not recorded, its node could not record, or the recording has been removed.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The video.",
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}/computer": {
+      "post": {
+        "operationId": "sessionComputer",
+        "summary": "Screenshot, mouse and keyboard over HTTP",
+        "description": "One action per call on the session's current page, no CDP client needed. Coordinates are CSS pixels of the page (see `width` and `height` in the response). Each call counts as activity for `idleTimeout`. Any action except `screenshot` may set `screenshot: true` to get a PNG of the result.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The action ran.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComputerResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}/events": {
+      "get": {
+        "operationId": "listSessionEvents",
+        "summary": "A session's timeline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^ses_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of events, oldest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEventsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/profiles": {
+      "post": {
+        "operationId": "createProfile",
+        "summary": "Create a profile",
+        "description": "An empty profile: saved browser state (cookies, `localStorage` and IndexedDB) that sessions start from with `profile: { id }` and save into with `profile: { id, persist: true }`. `quota_exceeded` past the project's profile limit; `invalid_request` on a deployment without profiles.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProfileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The profile.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "quota_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listProfiles",
+        "summary": "List profiles, newest first",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of profiles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListProfilesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/profiles/{id}": {
+      "get": {
+        "operationId": "getProfile",
+        "summary": "Get a profile",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^prf_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The profile.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteProfile",
+        "summary": "Delete a profile",
+        "description": "Removes the profile and its saved state. Sessions already running keep their browser state; a running writer's save is discarded. A second delete is `not_found`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^prf_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/project": {
+      "get": {
+        "operationId": "getProject",
+        "summary": "The caller's project",
+        "description": "The project the API key belongs to, its quotas, and whether the key is an admin key.",
+        "responses": {
+          "200": {
+            "description": "The project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/api-keys": {
+      "get": {
+        "operationId": "listApiKeys",
+        "summary": "The project's API keys, newest first",
+        "description": "Revoked keys are included. The keys themselves are never returned.",
+        "responses": {
+          "200": {
+            "description": "The keys.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListApiKeysResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createApiKey",
+        "summary": "Create an API key",
+        "description": "The response carries the key once; only a hash is stored. Keys made here are never admin keys.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/api-keys/{id}/revoke": {
+      "post": {
+        "operationId": "revokeApiKey",
+        "summary": "Revoke an API key",
+        "description": "It stops authenticating at once. Idempotent. A key cannot revoke itself (`conflict`).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^key_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKey"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "operationId": "getUsage",
+        "summary": "Sessions and browser time per day",
+        "description": "Whole UTC days ending today. Browser time is counted on the day a session was created.",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/nodes": {
+      "get": {
+        "operationId": "adminListNodes",
+        "summary": "Every node (admin keys)",
+        "description": "`not_found` for a key that is not an admin key.",
+        "responses": {
+          "200": {
+            "description": "The nodes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAdminNodesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/orgs": {
+      "post": {
+        "operationId": "adminCreateOrg",
+        "summary": "Create an organisation (admin keys)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminCreateOrgRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The organisation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminOrg"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/projects": {
+      "post": {
+        "operationId": "adminCreateProject",
+        "summary": "Create a project in an organisation (admin keys)",
+        "description": "Names are unique within an organisation (`conflict`).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminCreateProjectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/projects/{id}/api-keys": {
+      "post": {
+        "operationId": "adminCreateApiKey",
+        "summary": "Create an API key in any project (admin keys)",
+        "description": "The key is shown once and is never an admin key.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^prj_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "health",
+        "summary": "Liveness",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The API process is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "const": "ok"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "summary": "This document",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1"
+          }
+        }
+      }
+    }
+  }
+}

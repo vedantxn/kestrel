@@ -4,7 +4,7 @@ Kestrel is an open-source cloud browser platform for AI agents. It is finished (
 
 ## Rules
 
-- **Contracts first.** Components talk only through `packages/contracts`. Change a contract in its own commit, say which consumers it affects, and bump `CONTRACTS_VERSION`. Run `npm run openapi` after changing a public schema; CI fails if `docs/api/openapi.json` is stale.
+- **Contracts first.** Components talk only through `packages/contracts`. Change a contract in its own commit, say which consumers it affects, and bump `CONTRACTS_VERSION`. Run `npm run openapi` after changing a public schema; CI fails if `packages/contracts/openapi.json` is stale.
 - **Everything inside a session container is untrusted.** Anything read back from one is hostile input and is validated with a schema.
 - **Every connection to an address a caller chose goes through the egress gateway.**
 - **State changes are conditional updates** ("set to X only if currently Y") and write an event.

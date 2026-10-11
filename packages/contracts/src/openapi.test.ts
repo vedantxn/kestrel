@@ -5,10 +5,7 @@ import SwaggerParser from "@apidevtools/swagger-parser";
 import { describe, expect, it } from "vitest";
 import { buildOpenApiDocument } from "./openapi.js";
 
-const committed = resolve(
-  fileURLToPath(import.meta.url),
-  "../../../../docs/api/openapi.json",
-);
+const committed = resolve(fileURLToPath(import.meta.url), "../../openapi.json");
 
 describe("openapi", () => {
   it("is a valid OpenAPI document with every reference resolvable", async () => {
@@ -51,7 +48,7 @@ describe("openapi", () => {
     );
   });
 
-  it("matches docs/api/openapi.json (run `npm run openapi` after changing a schema)", () => {
+  it("matches packages/contracts/openapi.json (run `npm run openapi` after changing a schema)", () => {
     const onDisk = JSON.parse(readFileSync(committed, "utf8"));
     expect(onDisk).toEqual(JSON.parse(JSON.stringify(buildOpenApiDocument())));
   });
