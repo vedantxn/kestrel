@@ -31,3 +31,6 @@ infra/terraform/**/tfplan
 .next/
 next-env.d.ts
 infra/terraform/**/terraform.tfvars
+
+# Architecture notes and results: kept locally, not in the repo
+/docs/

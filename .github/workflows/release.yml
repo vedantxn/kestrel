@@ -1,7 +1,8 @@
 name: Release
 
 # A tag v<version> publishes @kestrel/sdk, @kestrel/cli and snapshot-entropy-check to npm,
-# kestrel-browser to PyPI, and the GitHub release (notes: docs/results/v<version>.md). The images
+# kestrel-browser to PyPI, and the GitHub release (notes: docs/results/v<version>.md if it is in the
+# checkout, otherwise generated). The images
 # are published by images.yml from the same tag. Every package's version must equal the tag's.
 #
 # Needs: the repository secret NPM_TOKEN (an npm automation token that can publish @kestrel/*), and
