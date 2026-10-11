@@ -1,6 +1,6 @@
 {
   "name": "@kestrel/cli",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "license": "Apache-2.0",
   "description": "Command line for Kestrel, open-source cloud browsers for AI agents",
   "repository": {
@@ -37,7 +37,7 @@
     "prepublishOnly": "tsc -b"
   },
   "dependencies": {
-    "@kestrel/sdk": "^0.1.0"
+    "@kestrel/sdk": "^1.0.0"
   },
   "publishConfig": {
     "access": "public",

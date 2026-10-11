@@ -18,7 +18,7 @@ import httpx
 from ._errors import ApiError, KestrelError
 from ._types import CaptchaOptions, NetworkPolicy, ProxyConfig, SessionProfile, Viewport
 
-SDK_VERSION = "0.1.0"
+SDK_VERSION = "1.0.0"
 DEFAULT_BASE_URL = "http://localhost:8080"
 # The longest exponential backoff step; a Retry-After from the API may ask for longer.
 MAX_BACKOFF = 8.0
