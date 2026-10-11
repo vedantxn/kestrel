@@ -1,4 +1,4 @@
-"""The SDK's types against the published API description, ``docs/api/openapi.json``.
+"""The SDK's types against the published API description, ``packages/contracts/openapi.json``.
 
 The TypeScript SDK checks the same thing at compile time against the zod contracts; here the
 generated OpenAPI document is the source, since it is what the Python side can read. A schema
@@ -52,7 +52,7 @@ from kestrel_browser._types import (
     ProxyProvider,
 )
 
-OPENAPI = Path(__file__).resolve().parents[3] / "docs" / "api" / "openapi.json"
+OPENAPI = Path(__file__).resolve().parents[3] / "packages" / "contracts" / "openapi.json"
 SCHEMAS: dict[str, Any] = json.loads(OPENAPI.read_text())["components"]["schemas"]
 
 

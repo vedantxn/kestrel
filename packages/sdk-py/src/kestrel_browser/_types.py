@@ -1,6 +1,6 @@
 """The public API's types as dataclasses with snake_case attributes.
 
-They mirror the schemas in ``docs/api/openapi.json``; ``tests/test_parity.py`` fails when a
+They mirror the schemas in ``packages/contracts/openapi.json``; ``tests/test_parity.py`` fails when a
 schema gains a field or an enum value that is not copied here. Parsing ignores unknown
 fields, so a newer server does not break an older client, and every object keeps the dict
 it was built from on ``.raw``. Durations are milliseconds, as in the API.
