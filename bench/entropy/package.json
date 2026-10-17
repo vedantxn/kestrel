@@ -1,6 +1,6 @@
 {
   "name": "snapshot-entropy-check",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "license": "Apache-2.0",
   "description": "Check that cloud browsers do not share randomness: Math.random, crypto, WebCrypto keys and TLS ClientHellos across sessions",
   "repository": {

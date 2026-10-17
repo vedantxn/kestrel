@@ -23,7 +23,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-b4441c"></a>
-  <img alt="v1.0.0" src="https://img.shields.io/badge/release-v1.0.0-b4441c">
+  <img alt="v1.0.1" src="https://img.shields.io/badge/release-v1.0.1-b4441c">
 </p>
 
 <picture>
@@ -31,7 +31,7 @@
   <img alt="A Kestrel session: the agent's calls on the left, the live browser on the right, where a CAPTCHA has been detected and a person has taken control." src=".github/assets/hero-light.png">
 </picture>
 
-**Status:** v1.0.0, finished and in maintenance (bug fixes, docs and benchmark corrections). Licensed under [Apache-2.0](LICENSE).
+**Status:** v1.0.1, finished and in maintenance (bug fixes, docs and benchmark corrections). Licensed under [Apache-2.0](LICENSE).
 
 ## What it does
 
@@ -76,14 +76,16 @@ On one x86_64 Linux machine (Ubuntu 22.04/24.04, Debian 12/13 or Amazon Linux 20
 
 ```
 # On a trusted network (no TLS; http:// and ws://):
-curl -fsSL https://raw.githubusercontent.com/vedantxn/kestrel/v1.0.0/install.sh | sudo bash -s -- --version v1.0.0 --local
+curl -fsSLo install.sh https://raw.githubusercontent.com/vedantxn/kestrel/v1.0.1/install.sh && sudo bash install.sh --version v1.0.1 --local
 
 # On the internet, with TLS (ports 80, 443 and 8443 open):
-curl -fsSL https://raw.githubusercontent.com/vedantxn/kestrel/v1.0.0/install.sh | sudo bash -s -- --version v1.0.0 --hostname kestrel.example.com
+curl -fsSLo install.sh https://raw.githubusercontent.com/vedantxn/kestrel/v1.0.1/install.sh && sudo bash install.sh --version v1.0.1 --hostname kestrel.example.com
 #   no domain? --sslip uses <your-ip>.sslip.io
 ```
 
 It checks the machine first and says what is missing, then prepares Docker and the data volume, pulls the images, starts everything, makes one test session and prints the dashboard URL and an admin API key. Re-running it upgrades in place. Options: `install.sh --help`. On AWS, Terraform can make the host for you: [`docs/runbook-aws-setup.md`](https://kestrel-browsers.vercel.app/docs/install).
+
+Capacity is sized for the machine on the first install: about one browser at a time per 2 GB of memory after 6 GB for the platform, at most two per CPU (5 on 16 GB, 13 on 32 GB). To choose it, pass `SLOTS_A` (browsers at once) and `POOL_A` (browsers kept ready), for example `sudo SLOTS_A=20 POOL_A=5 bash install.sh ...`. Later runs keep the last values.
 
 Not supported: arm64 hosts (so no Apple-silicon VMs), macOS or Windows hosts, more than one machine, stealth or fingerprint changes, and CAPTCHA solving.
 
