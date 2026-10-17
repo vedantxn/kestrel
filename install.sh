@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Install Kestrel on one x86_64 Linux machine (Ubuntu 22.04/24.04, Debian 12/13 or Amazon Linux 2023).
 #
-#   curl -fsSL https://raw.githubusercontent.com/vedantxn/kestrel/main/install.sh | sudo bash -s -- --local
+#   curl -fsSLo install.sh https://raw.githubusercontent.com/vedantxn/kestrel/main/install.sh && sudo bash install.sh --local
+#
+# (Download, then run: piped into bash, a failed download still ends with status 0.)
 #
 # Choose where clients reach it (one of):
 #   --local [--address A] [--port P]   local mode: http://A[:P], no TLS, for a trusted network only
@@ -18,6 +20,8 @@
 #   --take-over-docker                 proceed although Docker already holds containers or images
 #   --insecure-public                  allow local mode on an address that is not private
 #   --dir DIR                          where the source goes (default /srv/kestrel)
+# Capacity: sized for the machine on the first install (about one browser per 2 GB after 6 GB for
+# the platform, at most two per CPU), then kept. To choose it: sudo SLOTS_A=20 POOL_A=5 bash install.sh ...
 #
 # Re-running it is safe: it updates the source to REF and deploys again, keeping data and keys.
 set -euo pipefail
@@ -42,7 +46,7 @@ while [ $# -gt 0 ]; do
     --take-over-docker) TAKE_OVER=1; shift;;
     --insecure-public) INSECURE_PUBLIC=1; shift;;
     --dir) DIR=$2; DIR_GIVEN=1; shift 2;;
-    -h|--help) sed -n '2,24p' "$0" 2>/dev/null || echo "see https://github.com/vedantxn/kestrel#install"; exit 0;;
+    -h|--help) awk 'NR > 1 && !/^#/ {exit} NR > 1' "$0" 2>/dev/null || echo "see https://github.com/vedantxn/kestrel#install"; exit 0;;
     *) echo "unknown option $1 (try --help)" >&2; exit 2;;
   esac
 done
@@ -62,11 +66,12 @@ if grep -qi microsoft /proc/version 2>/dev/null; then need "WSL is not supported
 if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container >/dev/null 2>&1; then
   need "this is a container ($(systemd-detect-virt --container)): Kestrel needs a VM or a real machine"
 fi
+# Read in a subshell and keep three fields: os-release also sets VERSION, which would replace --version.
 # shellcheck disable=SC1091
-. /etc/os-release 2>/dev/null || true
-case "${ID:-}:${VERSION_ID:-}" in
+eval "$(. /etc/os-release 2>/dev/null; printf 'OS_ID=%q OS_VERSION_ID=%q OS_NAME=%q' "${ID:-}" "${VERSION_ID:-}" "${PRETTY_NAME:-}")"
+case "$OS_ID:$OS_VERSION_ID" in
   ubuntu:22.04|ubuntu:24.04|debian:12|debian:13|amzn:2023) ;;
-  *) need "${PRETTY_NAME:-this OS} is untested: use Ubuntu 22.04/24.04, Debian 12/13 or Amazon Linux 2023";;
+  *) need "${OS_NAME:-this OS} is untested: use Ubuntu 22.04/24.04, Debian 12/13 or Amazon Linux 2023";;
 esac
 kernel=$(uname -r | cut -d. -f1-2)
 [ "$(printf '%s\n5.15\n' "$kernel" | sort -V | head -1)" = 5.15 ] || need "kernel $kernel is older than 5.15"
@@ -126,7 +131,7 @@ if [ ${#problems[@]} -gt 0 ]; then
   printf '  - %s\n' "${problems[@]}" >&2
   exit 1
 fi
-echo "  ok: x86_64, ${cpus} CPUs, ${mem_gib} GiB, ${PRETTY_NAME:-Linux}, kernel $(uname -r)"
+echo "  ok: x86_64, ${cpus} CPUs, ${mem_gib} GiB, ${OS_NAME:-Linux}, kernel $(uname -r)"
 echo "  will serve $PUBLIC_URL"
 
 # --- the source ----------------------------------------------------------------------------------
@@ -172,6 +177,6 @@ Next:
   - Open $PUBLIC_URL and sign in with the admin API key (above on a first install; kept in
     /var/lib/kestrel/secrets/owner-api-key).
   - Make a key for your code on the dashboard's API keys page, then follow
-    https://github.com/vedantxn/kestrel/blob/main/docs/agents/quickstart.md
+    https://kestrel-browsers.vercel.app/docs/quickstart
   - Check it yourself: $DIR/bin/verify $PUBLIC_URL <api key>
 NEXT
