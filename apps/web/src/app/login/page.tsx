@@ -19,9 +19,9 @@ export default async function LoginPage({
       subtitle="Cloud browsers for AI agents"
       footer={
         <>
-          No key? On the host, run{" "}
+          No key? The installer printed the admin key; on the host it is in{" "}
           <code className="font-mono">
-            npm run admin -w @kestrel/api -- create-key
+            /var/lib/kestrel/secrets/owner-api-key
           </code>
         </>
       }

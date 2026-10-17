@@ -110,7 +110,14 @@ export async function ApiKeysPage({
       <p className="text-xs text-muted-foreground">
         The key you signed in with cannot be revoked from here. Admin keys are
         made only on the host, with{" "}
-        <code className="font-mono">admin create-key --admin</code>.
+        <code className="font-mono">admin create-key --admin</code> (
+        <a
+          className="underline underline-offset-2"
+          href="https://kestrel-browsers.vercel.app/docs/quickstart"
+        >
+          the full command
+        </a>
+        ).
       </p>
     </>
   );
