@@ -10,6 +10,8 @@
 #   RUNTIME_A=microvm: node a's browsers are Firecracker microVMs (ADR 0017); node b stays Docker.
 #   MICROVM_RECORDING=docker: node a's recording sessions are Docker containers (the escape hatch);
 #   by default they are VMs too, their recordings pulled out (docs/lld/microvm-recording.md).
+#   SLOTS_A=<n> POOL_A=<n>: node a's browsers at once, and how many it keeps ready. The first deploy
+#     sizes them for the machine; later deploys keep the last values unless given again.
 #
 # Builds or pulls the images, makes the secrets the first time, starts Postgres, applies migrations,
 # creates the first project and API keys, starts the platform services and makes one session.
@@ -144,14 +146,33 @@ if [ -z "$TEST_PAGE_URL" ]; then
   if [ -n "$ACCOUNT" ]; then TEST_PAGE_URL="https://kestrel-testpage-$ACCOUNT.s3.${REGION:-us-east-1}.amazonaws.com/test/index.html"; fi
 fi
 NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443}]'
-SIZES="SLOTS_A=${SLOTS_A:-5}\nPOOL_A=${POOL_A:-2}"
+# Sizes: as given, else as last deployed with the same nodes, else the defaults below. A re-run
+# (an upgrade) must not quietly put a host sized by hand back to the defaults.
+TOPOLOGY=one; [ "$TWO" = 1 ] && TOPOLOGY=two
+kept() { [ "$(prev TOPOLOGY)" = "$TOPOLOGY" ] && prev "$1"; return 0; }
+SLOTS_A=${SLOTS_A:-$(kept SLOTS_A)}; POOL_A=${POOL_A:-$(kept POOL_A)}
 if [ "$TWO" = 1 ]; then
   # Two nodes on one host, to exercise the multi-node paths (sizes: v1 plan 4.12).
   NODES='[{"id":"a","address":"http://127.0.0.1:7001","secretFile":"/secrets/node-a.secret","connectPort":8443},{"id":"b","address":"http://127.0.0.1:7002","secretFile":"/secrets/node-b.secret","connectPort":8444}]'
+  SLOTS_B=${SLOTS_B:-$(kept SLOTS_B)}; POOL_B=${POOL_B:-$(kept POOL_B)}
   SIZES="SLOTS_A=${SLOTS_A:-3}\nPOOL_A=${POOL_A:-1}\nSLOTS_B=${SLOTS_B:-2}\nPOOL_B=${POOL_B:-1}"
+else
+  # One node sized for this machine (HLD 10): a slot per 2 GB after 6 GB for the platform, at most
+  # two per CPU (2:1 overcommit), at least 2; a pool of a quarter of the slots, at least 2. MemTotal
+  # is a little under the machine's size; kB / 10^6 lands on it (16 GB -> 16, so 5 slots as before).
+  mem_gb=$(awk '/MemTotal/ {printf "%d", $2/1000000}' /proc/meminfo)
+  fit=$(( (mem_gb - 6) / 2 )); [ "$fit" -gt $(( 2 * $(nproc) )) ] && fit=$(( 2 * $(nproc) ))
+  [ "$fit" -lt 2 ] && fit=2
+  pool=$(( ${SLOTS_A:-$fit} / 4 )); [ "$pool" -lt 2 ] && pool=2
+  SLOTS_A=${SLOTS_A:-$fit}; POOL_A=${POOL_A:-$pool}
+  echo "node a: $SLOTS_A slots, pool $POOL_A (sized for ${mem_gb} GB and $(nproc) CPUs: $fit; override with SLOTS_A / POOL_A)"
+  SIZES="SLOTS_A=$SLOTS_A\nPOOL_A=$POOL_A"
 fi
 # Pool tuning (optional): warm browsers beyond the slots, and how many to start at once.
-SIZES="$SIZES\nPOOL_HEADROOM=${POOL_HEADROOM:-0}\nREFILL_AT_ONCE=${REFILL_AT_ONCE:-}\nRECORDING=${RECORDING:-on}\nREAP_MAX_QUEUE=${REAP_MAX_QUEUE:-4}\nRECORDING_POOL=${RECORDING_POOL:-1}"
+POOL_HEADROOM=${POOL_HEADROOM:-$(kept POOL_HEADROOM)}; REFILL_AT_ONCE=${REFILL_AT_ONCE:-$(kept REFILL_AT_ONCE)}
+REAP_MAX_QUEUE=${REAP_MAX_QUEUE:-$(kept REAP_MAX_QUEUE)}; RECORDING_POOL=${RECORDING_POOL:-$(kept RECORDING_POOL)}
+RECORDING=${RECORDING:-$(kept RECORDING)}
+SIZES="$SIZES\nPOOL_HEADROOM=${POOL_HEADROOM:-0}\nREFILL_AT_ONCE=${REFILL_AT_ONCE:-}\nRECORDING=${RECORDING:-on}\nREAP_MAX_QUEUE=${REAP_MAX_QUEUE:-4}\nRECORDING_POOL=${RECORDING_POOL:-1}\nTOPOLOGY=$TOPOLOGY"
 # The solver service and URL persist across deploys unless given again (CAPTCHA_SOLVER=none turns it off).
 CAPTCHA_SOLVER=${CAPTCHA_SOLVER-$(prev CAPTCHA_SOLVER)}
 CAPTCHA_SOLVER_URL=${CAPTCHA_SOLVER_URL-$(prev CAPTCHA_SOLVER_URL)}
